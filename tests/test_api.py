@@ -28,6 +28,39 @@ def setup_function() -> None:
     rate_limiter.reset()
 
 
+def test_mock_mode_seeds_builtin_models() -> None:
+    from app.db import init_db
+    from app.models import ModelConfig
+
+    init_db()
+    with SessionLocal() as db:
+        names = set(db.query(ModelConfig.public_name).all())
+    assert {"lok-chat", "lok-reason", "lok-vision"} <= {item[0] for item in names}
+
+
+@pytest.mark.asyncio
+async def test_seeded_builtin_model_is_directly_callable() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        key_response = await client.post("/admin/api-keys", headers={"X-Admin-Token": "test-admin"}, json={"name": "builtin-model-key"})
+        assert key_response.status_code == 200
+        await client.post(
+            f"/admin/api-keys/{key_response.json()['id']}/balance",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"amount_micros": 100_000, "idempotency_key": "builtin-model-topup"},
+        )
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key_response.json()['key']}"},
+            json={"model": "lok-chat", "messages": [{"role": "user", "content": "hello"}]},
+        )
+    assert response.status_code == 200
+    assert response.json()["model"] == "lok-chat"
+
+
 @pytest.mark.asyncio
 async def test_create_key_model_and_chat() -> None:
     transport = httpx.ASGITransport(app=app)

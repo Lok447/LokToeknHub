@@ -376,13 +376,15 @@ async function loadModels() {
   const result = await portalApi("/portal/models");
   portalState.models = result.data;
   document.getElementById("portal-models-table").innerHTML = result.data.length ? result.data.map((item) => `
-    <tr>
-      <td><strong>${escapeHtml(item.public_name)}</strong></td>
-      <td>${formatMoney(item.input_price_micros_per_1k)}</td>
-      <td>${formatMoney(item.output_price_micros_per_1k)}</td>
-      <td><span class="badge neutral">OpenAI compatible</span></td>
-    </tr>
-  `).join("") : emptyRow(4);
+    <article class="model-catalog-card ${item.builtin ? "is-builtin" : ""}">
+      <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${item.builtin ? "sparkles" : "boxes"}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><p>${escapeHtml(item.summary)}</p></div></div>
+      <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
+      <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
+      <div class="model-price-grid"><div><span>输入 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
+      <div class="model-card-footer"><span><i data-lucide="plug-zap"></i> OpenAI 兼容</span><code>/v1/chat/completions</code></div>
+    </article>
+  `).join("") : '<div class="model-catalog-empty"><i data-lucide="boxes"></i><span>暂无可用模型</span></div>';
+  portalIcons();
 }
 
 async function loadUsage() {
@@ -809,6 +811,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (target.dataset.copy === "base-url") { await navigator.clipboard.writeText(document.getElementById("portal-base-url").textContent); portalToast("Base URL 已复制"); }
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
+    if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }
     if (target.dataset.keyDetail) keyDetailDialog(target.dataset.keyDetail);
     if (target.dataset.requestId) loadUsageDetail(target.dataset.requestId).catch((error) => portalToast(error.message, true));
   });

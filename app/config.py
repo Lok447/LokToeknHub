@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     auto_create_schema: bool = True
     admin_token: str = "change-me"
     mock_mode: bool = True
+    seed_builtin_models: bool = True
     default_provider_base_url: str = "http://localhost:4000/v1"
     default_provider_api_key: str = ""
     reservation_output_tokens: int = 1024

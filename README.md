@@ -1,4 +1,4 @@
-# LokSystem TOKEN 1.0
+# LokSystem TOKEN 1.1
 
 TOKEN 是 loksystem 的统一模型调用和用量计费平台 MVP。
 
@@ -19,6 +19,15 @@ uvicorn app.main:app --reload
 API 文档：`http://127.0.0.1:8000/docs`
 
 默认开启 `TOKEN_MOCK_MODE=true`，不需要真实模型供应商即可验证完整调用链路。生产环境应关闭 Mock，并通过 `provider_api_key_env` 引用环境变量中的供应商密钥，不要把密钥写入数据库。
+
+开发与试用环境会自动初始化 `lok-chat`、`lok-reason`、`lok-vision` 三个 LokSystem 内置模型。它们可立即使用 API Key 走完整的统一调用、计费、请求记录与渠道健康检查链路；Mock 返回仅用于联调验证，不代表真实模型推理。生产环境默认不创建这些模型，需在管理后台为真实上游完成模型和渠道配置后再对用户公开。
+
+内置模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
+
+```powershell
+$headers = @{ Authorization = "Bearer $($key.key)" }
+Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType "application/json" -Body '{"model":"lok-chat","messages":[{"role":"user","content":"你好，请介绍一下 LokSystem TOKEN"}]}'
+```
 
 ## 用户试用闭环 v0.2
 

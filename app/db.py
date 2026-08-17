@@ -1,7 +1,7 @@
 from collections.abc import Generator
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -71,6 +71,7 @@ def init_db() -> None:
                     "active": True,
                     "created_at": now,
                 })
+
                 account_id = connection.execute(
                     text("SELECT id FROM billing_accounts WHERE external_user_id = :external_user_id"),
                     {"external_user_id": external_user_id},
@@ -126,6 +127,40 @@ def init_db() -> None:
                     "description": item["description"],
                     "created_at": item["created_at"],
                 })
+
+    seed_builtin_models()
+
+
+def seed_builtin_models() -> None:
+    """Create a useful local trial catalogue without inventing production supply."""
+    if not settings.mock_mode or not settings.seed_builtin_models:
+        return
+    from .builtin_models import BUILTIN_MODELS
+    from .models import ModelChannel, ModelConfig
+
+    with SessionLocal() as db:
+        existing_names = set(db.scalars(select(ModelConfig.public_name)).all())
+        for builtin in BUILTIN_MODELS:
+            if builtin.public_name in existing_names:
+                continue
+            model = ModelConfig(
+                public_name=builtin.public_name,
+                upstream_model=builtin.public_name,
+                provider_base_url=settings.default_provider_base_url,
+                input_price_micros_per_1k=builtin.input_price_micros_per_1k,
+                output_price_micros_per_1k=builtin.output_price_micros_per_1k,
+            )
+            db.add(model)
+            db.flush()
+            db.add(ModelChannel(
+                model_config_id=model.id,
+                name="LokSystem built-in",
+                provider_base_url=model.provider_base_url,
+                upstream_model=model.upstream_model,
+                priority=100,
+                weight=100,
+            ))
+        db.commit()
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
+from .builtin_models import model_metadata
 from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
@@ -186,6 +187,7 @@ def list_models(account: BillingAccount = Depends(portal_account), db: Session =
         "public_name": item.public_name,
         "input_price_micros_per_1k": item.input_price_micros_per_1k,
         "output_price_micros_per_1k": item.output_price_micros_per_1k,
+        **model_metadata(item.public_name),
     } for item in models]}
 
 
