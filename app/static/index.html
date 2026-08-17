@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LokSystem TOKEN 控制台</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <section class="auth-screen" id="auth-screen">
+    <div class="auth-panel">
+      <div class="brand auth-brand">
+        <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
+        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+      </div>
+      <p class="auth-kicker">统一模型服务</p>
+      <h1>登录管理控制台</h1>
+      <form id="auth-form">
+        <label for="admin-token">管理员密钥</label>
+        <div class="password-row">
+          <input id="admin-token" name="token" type="password" autocomplete="current-password" required autofocus>
+          <button class="icon-button" id="toggle-token" type="button" title="显示密钥" aria-label="显示密钥"><i data-lucide="eye"></i></button>
+        </div>
+        <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入控制台</span></button>
+      </form>
+      <p class="auth-error" id="auth-error" role="alert"></p>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
+        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+      </div>
+      <p class="nav-label">服务管理</p>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
+        <button class="nav-item" data-view="accounts"><i data-lucide="building-2"></i><span>账户</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
+        <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型</span></button>
+        <button class="nav-item" data-view="payments"><i data-lucide="credit-card"></i><span>订单</span></button>
+        <button class="nav-item" data-view="redemptions"><i data-lucide="gift"></i><span>福利</span></button>
+        <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量</span></button>
+        <button class="nav-item" data-view="audit"><i data-lucide="shield-check"></i><span>审计</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <a href="/docs" target="_blank"><i data-lucide="file-code-2"></i><span>API 文档</span></a>
+        <button id="logout-button"><i data-lucide="log-out"></i><span>退出</span></button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOKSYSTEM / TOKEN</p>
+          <h1 id="page-title">概览</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="environment"><span class="status-dot"></span>Mock 环境</span>
+          <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="view active" id="view-overview">
+          <div class="metric-grid" id="overview-metrics"></div>
+          <div class="split-layout">
+            <section class="panel wide-panel">
+              <div class="section-header"><div><h2>最近调用</h2><p>最新 8 条模型请求</p></div><button class="text-button" data-go="usage">查看全部<i data-lucide="arrow-right"></i></button></div>
+              <div class="table-wrap"><table><thead><tr><th>请求</th><th>账户</th><th>模型</th><th>总量</th><th>费用</th><th>状态</th></tr></thead><tbody id="recent-usage"></tbody></table></div>
+            </section>
+            <section class="panel activity-panel">
+              <div class="section-header"><div><h2>平台状态</h2><p>当前服务能力</p></div></div>
+              <div class="status-list" id="platform-status"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-accounts">
+          <div class="section-header page-section-header"><div><h2>账户管理</h2><p>loksystem 用户与共享余额</p></div><button class="primary-button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>账户</th><th>外部用户 ID</th><th>API Key</th><th>余额</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-keys">
+          <div class="section-header page-section-header"><div><h2>API Key</h2><p>账户访问凭证</p></div><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-models">
+          <div class="section-header page-section-header"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="table-actions"><button class="secondary-button" data-action="import-models"><i data-lucide="list-plus"></i><span>批量接入</span></button><button class="primary-button" data-action="create-model"><i data-lucide="plus"></i><span>添加模型</span></button></div></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>公开模型</th><th>输入价格 / 1K</th><th>输出价格 / 1K</th><th>渠道</th><th>健康状态</th><th>模型状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-payments">
+          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button></div>
+          <div class="metric-grid compact" id="payment-metrics"></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>订单号</th><th>账户</th><th>渠道</th><th>金额</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="payments-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-redemptions">
+          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>创建、发放和管理账户福利额度</p></div><button class="primary-button" data-action="create-redemption"><i data-lucide="plus"></i><span>创建兑换码</span></button></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换码前缀</th><th>额度</th><th>领取进度</th><th>有效期</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="redemptions-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-usage">
+          <div class="section-header page-section-header"><div><h2>用量明细</h2><p>最近 100 条调用记录</p></div></div>
+          <div class="metric-grid compact" id="usage-metrics"></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>账户 / Key</th><th>模型</th><th>输入 / 输出</th><th>耗时</th><th>费用</th><th>状态</th></tr></thead><tbody id="usage-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="view-audit">
+          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>摘要</th></tr></thead><tbody id="audit-table"></tbody></table></div></section>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="action-dialog">
+    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div id="dialog-content"></div>
+  </dialog>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

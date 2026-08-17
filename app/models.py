@@ -1,0 +1,160 @@
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
+
+from .db import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class BillingAccount(Base):
+    __tablename__ = "billing_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    external_user_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    balance_micros: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    key_prefix: Mapped[str] = mapped_column(String(24), index=True)
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    spending_limit_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    spent_micros: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelConfig(Base):
+    __tablename__ = "model_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    public_name: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    upstream_model: Mapped[str] = mapped_column(String(120))
+    provider_base_url: Mapped[str] = mapped_column(String(500))
+    provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    input_price_micros_per_1k: Mapped[int] = mapped_column(Integer, default=0)
+    output_price_micros_per_1k: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelChannel(Base):
+    __tablename__ = "model_channels"
+    __table_args__ = (UniqueConstraint("model_config_id", "name", name="uq_model_channels_model_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_config_id: Mapped[int] = mapped_column(ForeignKey("model_configs.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    provider_base_url: Mapped[str] = mapped_column(String(500))
+    upstream_model: Mapped[str] = mapped_column(String(120))
+    provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, index=True)
+    weight: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="unknown", index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    circuit_open_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UsageRecord(Base):
+    __tablename__ = "usage_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    api_key_id: Mapped[int] = mapped_column(Integer, index=True)
+    model: Mapped[str] = mapped_column(String(120), index=True)
+    upstream_model: Mapped[str] = mapped_column(String(120))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    amount_micros: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class AccountBalanceTransaction(Base):
+    __tablename__ = "account_balance_transactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    api_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    amount_micros: Mapped[int] = mapped_column(Integer)
+    transaction_type: Mapped[str] = mapped_column(String(32), index=True)
+    reference_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class PaymentOrder(Base):
+    __tablename__ = "payment_orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_no: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    amount_micros: Mapped[int] = mapped_column(Integer)
+    provider: Mapped[str] = mapped_column(String(32), default="manual", index=True)
+    provider_order_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refunded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RedemptionCode(Base):
+    __tablename__ = "redemption_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(120))
+    code_prefix: Mapped[str] = mapped_column(String(24), index=True)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    amount_micros: Mapped[int] = mapped_column(Integer)
+    max_redemptions: Mapped[int] = mapped_column(Integer, default=1)
+    redeemed_count: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RedemptionClaim(Base):
+    __tablename__ = "redemption_claims"
+    __table_args__ = (UniqueConstraint("redemption_code_id", "account_id", name="uq_redemption_claims_code_account"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    redemption_code_id: Mapped[int] = mapped_column(ForeignKey("redemption_codes.id"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    amount_micros: Mapped[int] = mapped_column(Integer)
+    reference_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_type: Mapped[str] = mapped_column(String(32), index=True)
+    actor_id: Mapped[str] = mapped_column(String(120), index=True)
+    action: Mapped[str] = mapped_column(String(120), index=True)
+    target_type: Mapped[str] = mapped_column(String(64), index=True)
+    target_id: Mapped[str] = mapped_column(String(120), index=True)
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

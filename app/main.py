@@ -1,0 +1,875 @@
+import asyncio
+import json
+import re
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import timedelta, timezone
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .audit import record_audit_event
+from .config import cors_origin_list, get_settings, validate_startup_settings
+from .db import engine, get_db, init_db
+from .guardrails import rate_limiter
+from .models import AccountBalanceTransaction, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionCode, UsageRecord, utcnow
+from .payments import mark_order_paid, refund_order
+from .payment_providers import payment_providers, require_available_provider
+from .portal import router as portal_router
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentWebhook, RedemptionCodeCreate, UsageSummary
+from .security import create_key, create_redemption_code, hash_key, require_admin, require_api_key, verify_webhook_signature
+from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    validate_startup_settings(get_settings())
+    init_db()
+    if not get_settings().auto_create_schema:
+        with engine.connect() as connection:
+            connection.execute(select(1))
+    yield
+
+
+app = FastAPI(title="TOKEN Platform", version="1.0.0", lifespan=lifespan)
+if cors_origin_list(get_settings()):
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origin_list(get_settings()),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH"],
+        allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Request-ID", "X-Trace-ID", "X-Token-Signature"],
+        expose_headers=["X-Request-ID", "X-Trace-ID", "Retry-After"],
+    )
+static_dir = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+app.include_router(portal_router)
+
+_request_id_pattern = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+@app.middleware("http")
+async def production_response_headers(request: Request, call_next):
+    supplied_request_id = request.headers.get("x-request-id", "")
+    correlation_id = supplied_request_id if _request_id_pattern.fullmatch(supplied_request_id) else "req_" + uuid.uuid4().hex
+    request.state.correlation_id = correlation_id
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > get_settings().max_request_body_bytes:
+                return JSONResponse(status_code=413, content={"detail": "request body too large"})
+        except ValueError:
+            return JSONResponse(status_code=400, content={"detail": "invalid content length"})
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("X-Request-ID", correlation_id)
+    if request.url.path == "/portal":
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.get("/", include_in_schema=False)
+def console() -> FileResponse:
+    return FileResponse(static_dir / "index.html")
+
+
+@app.get("/portal", include_in_schema=False)
+def user_portal() -> FileResponse:
+    return FileResponse(static_dir / "portal.html")
+
+
+@app.get("/healthz")
+def healthz() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz() -> dict[str, str]:
+    try:
+        with engine.connect() as connection:
+            connection.execute(select(1))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="database unavailable") from exc
+    return {"status": "ready"}
+
+
+def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> dict[str, object]:
+    return {
+        "id": order.id,
+        "order_no": order.order_no,
+        "account_id": order.account_id,
+        "account_name": account_name,
+        "amount_micros": order.amount_micros,
+        "provider": order.provider,
+        "provider_order_id": order.provider_order_id,
+        "status": order.status,
+        "created_at": order.created_at.isoformat(),
+        "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+        "refunded_at": order.refunded_at.isoformat() if order.refunded_at else None,
+    }
+
+
+@app.get("/admin/overview", dependencies=[Depends(require_admin)])
+def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
+    return {
+        "account_count": db.scalar(select(func.count(BillingAccount.id))) or 0,
+        "active_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.active.is_(True))) or 0,
+        "active_model_count": db.scalar(select(func.count(ModelConfig.id)).where(ModelConfig.active.is_(True))) or 0,
+        "total_balance_micros": db.scalar(select(func.coalesce(func.sum(BillingAccount.balance_micros), 0))) or 0,
+        "request_count": db.scalar(select(func.count(UsageRecord.id))) or 0,
+        "total_tokens": db.scalar(select(func.coalesce(func.sum(UsageRecord.total_tokens), 0))) or 0,
+        "amount_micros": db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0))) or 0,
+        "pending_payment_count": db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0,
+    }
+
+
+@app.post("/admin/payment-orders", dependencies=[Depends(require_admin)])
+def create_payment_order(payload: PaymentOrderCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(BillingAccount, payload.account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=404, detail="active account not found")
+    try:
+        require_available_provider(payload.provider)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    order = PaymentOrder(
+        order_no="pay_" + uuid.uuid4().hex,
+        account_id=account.id,
+        amount_micros=payload.amount_micros,
+        provider=payload.provider,
+    )
+    db.add(order)
+    db.flush()
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="payment_order.created", target_type="payment_order", target_id=order.id, details={"order_no": order.order_no, "amount_micros": order.amount_micros, "provider": order.provider})
+    db.commit()
+    db.refresh(order)
+    return payment_order_data(order, account.name)
+
+
+@app.get("/admin/payment-providers", dependencies=[Depends(require_admin)])
+def list_payment_providers() -> dict[str, object]:
+    return {"data": [provider.to_dict() for provider in payment_providers()]}
+
+
+@app.get("/admin/payment-orders", dependencies=[Depends(require_admin)])
+def list_payment_orders(db: Session = Depends(get_db)) -> dict[str, object]:
+    rows = db.execute(
+        select(PaymentOrder, BillingAccount.name)
+        .join(BillingAccount, BillingAccount.id == PaymentOrder.account_id)
+        .order_by(PaymentOrder.id.desc())
+        .limit(200)
+    ).all()
+    return {"data": [payment_order_data(order, account_name) for order, account_name in rows]}
+
+
+@app.post("/admin/redemption-codes", dependencies=[Depends(require_admin)])
+def admin_create_redemption_code(payload: RedemptionCodeCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    expires_at = payload.expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at and expires_at <= utcnow():
+        raise HTTPException(status_code=422, detail="expires_at must be in the future")
+    raw_code = payload.code or create_redemption_code()
+    record = RedemptionCode(
+        label=payload.label,
+        code_prefix=raw_code[:12],
+        code_hash=hash_key(raw_code),
+        amount_micros=payload.amount_micros,
+        max_redemptions=payload.max_redemptions,
+        expires_at=expires_at,
+    )
+    db.add(record)
+    try:
+        db.flush()
+        record_audit_event(
+            db, actor_type="admin", actor_id="token-admin", action="redemption_code.created",
+            target_type="redemption_code", target_id=record.id,
+            details={"label": record.label, "amount_micros": record.amount_micros, "max_redemptions": record.max_redemptions},
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="redemption code already exists") from exc
+    db.refresh(record)
+    return {
+        "id": record.id,
+        "label": record.label,
+        "code": raw_code,
+        "code_prefix": record.code_prefix,
+        "amount_micros": record.amount_micros,
+        "max_redemptions": record.max_redemptions,
+        "expires_at": record.expires_at.isoformat() if record.expires_at else None,
+    }
+
+
+@app.get("/admin/redemption-codes", dependencies=[Depends(require_admin)])
+def list_redemption_codes(db: Session = Depends(get_db)) -> dict[str, object]:
+    codes = db.scalars(select(RedemptionCode).order_by(RedemptionCode.id.desc()).limit(200)).all()
+    return {"data": [{
+        "id": item.id,
+        "label": item.label,
+        "code_prefix": item.code_prefix,
+        "amount_micros": item.amount_micros,
+        "max_redemptions": item.max_redemptions,
+        "redeemed_count": item.redeemed_count,
+        "active": item.active,
+        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+        "created_at": item.created_at.isoformat(),
+    } for item in codes]}
+
+
+@app.patch("/admin/redemption-codes/{code_id}", dependencies=[Depends(require_admin)])
+def update_redemption_code(code_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    record = db.get(RedemptionCode, code_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="redemption code not found")
+    record.active = payload.active
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="redemption_code.status_updated", target_type="redemption_code", target_id=record.id, details={"active": record.active})
+    db.commit()
+    return {"id": record.id, "active": record.active}
+
+
+@app.post("/admin/payment-orders/{order_id}/confirm", dependencies=[Depends(require_admin)])
+def confirm_payment_order(order_id: int, payload: PaymentConfirm, db: Session = Depends(get_db)) -> dict[str, object]:
+    order = db.get(PaymentOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="payment order not found")
+    try:
+        order = mark_order_paid(
+            db, order, payload.provider_order_id or f"manual:{order.order_no}",
+            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return payment_order_data(order)
+
+
+@app.post("/admin/payment-orders/{order_id}/refund", dependencies=[Depends(require_admin)])
+def refund_payment_order(order_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    order = db.get(PaymentOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="payment order not found")
+    try:
+        order = refund_order(
+            db, order,
+            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.refunded", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return payment_order_data(order)
+
+
+@app.post("/payments/webhook")
+async def payment_webhook(
+    request: Request,
+    x_token_signature: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    body = await request.body()
+    if not verify_webhook_signature(body, x_token_signature):
+        raise HTTPException(status_code=401, detail="invalid webhook signature")
+    try:
+        payload = PaymentWebhook.model_validate_json(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid webhook payload") from exc
+    order = db.scalar(select(PaymentOrder).where(PaymentOrder.order_no == payload.order_no))
+    if not order:
+        raise HTTPException(status_code=404, detail="payment order not found")
+    try:
+        order = mark_order_paid(
+            db, order, payload.provider_order_id,
+            audit_event={"actor_type": "payment_webhook", "actor_id": payload.event_id, "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"received": True, "event_id": payload.event_id, "order": payment_order_data(order)}
+
+
+@app.get("/admin/accounts", dependencies=[Depends(require_admin)])
+def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
+    accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
+    return {"data": [
+        {
+            "id": account.id,
+            "external_user_id": account.external_user_id,
+            "name": account.name,
+            "balance_micros": account.balance_micros,
+            "active": account.active,
+            "api_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id)) or 0,
+            "created_at": account.created_at.isoformat(),
+        }
+        for account in accounts
+    ]}
+
+
+@app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_admin)])
+def update_account(account_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(BillingAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    account.active = payload.active
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.status_updated", target_type="account", target_id=account.id, details={"active": account.active})
+    db.commit()
+    return {"id": account.id, "active": account.active}
+
+
+@app.get("/admin/api-keys", dependencies=[Depends(require_admin)])
+def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
+    rows = db.execute(
+        select(ApiKey, BillingAccount.name)
+        .join(BillingAccount, BillingAccount.id == ApiKey.account_id)
+        .order_by(ApiKey.id.desc())
+    ).all()
+    return {"data": [
+        {
+            "id": api_key.id,
+            "account_id": api_key.account_id,
+            "account_name": account_name,
+            "name": api_key.name,
+            "key_prefix": api_key.key_prefix,
+            "active": api_key.active,
+            "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
+            "spending_limit_micros": api_key.spending_limit_micros,
+            "spent_micros": api_key.spent_micros,
+            "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
+            "created_at": api_key.created_at.isoformat(),
+        }
+        for api_key, account_name in rows
+    ]}
+
+
+@app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_admin)])
+def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = db.get(ApiKey, api_key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    api_key.active = payload.active
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="api_key.status_updated", target_type="api_key", target_id=api_key.id, details={"active": api_key.active})
+    db.commit()
+    return {"id": api_key.id, "active": api_key.active}
+
+
+@app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_admin)])
+def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiKeyResponse:
+    account = db.get(BillingAccount, payload.account_id) if payload.account_id else None
+    if payload.account_id and (not account or not account.active):
+        raise HTTPException(status_code=404, detail="active account not found")
+    if account is None:
+        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name)
+        db.add(account)
+        db.flush()
+    raw_key = create_key()
+    record = ApiKey(
+        account_id=account.id,
+        name=payload.name,
+        key_prefix=raw_key[:12],
+        key_hash=hash_key(raw_key),
+        expires_at=utcnow() + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None,
+        spending_limit_micros=payload.spending_limit_micros,
+    )
+    db.add(record)
+    db.flush()
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="api_key.created", target_type="api_key", target_id=record.id, details={"account_id": record.account_id, "name": record.name})
+    db.commit()
+    db.refresh(record)
+    return ApiKeyResponse(id=record.id, account_id=record.account_id, name=record.name, key=raw_key, key_prefix=record.key_prefix)
+
+
+@app.post("/admin/accounts", dependencies=[Depends(require_admin)])
+def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == payload.external_user_id)):
+        raise HTTPException(status_code=409, detail="external user already has an account")
+    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name)
+    db.add(account)
+    db.flush()
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.created", target_type="account", target_id=account.id, details={"external_user_id": account.external_user_id})
+    db.commit()
+    db.refresh(account)
+    return {"id": account.id, "external_user_id": account.external_user_id, "name": account.name, "balance_micros": account.balance_micros}
+
+
+@app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_admin)])
+def adjust_account_balance(account_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
+    account = db.get(BillingAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    reference_id = payload.idempotency_key or f"topup_{uuid.uuid4().hex}"
+    try:
+        account = credit_balance(
+            db, account, payload.amount_micros, reference_id, payload.description,
+            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "account.balance_credited", "target_type": "account", "target_id": account.id, "details": {"amount_micros": payload.amount_micros, "reference_id": reference_id}},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"account_id": account.id, "balance_micros": account.balance_micros}
+
+
+@app.post("/admin/api-keys/{api_key_id}/balance", dependencies=[Depends(require_admin)])
+def adjust_balance(api_key_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
+    api_key = db.get(ApiKey, api_key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    account = db.get(BillingAccount, api_key.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    reference_id = payload.idempotency_key or f"topup_{uuid.uuid4().hex}"
+    try:
+        account = credit_balance(
+            db, account, payload.amount_micros, reference_id, payload.description, api_key.id,
+            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "api_key.balance_credited", "target_type": "api_key", "target_id": api_key.id, "details": {"amount_micros": payload.amount_micros, "reference_id": reference_id}},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"api_key_id": api_key.id, "balance_micros": account.balance_micros}
+
+
+@app.get("/admin/api-keys/{api_key_id}/transactions", dependencies=[Depends(require_admin)])
+def list_balance_transactions(api_key_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = db.get(ApiKey, api_key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    transactions = db.scalars(
+        select(AccountBalanceTransaction)
+        .where(AccountBalanceTransaction.account_id == api_key.account_id)
+        .order_by(AccountBalanceTransaction.id.desc())
+        .limit(100)
+    ).all()
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "amount_micros": item.amount_micros,
+                "type": item.transaction_type,
+                "reference_id": item.reference_id,
+                "description": item.description,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in transactions
+        ]
+    }
+
+
+@app.get("/admin/accounts/{account_id}/transactions", dependencies=[Depends(require_admin)])
+def list_account_transactions(account_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not db.get(BillingAccount, account_id):
+        raise HTTPException(status_code=404, detail="account not found")
+    transactions = db.scalars(
+        select(AccountBalanceTransaction)
+        .where(AccountBalanceTransaction.account_id == account_id)
+        .order_by(AccountBalanceTransaction.id.desc())
+        .limit(100)
+    ).all()
+    return {
+        "data": [
+            {
+                "id": item.id,
+                "api_key_id": item.api_key_id,
+                "amount_micros": item.amount_micros,
+                "type": item.transaction_type,
+                "reference_id": item.reference_id,
+                "description": item.description,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in transactions
+        ]
+    }
+
+
+@app.post("/admin/models", dependencies=[Depends(require_admin)])
+def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    if db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.public_name)):
+        raise HTTPException(status_code=409, detail="model already exists")
+    settings = get_settings()
+    record = ModelConfig(
+        public_name=payload.public_name,
+        upstream_model=payload.upstream_model,
+        provider_base_url=payload.provider_base_url or settings.default_provider_base_url,
+        provider_api_key_env=payload.provider_api_key_env,
+        input_price_micros_per_1k=payload.input_price_micros_per_1k,
+        output_price_micros_per_1k=payload.output_price_micros_per_1k,
+    )
+    db.add(record)
+    db.flush()
+    db.add(ModelChannel(
+        model_config_id=record.id,
+        name="Primary",
+        upstream_model=record.upstream_model,
+        provider_base_url=record.provider_base_url,
+        provider_api_key_env=record.provider_api_key_env,
+        priority=100,
+        weight=100,
+    ))
+    db.commit()
+    db.refresh(record)
+    return {"id": record.id, "public_name": record.public_name, "upstream_model": record.upstream_model}
+
+
+@app.get("/admin/upstream-models", dependencies=[Depends(require_admin)])
+async def list_upstream_models(
+    provider_base_url: str,
+    provider_api_key_env: str | None = None,
+) -> dict[str, object]:
+    try:
+        model_ids = await discover_upstream_models(provider_base_url, provider_api_key_env)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"data": [{"id": model_id} for model_id in model_ids]}
+
+
+@app.post("/admin/models/batch", dependencies=[Depends(require_admin)])
+def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> dict[str, object]:
+    names = [item.public_name for item in payload.models]
+    if len(set(names)) != len(names):
+        raise HTTPException(status_code=422, detail="public model names must be unique in one import")
+    existing = set(db.scalars(select(ModelConfig.public_name).where(ModelConfig.public_name.in_(names))).all())
+    if existing:
+        raise HTTPException(status_code=409, detail=f"model already exists: {sorted(existing)[0]}")
+    created: list[ModelConfig] = []
+    for item in payload.models:
+        record = ModelConfig(
+            public_name=item.public_name,
+            upstream_model=item.upstream_model,
+            provider_base_url=item.provider_base_url or payload.provider_base_url,
+            provider_api_key_env=item.provider_api_key_env if item.provider_api_key_env is not None else payload.provider_api_key_env,
+            input_price_micros_per_1k=item.input_price_micros_per_1k,
+            output_price_micros_per_1k=item.output_price_micros_per_1k,
+        )
+        db.add(record)
+        db.flush()
+        db.add(ModelChannel(
+            model_config_id=record.id,
+            name="Primary",
+            upstream_model=record.upstream_model,
+            provider_base_url=record.provider_base_url,
+            provider_api_key_env=record.provider_api_key_env,
+            priority=100,
+            weight=100,
+        ))
+        created.append(record)
+    record_audit_event(
+        db, actor_type="admin", actor_id="token-admin", action="model.batch_imported",
+        target_type="model_batch", target_id=created[0].id,
+        details={"count": len(created), "models": [item.public_name for item in created]},
+    )
+    db.commit()
+    return {"data": [{"id": item.id, "public_name": item.public_name, "upstream_model": item.upstream_model} for item in created]}
+
+
+@app.get("/admin/models", dependencies=[Depends(require_admin)])
+def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
+    models = db.scalars(select(ModelConfig).order_by(ModelConfig.id.desc())).all()
+    return {"data": [
+        {
+            "id": model.id,
+            "public_name": model.public_name,
+            "upstream_model": model.upstream_model,
+            "provider_base_url": model.provider_base_url,
+            "provider_api_key_env": model.provider_api_key_env,
+            "input_price_micros_per_1k": model.input_price_micros_per_1k,
+            "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "active": model.active,
+            "channel_count": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.model_config_id == model.id)) or 0,
+            "healthy_channel_count": db.scalar(select(func.count(ModelChannel.id)).where(
+                ModelChannel.model_config_id == model.id,
+                ModelChannel.active.is_(True),
+                ModelChannel.status == "healthy",
+            )) or 0,
+            "created_at": model.created_at.isoformat(),
+        }
+        for model in models
+    ]}
+
+
+@app.patch("/admin/models/{model_id}", dependencies=[Depends(require_admin)])
+def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="no model changes provided")
+    for field, value in changes.items():
+        setattr(model, field, value)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.updated", target_type="model", target_id=model.id, details=changes)
+    db.commit()
+    return {
+        "id": model.id,
+        "active": model.active,
+        "input_price_micros_per_1k": model.input_price_micros_per_1k,
+        "output_price_micros_per_1k": model.output_price_micros_per_1k,
+    }
+
+
+def channel_data(channel: ModelChannel) -> dict[str, object]:
+    return {
+        "id": channel.id,
+        "model_config_id": channel.model_config_id,
+        "name": channel.name,
+        "provider_base_url": channel.provider_base_url,
+        "upstream_model": channel.upstream_model,
+        "provider_api_key_env": channel.provider_api_key_env,
+        "priority": channel.priority,
+        "weight": channel.weight,
+        "active": channel.active,
+        "status": channel.status,
+        "consecutive_failures": channel.consecutive_failures,
+        "circuit_open_until": channel.circuit_open_until.isoformat() if channel.circuit_open_until else None,
+        "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None,
+        "last_error": channel.last_error,
+        "created_at": channel.created_at.isoformat(),
+    }
+
+
+@app.get("/admin/models/{model_id}/channels", dependencies=[Depends(require_admin)])
+def list_model_channels(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not db.get(ModelConfig, model_id):
+        raise HTTPException(status_code=404, detail="model not found")
+    channels = db.scalars(
+        select(ModelChannel)
+        .where(ModelChannel.model_config_id == model_id)
+        .order_by(ModelChannel.priority, ModelChannel.id)
+    ).all()
+    return {"data": [channel_data(channel) for channel in channels]}
+
+
+@app.post("/admin/models/{model_id}/channels", dependencies=[Depends(require_admin)])
+def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not db.get(ModelConfig, model_id):
+        raise HTTPException(status_code=404, detail="model not found")
+    if db.scalar(select(ModelChannel).where(
+        ModelChannel.model_config_id == model_id,
+        ModelChannel.name == payload.name,
+    )):
+        raise HTTPException(status_code=409, detail="channel name already exists for model")
+    channel = ModelChannel(model_config_id=model_id, **payload.model_dump())
+    db.add(channel)
+    db.commit()
+    db.refresh(channel)
+    return channel_data(channel)
+
+
+@app.patch("/admin/channels/{channel_id}", dependencies=[Depends(require_admin)])
+def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(ModelChannel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="channel not found")
+    changes = payload.model_dump(exclude_unset=True)
+    if "name" in changes and db.scalar(select(ModelChannel).where(
+        ModelChannel.model_config_id == channel.model_config_id,
+        ModelChannel.name == changes["name"],
+        ModelChannel.id != channel.id,
+    )):
+        raise HTTPException(status_code=409, detail="channel name already exists for model")
+    for field, value in changes.items():
+        setattr(channel, field, value)
+    db.commit()
+    db.refresh(channel)
+    return channel_data(channel)
+
+
+@app.post("/admin/channels/{channel_id}/check", dependencies=[Depends(require_admin)])
+async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    channel = db.get(ModelChannel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="channel not found")
+    result = await check_channel_health(db, channel)
+    db.refresh(channel)
+    return {**channel_data(channel), **result}
+
+
+@app.get("/v1/models")
+def list_models(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
+    require_api_key(authorization, db)
+    models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
+    return {"object": "list", "data": [{"id": item.public_name, "object": "model", "owned_by": "token"} for item in models]}
+
+
+@app.get("/v1/account", response_model=AccountBalance)
+def account_balance(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> AccountBalance:
+    api_key = require_api_key(authorization, db)
+    account = db.get(BillingAccount, api_key.account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
+    return AccountBalance(account_id=account.id, external_user_id=account.external_user_id, api_key_id=api_key.id, balance_micros=account.balance_micros)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    payload: ChatCompletionRequest,
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    api_key = require_api_key(authorization, db)
+    settings = get_settings()
+    rate_limiter.check("api", str(api_key.id), settings.api_rate_limit_requests, settings.api_rate_limit_window_seconds)
+    account = db.get(BillingAccount, api_key.account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
+    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
+    if not model:
+        raise HTTPException(status_code=404, detail=f"unknown model: {payload.model}")
+    request_id = x_request_id or "req_" + uuid.uuid4().hex
+    trace_id = x_trace_id or request_id
+    if not _request_id_pattern.fullmatch(request_id) or not _request_id_pattern.fullmatch(trace_id):
+        raise HTTPException(status_code=422, detail="request and trace IDs must be 1-64 URL-safe characters")
+    if db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
+        raise HTTPException(status_code=409, detail="request id already used")
+    estimated_input = estimate_tokens(payload.messages)
+    reservation = calculate_amount(model, estimated_input, payload.max_tokens or settings.reservation_output_tokens)
+    try:
+        reserve_balance(db, account, api_key, reservation, request_id)
+    except ValueError as exc:
+        detail = str(exc)
+        save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "rejected", 0, detail)
+        raise HTTPException(status_code=402, detail=detail) from exc
+    if payload.stream:
+        async def event_stream():
+            started = time.perf_counter()
+            input_tokens = 0
+            output_tokens = 0
+            content_parts: list[str] = []
+            saw_provider_data = False
+            completed = False
+            error_message: str | None = None
+            try:
+                async for chunk in stream_provider(db, model, payload):
+                    text = chunk.decode("utf-8", errors="replace")
+                    if text.startswith("data: ") and "[DONE]" not in text:
+                        try:
+                            data = json.loads(text[6:].strip())
+                            usage = data.get("usage") or {}
+                            if usage:
+                                input_tokens = int(usage.get("prompt_tokens", input_tokens or estimated_input))
+                                output_tokens = int(usage.get("completion_tokens", output_tokens))
+                            for choice in data.get("choices") or []:
+                                content = (choice.get("delta") or {}).get("content")
+                                if isinstance(content, str):
+                                    content_parts.append(content)
+                                    saw_provider_data = True
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    yield chunk
+                completed = True
+            except asyncio.CancelledError:
+                error_message = "client disconnected during streaming response"
+                raise
+            except Exception as exc:
+                error_message = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+                error_payload = {"error": {"message": "provider stream failed", "type": "provider_error"}}
+                yield f"data: {json.dumps(error_payload, separators=(',', ':'))}\n\ndata: [DONE]\n\n".encode("utf-8")
+            finally:
+                if not output_tokens and content_parts:
+                    output_tokens = max(1, len("".join(content_parts)) // 4)
+                if not input_tokens and (completed or saw_provider_data):
+                    input_tokens = estimated_input
+                actual_amount = calculate_amount(model, input_tokens, output_tokens)
+                settle_balance(db, account, api_key, reservation, actual_amount, request_id)
+                save_usage(
+                    db,
+                    api_key,
+                    model,
+                    request_id,
+                    trace_id,
+                    input_tokens,
+                    output_tokens,
+                    "success" if completed else "error",
+                    int((time.perf_counter() - started) * 1000),
+                    error_message,
+                )
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id, "Cache-Control": "no-cache"},
+        )
+    started = time.perf_counter()
+    try:
+        response, input_tokens, output_tokens = await call_provider(db, model, payload)
+        actual_amount = calculate_amount(model, input_tokens, output_tokens)
+        settle_balance(db, account, api_key, reservation, actual_amount, request_id)
+        save_usage(db, api_key, model, request_id, trace_id, input_tokens, output_tokens, "success", int((time.perf_counter() - started) * 1000))
+        response.setdefault("model", model.public_name)
+        return JSONResponse(response, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
+    except HTTPException as exc:
+        settle_balance(db, account, api_key, reservation, 0, request_id)
+        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc.detail))
+        raise
+    except Exception as exc:
+        settle_balance(db, account, api_key, reservation, 0, request_id)
+        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc))
+        raise HTTPException(status_code=502, detail="provider response could not be processed") from exc
+
+
+@app.get("/admin/usage", response_model=UsageSummary, dependencies=[Depends(require_admin)])
+def usage_summary(db: Session = Depends(get_db)) -> UsageSummary:
+    count, inputs, outputs, total, amount = db.execute(
+        select(
+            func.count(UsageRecord.id),
+            func.coalesce(func.sum(UsageRecord.input_tokens), 0),
+            func.coalesce(func.sum(UsageRecord.output_tokens), 0),
+            func.coalesce(func.sum(UsageRecord.total_tokens), 0),
+            func.coalesce(func.sum(UsageRecord.amount_micros), 0),
+        )
+    ).one()
+    return UsageSummary(request_count=count, input_tokens=inputs, output_tokens=outputs, total_tokens=total, amount_micros=amount)
+
+
+@app.get("/admin/usage/records", dependencies=[Depends(require_admin)])
+def usage_records(db: Session = Depends(get_db)) -> dict[str, object]:
+    rows = db.execute(
+        select(UsageRecord, BillingAccount.name, ApiKey.name)
+        .join(BillingAccount, BillingAccount.id == UsageRecord.account_id)
+        .join(ApiKey, ApiKey.id == UsageRecord.api_key_id)
+        .order_by(UsageRecord.id.desc())
+        .limit(100)
+    ).all()
+    return {"data": [
+        {
+            "id": record.id,
+            "request_id": record.request_id,
+            "trace_id": record.trace_id,
+            "account_id": record.account_id,
+            "account_name": account_name,
+            "api_key_id": record.api_key_id,
+            "api_key_name": api_key_name,
+            "model": record.model,
+            "input_tokens": record.input_tokens,
+            "output_tokens": record.output_tokens,
+            "total_tokens": record.total_tokens,
+            "amount_micros": record.amount_micros,
+            "status": record.status,
+            "latency_ms": record.latency_ms,
+            "error_message": record.error_message,
+            "created_at": record.created_at.isoformat(),
+        }
+        for record, account_name, api_key_name in rows
+    ]}
+
+
+@app.get("/admin/audit-events", dependencies=[Depends(require_admin)])
+def list_audit_events(db: Session = Depends(get_db)) -> dict[str, object]:
+    events = db.scalars(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(200)).all()
+    return {"data": [
+        {
+            "id": event.id,
+            "actor_type": event.actor_type,
+            "actor_id": event.actor_id,
+            "action": event.action,
+            "target_type": event.target_type,
+            "target_id": event.target_id,
+            "details": json.loads(event.details_json) if event.details_json else {},
+            "created_at": event.created_at.isoformat(),
+        }
+        for event in events
+    ]}

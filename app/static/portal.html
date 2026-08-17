@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LokSystem TOKEN 用户中心</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/portal.css">
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  <script src="/static/portal.js" defer></script>
+</head>
+<body>
+  <section class="auth-screen" id="portal-auth">
+    <div class="auth-panel">
+      <div class="brand auth-brand">
+        <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
+        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+      </div>
+      <p class="auth-kicker">统一模型服务</p>
+      <h1>进入用户中心</h1>
+      <form id="portal-auth-form">
+        <label for="portal-token">试用令牌（trl_ 开头）</label>
+        <div class="password-row">
+          <input id="portal-token" name="token" type="password" autocomplete="off" placeholder="trl_..." required autofocus>
+          <button class="icon-button" id="toggle-portal-token" type="button" title="显示令牌" aria-label="显示令牌"><i data-lucide="eye"></i></button>
+        </div>
+        <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
+      </form>
+      <p class="auth-error" id="portal-auth-error" role="alert"></p>
+    </div>
+  </section>
+
+  <div class="app-shell" id="portal-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
+        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+      </div>
+      <p class="nav-label">用户中心</p>
+      <nav aria-label="用户导航">
+        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
+        <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型</span></button>
+        <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
+        <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
+        <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
+        <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <a href="/docs" target="_blank"><i data-lucide="file-code-2"></i><span>API 文档</span></a>
+        <button id="portal-logout"><i data-lucide="log-out"></i><span>退出</span></button>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOKSYSTEM / TOKEN</p>
+          <h1 id="portal-page-title">概览</h1>
+        </div>
+        <div class="topbar-actions">
+          <span class="portal-identity"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>
+          <button class="icon-button" id="portal-refresh" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="view active" id="portal-view-overview">
+          <section class="overview-quickbar panel" aria-label="账户摘要">
+            <div><span>账户余额</span><strong id="overview-balance">-</strong></div>
+            <div><span>有效 Key</span><strong id="overview-key-count">-</strong></div>
+            <div><span>累计请求</span><strong id="overview-request-count">-</strong></div>
+            <div class="overview-endpoint"><span>Base URL</span><code id="portal-base-url"></code><button class="icon-button compact-icon" data-copy="base-url" title="复制 Base URL" aria-label="复制 Base URL"><i data-lucide="copy"></i></button></div>
+          </section>
+
+          <div class="overview-dashboard-grid">
+            <section class="panel usage-trend-panel">
+              <div class="dashboard-panel-header">
+                <div><h2>用量总览</h2><p id="overview-period-label">最近 7 天</p></div>
+                <div class="overview-filters">
+                  <select id="overview-days" aria-label="时间范围"><option value="7">7 天</option><option value="30">30 天</option><option value="90">90 天</option></select>
+                  <select id="overview-model" aria-label="模型筛选"><option value="">全部模型</option></select>
+                  <select id="overview-key" aria-label="API Key 筛选"><option value="">全部 Key</option></select>
+                </div>
+                <div class="segmented-control" id="overview-mode" aria-label="统计指标">
+                  <button type="button" class="active" data-mode="cost">费用</button>
+                  <button type="button" data-mode="tokens">Token</button>
+                  <button type="button" data-mode="requests">请求</button>
+                </div>
+              </div>
+              <div class="trend-summary"><span id="overview-trend-label">周期费用</span><strong id="overview-trend-value">-</strong></div>
+              <div class="usage-chart-wrap" id="overview-chart-wrap"><svg id="overview-chart" viewBox="0 0 820 260" role="img" aria-label="用量趋势图"></svg></div>
+            </section>
+
+            <section class="panel ranking-panel">
+              <div class="dashboard-panel-header ranking-header"><div><h2>模型排行</h2><p>Top 5 · 按费用</p></div></div>
+              <div class="ranking-list" id="overview-ranking"></div>
+            </section>
+          </div>
+
+          <section class="panel activity-panel">
+            <div class="dashboard-panel-header activity-header"><div><h2>账户活动</h2><p>近一年调用活跃度</p></div><span class="heatmap-legend"><i></i><span>少</span><i class="level-2"></i><i class="level-4"></i><span>多</span></span></div>
+            <div class="activity-stats">
+              <div><span>最长连续</span><strong id="activity-streak">0 天</strong></div>
+              <div><span>今日</span><strong id="activity-today">-</strong></div>
+              <div><span>近 7 天</span><strong id="activity-week">-</strong></div>
+              <div><span>累计</span><strong id="activity-total">-</strong></div>
+            </div>
+            <div class="heatmap-scroll"><div class="activity-heatmap" id="activity-heatmap" aria-label="近一年调用活跃度"></div></div>
+          </section>
+        </section>
+
+        <section class="view" id="portal-view-keys">
+          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="icon-button" id="keys-refresh" type="button" title="刷新 Key" aria-label="刷新 Key"><i data-lucide="refresh-cw"></i></button><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
+          <div class="metric-grid compact key-metrics" id="portal-keys-metrics"></div>
+          <section class="panel key-workspace">
+            <div class="key-toolbar">
+              <div class="field key-search-field"><label for="key-search">搜索名称或前缀</label><div class="input-with-icon"><i data-lucide="search"></i><input id="key-search" type="search" placeholder="输入 Key 名称或 tok_ 前缀"></div></div>
+              <div class="field"><label for="key-status-filter">状态</label><select id="key-status-filter"><option value="">全部状态</option><option value="active">有效</option><option value="inactive">已停用</option><option value="expired">已过期</option></select></div>
+              <div class="key-endpoint"><span>API 端点</span><code id="key-base-url"></code><button class="icon-button compact-icon" data-copy="base-url" title="复制 API 端点" aria-label="复制 API 端点"><i data-lucide="copy"></i></button></div>
+            </div>
+            <div class="table-wrap"><table class="key-table"><thead><tr><th data-key-col="name">名称</th><th data-key-col="key">API Key</th><th data-key-col="usage">用量</th><th data-key-col="expires">有效期</th><th data-key-col="last-used">最近使用</th><th data-key-col="status">状态</th><th data-key-col="created">创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="portal-keys-table"></tbody></table></div>
+            <div class="key-table-footer"><span id="key-result-count">共 0 个 Key</span><span>密钥只在创建成功时完整展示一次</span></div>
+          </section>
+        </section>
+
+        <section class="view" id="portal-view-models">
+          <div class="section-header page-section-header"><div><h2>模型目录</h2><p>当前可调用模型与价格</p></div></div>
+          <section class="panel"><div class="table-wrap"><table><thead><tr><th>模型</th><th>输入价格 / 1K</th><th>输出价格 / 1K</th><th>接口</th></tr></thead><tbody id="portal-models-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="portal-view-usage">
+          <div class="section-header page-section-header"><div><h2>请求记录</h2><p>查看和分析账户 API 调用情况</p></div></div>
+          <div class="metric-grid compact" id="portal-usage-metrics"></div>
+          <form class="usage-filter-bar" id="portal-usage-filter">
+            <div class="field"><label for="usage-range-filter">时间范围</label><select id="usage-range-filter" name="range"><option value="24h">近 24 小时</option><option value="7d" selected>近 7 天</option><option value="30d">近 30 天</option><option value="custom">自定义</option></select></div>
+            <div class="field"><label for="usage-model-filter">模型</label><select id="usage-model-filter" name="model"><option value="">全部模型</option></select></div>
+            <div class="field"><label for="usage-key-filter">API Key</label><select id="usage-key-filter" name="api_key_id"><option value="">全部 Key</option></select></div>
+            <div class="field"><label for="usage-status-filter">状态</label><select id="usage-status-filter" name="status"><option value="">全部状态</option><option value="success">成功</option><option value="error">失败</option><option value="rejected">已拒绝</option></select></div>
+            <div class="field usage-request-field"><label for="usage-request-filter">请求 ID</label><input id="usage-request-filter" name="request_id" type="search" placeholder="支持部分匹配"></div>
+            <div class="usage-custom-dates" id="usage-custom-dates" hidden>
+              <div class="field"><label for="usage-from-filter">开始时间</label><input id="usage-from-filter" name="from" type="datetime-local"></div>
+              <div class="field"><label for="usage-to-filter">结束时间</label><input id="usage-to-filter" name="to" type="datetime-local"></div>
+            </div>
+            <div class="usage-filter-actions"><button class="primary-button" type="submit"><i data-lucide="search"></i><span>查询</span></button><button class="secondary-button" id="usage-reset" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button><button class="icon-button" id="usage-refresh" type="button" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button><button class="icon-button" id="usage-export" type="button" title="导出 CSV" aria-label="导出 CSV"><i data-lucide="download"></i></button></div>
+          </form>
+
+          <div class="request-analytics-grid">
+            <section class="panel distribution-panel">
+              <div class="dashboard-panel-header analytics-header"><div><h2>模型分布</h2><p>按 Token 用量统计</p></div></div>
+              <div class="distribution-content" id="usage-model-distribution"></div>
+            </section>
+            <section class="panel distribution-panel">
+              <div class="dashboard-panel-header analytics-header"><div><h2>API Key 分布</h2><p>定位主要调用来源</p></div></div>
+              <div class="distribution-content" id="usage-key-distribution"></div>
+            </section>
+            <section class="panel request-trend-panel">
+              <div class="dashboard-panel-header analytics-header">
+                <div><h2>使用趋势</h2><p id="usage-trend-period">按日统计</p></div>
+                <div class="segmented-control" id="usage-trend-mode" aria-label="趋势指标"><button type="button" class="active" data-mode="tokens">Token</button><button type="button" data-mode="requests">请求</button><button type="button" data-mode="cost">费用</button></div>
+              </div>
+              <div class="request-trend-legend" id="usage-trend-legend"></div>
+              <div class="request-chart-wrap"><svg id="usage-trend-chart" viewBox="0 0 1120 270" role="img" aria-label="请求使用趋势图"></svg></div>
+            </section>
+          </div>
+
+          <section class="panel request-table-panel">
+            <div class="section-header request-table-header"><div><h2>请求明细</h2><p id="usage-result-count">共 0 条记录</p></div><select id="usage-page-size" aria-label="每页条数"><option value="20">20 条 / 页</option><option value="50">50 条 / 页</option><option value="100">100 条 / 页</option></select></div>
+            <div class="table-wrap"><table class="request-table"><thead><tr><th>时间</th><th>请求 ID</th><th>API Key</th><th>模型</th><th>Token</th><th>耗时</th><th>费用</th><th>状态</th><th class="align-right">详情</th></tr></thead><tbody id="portal-usage-table"></tbody></table></div>
+            <div class="pagination"><span id="usage-page-label">第 1 / 1 页</span><div><button class="icon-button compact-icon" id="usage-page-prev" type="button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button class="icon-button compact-icon" id="usage-page-next" type="button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div></div>
+          </section>
+        </section>
+
+        <section class="view" id="portal-view-quota">
+          <div class="section-header page-section-header"><div><h2>额度管理</h2><p>查看可用余额、充值记录与消费情况</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>充值额度</span></button></div>
+          <section class="panel quota-hero">
+            <div><span>当前可用余额</span><strong id="quota-balance">-</strong><p>调用模型时按实际 Token 用量结算</p></div>
+            <div class="quota-hero-stats"><div><span>累计充值与福利</span><strong id="quota-total-credit">-</strong></div><div><span>累计消费</span><strong id="quota-total-consumed">-</strong></div><div><span>余额变动</span><strong id="quota-transaction-count">-</strong></div></div>
+          </section>
+          <div class="quota-action-grid">
+            <section class="panel quota-action-panel"><div><div class="quota-action-icon blue"><i data-lucide="circle-plus"></i></div><h2>充值额度</h2><p>创建充值申请，到账后自动计入账户余额。</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建充值申请</span></button></section>
+            <section class="panel quota-action-panel"><div><div class="quota-action-icon green"><i data-lucide="gift"></i></div><h2>兑换福利</h2><p>使用兑换码领取可用额度，核销成功后即时到账。</p></div><button class="secondary-button" data-go="redeem"><i data-lucide="arrow-right"></i><span>前往兑换</span></button></section>
+          </div>
+          <section class="panel quota-history-panel"><div class="section-header"><div><h2>余额变动</h2><p id="quota-history-count">最近 0 条记录</p></div><button class="icon-button" id="quota-refresh" type="button" title="刷新余额记录" aria-label="刷新余额记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table class="quota-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>参考编号</th><th class="align-right">金额</th></tr></thead><tbody id="portal-transactions-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="portal-view-orders">
+          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="icon-button" id="orders-refresh" type="button" title="刷新订单" aria-label="刷新订单"><i data-lucide="refresh-cw"></i></button><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
+          <section class="panel orders-workspace"><div class="orders-toolbar"><div class="field"><label for="order-status-filter">订单状态</label><select id="order-status-filter"><option value="">全部订单</option><option value="pending">待处理</option><option value="paid">已入账</option><option value="refunded">已退款</option></select></div><span id="order-result-count">共 0 个订单</span></div><div class="table-wrap"><table class="orders-table"><thead><tr><th>订单号</th><th>支付方式</th><th>金额</th><th>状态</th><th>创建时间</th><th>到账时间</th></tr></thead><tbody id="portal-orders-table"></tbody></table></div></section>
+        </section>
+
+        <section class="view" id="portal-view-redeem">
+          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>输入有效兑换码，将福利额度存入当前账户</p></div></div>
+          <div class="redeem-layout">
+            <section class="redeem-balance-panel"><i data-lucide="wallet-cards"></i><span>当前可用余额</span><strong id="redeem-balance">-</strong><small id="redeem-claim-count">暂无兑换记录</small></section>
+            <section class="panel redeem-form-panel"><div class="section-header"><div><h2>兑换码</h2><p>兑换码区分大小写</p></div></div><form id="portal-redeem-form"><div class="input-with-icon"><i data-lucide="gift"></i><input id="redeem-code" name="code" autocomplete="off" required minlength="8" maxlength="120" placeholder="请输入兑换码"></div><button class="primary-button" type="submit"><i data-lucide="circle-check-big"></i><span>立即兑换</span></button></form></section>
+            <section class="redeem-notice"><i data-lucide="info"></i><div><strong>关于兑换福利</strong><ul><li>每个账户对同一兑换码仅可领取一次。</li><li>兑换成功后，额度会即时计入当前账户。</li><li>无效、过期或已用尽的兑换码无法重复核销。</li></ul></div></section>
+            <section class="panel redeem-history-panel"><div class="section-header"><div><h2>兑换记录</h2><p id="redeem-history-count">最近 0 条记录</p></div><button class="icon-button" id="redeem-refresh" type="button" title="刷新兑换记录" aria-label="刷新兑换记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换时间</th><th class="align-right">到账额度</th></tr></thead><tbody id="portal-redemptions-table"></tbody></table></div></section>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="portal-dialog">
+    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="portal-dialog-title"></h2></div><button class="icon-button" id="portal-dialog-close" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div id="portal-dialog-content"></div>
+  </dialog>
+  <div class="toast" id="portal-toast" role="status"></div>
+</body>
+</html>

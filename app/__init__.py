@@ -1,0 +1,1 @@
+"""TOKEN platform application package."""
