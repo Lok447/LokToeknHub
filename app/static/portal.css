@@ -193,6 +193,14 @@
 .model-callout strong { color: #2856d8; font-size: 11px; }
 .model-callout span { color: #405b9d; font-size: 10px; line-height: 1.55; }
 .model-callout code { padding: 1px 4px; border-radius: 3px; background: rgba(255, 255, 255, 0.6); font-family: "Cascadia Code", Consolas, monospace; }
+.marketplace-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) auto auto; align-items: center; gap: 14px; margin-bottom: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.marketplace-toolbar .input-with-icon input { height: 36px; font-size: 11px; }
+.marketplace-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.marketplace-tabs button { min-height: 30px; padding: 0 9px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+.marketplace-tabs button:hover { color: var(--ink); background: var(--surface-soft); }
+.marketplace-tabs button.active { color: #2856d8; background: var(--signal-soft); }
+.marketplace-tabs button span { margin-left: 4px; color: var(--faint); font-size: 9px; font-weight: 600; }
+.marketplace-toolbar > span { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .model-catalog-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .model-catalog-card { min-width: 0; display: grid; gap: 16px; padding: 19px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 1px 1px rgba(17, 24, 32, 0.025); }
 .model-catalog-card.is-builtin { border-top: 2px solid var(--signal); padding-top: 18px; }
@@ -202,6 +210,7 @@
 .model-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .model-card-title h3 { min-width: 0; margin: 0; overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .model-card-title .badge { padding: 3px 5px; font-size: 9px; }
+.model-provider { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
 .model-card-heading p { margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .model-capabilities { min-height: 23px; display: flex; flex-wrap: wrap; gap: 6px; }
 .model-capabilities span { padding: 4px 6px; border-radius: 3px; color: #4863a9; background: var(--surface-muted); font-size: 9px; font-weight: 700; }
@@ -216,8 +225,31 @@
 .model-card-footer span { display: inline-flex; align-items: center; gap: 4px; }
 .model-card-footer svg { width: 12px; height: 12px; color: var(--success); }
 .model-card-footer code { overflow: hidden; font-family: "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.model-card-footer .text-button { padding: 0; }
 .model-catalog-empty { min-height: 210px; display: grid; place-content: center; justify-items: center; gap: 9px; grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
 .model-catalog-empty svg { width: 24px; height: 24px; color: var(--faint); }
+.model-catalog-empty strong { color: var(--ink); font-size: 12px; }
+.model-catalog-empty span { font-size: 10px; }
+.model-detail-body { gap: 14px; }
+.model-detail-hero { min-width: 0; display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
+.model-detail-hero .model-card-icon { width: 40px; height: 40px; }
+.model-detail-hero .model-card-title h3 { font-size: 15px; }
+.model-detail-hero > div:last-child > span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.model-detail-hero p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.model-detail-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.model-detail-tags span { padding: 4px 7px; border-radius: 3px; color: #4863a9; background: var(--signal-soft); font-size: 9px; font-weight: 700; }
+.model-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.model-detail-grid > div { min-width: 0; min-height: 64px; display: grid; align-content: center; gap: 5px; padding: 10px 12px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.model-detail-grid > div:nth-child(3n) { border-right: 0; }
+.model-detail-grid > div:nth-last-child(-n + 3) { border-bottom: 0; }
+.model-detail-grid span { color: var(--muted); font-size: 9px; font-weight: 750; }
+.model-detail-grid strong { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.model-code-section { min-width: 0; display: grid; gap: 8px; }
+.model-code-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.model-code-heading > div { display: grid; gap: 3px; }
+.model-code-heading strong { color: var(--ink); font-size: 11px; }
+.model-code-heading span { color: var(--muted); font-size: 9px; }
+.model-code-section pre { min-width: 0; max-height: 190px; margin: 0; padding: 13px 14px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; color: #d9e2f2; background: #1c2430; font: 10px/1.65 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
 
 /* Account value surfaces intentionally share the compact operational language of the rest of TOKEN. */
 .quota-hero { min-height: 172px; display: grid; grid-template-columns: minmax(250px, 0.8fr) minmax(0, 1.2fr); overflow: hidden; margin-bottom: 18px; }
@@ -284,6 +316,8 @@
   .key-endpoint { grid-column: 1 / -1; }
   .redeem-layout { grid-template-columns: minmax(0, 0.75fr) minmax(320px, 1.25fr); }
   .model-catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .marketplace-toolbar { grid-template-columns: 1fr; align-items: stretch; }
+  .marketplace-toolbar > span { text-align: right; }
 }
 
 @media (max-width: 760px) {
@@ -326,6 +360,11 @@
   .quota-action-grid, .redeem-layout { grid-template-columns: 1fr; }
   .redeem-history-panel { grid-column: auto; }
   .model-catalog-grid { grid-template-columns: 1fr; }
+  .model-detail-grid { grid-template-columns: 1fr 1fr; }
+  .model-detail-grid > div:nth-child(3n) { border-right: 1px solid var(--line); }
+  .model-detail-grid > div:nth-child(2n) { border-right: 0; }
+  .model-detail-grid > div:nth-last-child(-n + 3) { border-bottom: 1px solid var(--line); }
+  .model-detail-grid > div:last-child, .model-detail-grid > div:nth-last-child(2) { border-bottom: 0; }
 }
 
 @media (max-width: 440px) {
@@ -361,4 +400,9 @@
   .orders-toolbar > span { padding-bottom: 0; }
   .redeem-form-panel form { grid-template-columns: 1fr; padding: 18px; }
   .redeem-form-panel .primary-button { width: 100%; }
+  .marketplace-tabs { overflow-x: auto; flex-wrap: nowrap; }
+  .marketplace-tabs button { white-space: nowrap; }
+  .model-detail-grid { grid-template-columns: 1fr; }
+  .model-detail-grid > div { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; }
+  .model-detail-grid > div:last-child { border-bottom: 0 !important; }
 }

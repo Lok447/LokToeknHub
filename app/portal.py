@@ -181,12 +181,17 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccou
 @router.get("/portal/models")
 def list_models(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
     del account
+    settings = get_settings()
     models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
     return {"data": [{
         "id": item.id,
         "public_name": item.public_name,
         "input_price_micros_per_1k": item.input_price_micros_per_1k,
         "output_price_micros_per_1k": item.output_price_micros_per_1k,
+        "rate_limit": {
+            "requests": settings.api_rate_limit_requests,
+            "window_seconds": settings.api_rate_limit_window_seconds,
+        },
         **model_metadata(item.public_name),
     } for item in models]}
 

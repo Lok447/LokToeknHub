@@ -29,6 +29,8 @@ $headers = @{ Authorization = "Bearer $($key.key)" }
 Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType "application/json" -Body '{"model":"lok-chat","messages":[{"role":"user","content":"你好，请介绍一下 LokSystem TOKEN"}]}'
 ```
 
+用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按文本、推理、代码、视觉和工具调用筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。
+
 ## 用户试用闭环 v0.2
 
 管理员可为已有 LokSystem 账户生成限时用户中心链接：

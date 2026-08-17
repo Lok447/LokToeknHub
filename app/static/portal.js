@@ -10,9 +10,10 @@ const portalState = {
   keyFilters: { search: "", status: "" },
   keyColumns: { name: true, key: true, usage: true, expires: true, "last-used": true, status: true, created: true },
   orders: [],
+  marketplace: { query: "", modality: "all" },
 };
 
-const portalTitles = { overview: "概览", keys: "API Key", models: "模型", usage: "请求记录", quota: "额度管理", orders: "订单管理", redeem: "兑换福利" };
+const portalTitles = { overview: "概览", keys: "API Key", models: "模型广场", usage: "请求记录", quota: "额度管理", orders: "订单管理", redeem: "兑换福利" };
 
 function portalIcons() {
   if (window.lucide) window.lucide.createIcons();
@@ -375,16 +376,65 @@ async function loadKeys() {
 async function loadModels() {
   const result = await portalApi("/portal/models");
   portalState.models = result.data;
-  document.getElementById("portal-models-table").innerHTML = result.data.length ? result.data.map((item) => `
+  renderModelMarketplace();
+}
+
+const marketplaceFilters = [
+  ["all", "全部"], ["text", "文本"], ["reasoning", "推理"], ["code", "代码"], ["image", "视觉"], ["tool", "工具调用"],
+];
+
+function modelIcon(item) {
+  if ((item.modalities || []).includes("image")) return "image";
+  if ((item.modalities || []).includes("reasoning")) return "brain-circuit";
+  if ((item.modalities || []).includes("code")) return "code-2";
+  return item.builtin ? "sparkles" : "boxes";
+}
+
+function matchesMarketplaceModel(item) {
+  const query = portalState.marketplace.query.trim().toLocaleLowerCase();
+  const terms = [item.public_name, item.display_name, item.provider, item.summary, ...(item.capabilities || [])].join(" ").toLocaleLowerCase();
+  return (!query || terms.includes(query)) && (portalState.marketplace.modality === "all" || (item.modalities || []).includes(portalState.marketplace.modality));
+}
+
+function renderModelMarketplace() {
+  const visibleModels = portalState.models.filter(matchesMarketplaceModel);
+  const tabContainer = document.getElementById("model-marketplace-tabs");
+  tabContainer.innerHTML = marketplaceFilters.map(([value, label]) => {
+    const count = value === "all" ? portalState.models.length : portalState.models.filter((item) => (item.modalities || []).includes(value)).length;
+    return `<button type="button" class="${portalState.marketplace.modality === value ? "active" : ""}" data-model-filter="${value}">${label}<span>${count}</span></button>`;
+  }).join("");
+  document.getElementById("model-marketplace-count").textContent = `已展示 ${visibleModels.length} / ${portalState.models.length} 个模型`;
+  document.getElementById("portal-models-table").innerHTML = visibleModels.length ? visibleModels.map((item) => `
     <article class="model-catalog-card ${item.builtin ? "is-builtin" : ""}">
-      <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${item.builtin ? "sparkles" : "boxes"}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><p>${escapeHtml(item.summary)}</p></div></div>
+      <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span class="model-provider">${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
       <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
       <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
       <div class="model-price-grid"><div><span>输入 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
-      <div class="model-card-footer"><span><i data-lucide="plug-zap"></i> OpenAI 兼容</span><code>/v1/chat/completions</code></div>
+      <div class="model-card-footer"><span><i data-lucide="circle-check"></i> 可调用</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
     </article>
-  `).join("") : '<div class="model-catalog-empty"><i data-lucide="boxes"></i><span>暂无可用模型</span></div>';
+  `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
   portalIcons();
+}
+
+function modelCurlSnippet(item) {
+  return `curl ${window.location.origin}/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${item.public_name}","messages":[{"role":"user","content":"你好"}]}'`;
+}
+
+function modelPythonSnippet(item) {
+  return `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${window.location.origin}/v1",\n    api_key="YOUR_API_KEY",\n)\n\nresponse = client.chat.completions.create(\n    model="${item.public_name}",\n    messages=[{"role": "user", "content": "你好"}],\n)\nprint(response.choices[0].message.content)`;
+}
+
+function modelDetailDialog(modelName) {
+  const item = portalState.models.find((model) => model.public_name === modelName);
+  if (!item) return;
+  const limit = item.rate_limit || {};
+  openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
+    <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
+    <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
+    <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
+    <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
+  </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>创建 API Key</span></button></div>`);
 }
 
 async function loadUsage() {
@@ -772,6 +822,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("key-search").addEventListener("input", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
   document.getElementById("key-search").addEventListener("change", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
   document.getElementById("key-status-filter").addEventListener("change", (event) => { portalState.keyFilters.status = event.target.value; renderKeyTable(); });
+  document.getElementById("model-marketplace-search").addEventListener("input", (event) => { portalState.marketplace.query = event.target.value; renderModelMarketplace(); });
   document.getElementById("quota-refresh").addEventListener("click", () => loadQuota().catch((error) => portalToast(error.message, true)));
   document.getElementById("orders-refresh").addEventListener("click", () => loadOrders().catch((error) => portalToast(error.message, true)));
   document.getElementById("order-status-filter").addEventListener("change", renderOrders);
@@ -804,6 +855,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.close !== undefined) closePortalDialog();
     if (target.dataset.go) switchPortalView(target.dataset.go);
     if (target.dataset.action === "create-key") keyDialog();
+    if (target.dataset.action === "model-create-key") { closePortalDialog(); await switchPortalView("keys"); keyDialog(); }
     if (target.dataset.action === "key-columns") keyColumnsDialog();
     if (target.dataset.action === "create-payment") paymentDialog().catch((error) => portalToast(error.message, true));
     if (target.dataset.toggleKey) {
@@ -812,6 +864,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.copy === "base-url") { await navigator.clipboard.writeText(document.getElementById("portal-base-url").textContent); portalToast("Base URL 已复制"); }
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
     if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }
+    if (target.dataset.modelFilter) { portalState.marketplace.modality = target.dataset.modelFilter; renderModelMarketplace(); }
+    if (target.dataset.modelDetail) modelDetailDialog(target.dataset.modelDetail);
+    if (target.dataset.copyModelCode) {
+      const model = portalState.models.find((item) => item.public_name === target.dataset.modelName);
+      if (model) {
+        await navigator.clipboard.writeText(target.dataset.copyModelCode === "python" ? modelPythonSnippet(model) : modelCurlSnippet(model));
+        portalToast("调用示例已复制");
+      }
+    }
     if (target.dataset.keyDetail) keyDetailDialog(target.dataset.keyDetail);
     if (target.dataset.requestId) loadUsageDetail(target.dataset.requestId).catch((error) => portalToast(error.message, true));
   });

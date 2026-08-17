@@ -40,7 +40,7 @@
       <nav aria-label="用户导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
         <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
-        <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型</span></button>
+        <button class="nav-item" data-view="models"><i data-lucide="store"></i><span>模型广场</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
@@ -125,8 +125,9 @@
         </section>
 
         <section class="view" id="portal-view-models">
-          <div class="section-header page-section-header"><div><h2>模型目录</h2><p>内置模型已接入统一路由，可直接使用 API Key 调用</p></div><button class="secondary-button" data-go="keys"><i data-lucide="key-round"></i><span>管理 API Key</span></button></div>
-          <section class="model-callout"><i data-lucide="sparkles"></i><div><strong>从模型 ID 开始调用</strong><span>创建 API Key 后，在 SDK 或 OpenAI 兼容接口的 <code>model</code> 参数中填写下方模型 ID。</span></div></section>
+          <div class="section-header page-section-header"><div><h2>模型广场</h2><p>浏览可用模型、比较能力与价格，并获取调用示例</p></div><button class="secondary-button" data-go="keys"><i data-lucide="key-round"></i><span>管理 API Key</span></button></div>
+          <section class="model-callout"><i data-lucide="sparkles"></i><div><strong>选择模型后直接接入</strong><span>在详情中复制模型 ID 或调用示例；每个已上架模型都可通过统一的 OpenAI 兼容接口访问。</span></div></section>
+          <div class="marketplace-toolbar"><div class="input-with-icon"><i data-lucide="search"></i><input id="model-marketplace-search" type="search" placeholder="搜索模型名称、厂商或能力" aria-label="搜索模型"></div><div class="marketplace-tabs" id="model-marketplace-tabs" aria-label="模型能力筛选"></div><span id="model-marketplace-count"></span></div>
           <div class="model-catalog-grid" id="portal-models-table"></div>
         </section>
 

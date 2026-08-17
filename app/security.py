@@ -31,7 +31,11 @@ def _base64url_encode(value: bytes) -> str:
 
 
 def _base64url_decode(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    # Reject alternate encodings that differ only in discarded Base64 padding bits.
+    if _base64url_encode(decoded) != value:
+        raise binascii.Error("non-canonical base64url encoding")
+    return decoded
 
 
 def create_trial_token(account: BillingAccount, expires_in_seconds: int | None = None) -> tuple[str, int]:
