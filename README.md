@@ -14,9 +14,11 @@ Copy-Item .env.example .env
 uvicorn app.main:app --reload
 ```
 
-管理后台：`http://127.0.0.1:8000/`  
-用户中心：`http://127.0.0.1:8000/portal`  
-API 文档：`http://127.0.0.1:8000/docs`
+- LokToken管理控制台：`http://127.0.0.1:8000/`
+- LokToken用户中心：`http://127.0.0.1:8000/portal`
+- 管理文档：`http://127.0.0.1:8000/guide/admin`
+- 用户文档：`http://127.0.0.1:8000/guide/user`
+- OpenAPI 开发参考：`http://127.0.0.1:8000/docs`
 
 默认开启 `TOKEN_MOCK_MODE=true`，不需要真实模型供应商即可验证完整调用链路。生产环境应关闭 Mock，并通过 `provider_api_key_env` 引用环境变量中的供应商密钥，不要把密钥写入数据库。
 
@@ -41,6 +43,8 @@ POST /auth/login      {"login_id":"demo-user","password":"至少 8 位"}
 ```
 
 注册或登录返回 `usr_...` 用户会话令牌；管理员试用链接返回 `trl_...` 试用令牌。两者都通过 `Authorization: Bearer <token>` 访问用户中心，但只有试用令牌会把新建 API Key 的有效期绑定到试用到期时间。会话令牌和试用令牌均有服务端签名和过期时间，账户停用后立即失效。
+
+新用户的完整使用路径为：注册或登录 -> 模型广场选择公开模型 -> 在兑换福利领取额度或创建充值申请 -> 创建 API Key -> 调用 `/v1/chat/completions` -> 在请求记录查看结果与费用。该路径已有端到端回归测试覆盖；新注册账户默认余额为 0，不会绕过额度校验。
 
 管理员可为已有 LokSystem 账户生成限时用户中心链接：
 
@@ -119,8 +123,11 @@ docker compose --env-file .env.docker ps
 
 启动后访问：
 
-- 管理后台：`http://127.0.0.1:8000/`
-- API 文档：`http://127.0.0.1:8000/docs`
+- LokToken管理控制台：`http://127.0.0.1:8000/`
+- LokToken用户中心：`http://127.0.0.1:8000/portal`
+- 管理文档：`http://127.0.0.1:8000/guide/admin`
+- 用户文档：`http://127.0.0.1:8000/guide/user`
+- OpenAPI 开发参考：`http://127.0.0.1:8000/docs`
 
 容器启动时会先执行 `alembic upgrade head`，迁移成功后再启动 API。生产配置固定使用 `TOKEN_AUTO_CREATE_SCHEMA=false`，数据库结构必须由 Alembic 管理；PostgreSQL 数据保存在 `token_postgres_data` volume 中。
 

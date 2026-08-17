@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LokSystem TOKEN 用户中心</title>
+  <title>LokToken用户中心</title>
+  <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/portal.css">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
@@ -11,43 +12,46 @@
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
-    <div class="auth-panel">
-      <div class="brand auth-brand">
-        <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
-        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
-      </div>
-      <p class="auth-kicker">统一模型服务</p>
-      <h1>进入用户中心</h1>
-      <div class="auth-mode-tabs" role="tablist" aria-label="用户中心登录方式">
-        <button type="button" class="active" data-auth-mode="trial">试用链接</button>
-        <button type="button" data-auth-mode="login">账号登录</button>
-        <button type="button" data-auth-mode="register">注册账号</button>
-      </div>
-      <form id="portal-auth-form">
-        <label for="portal-token">试用令牌（trl_ 开头）</label>
-        <div class="password-row">
-          <input id="portal-token" name="token" type="password" autocomplete="off" placeholder="trl_..." required autofocus>
-          <button class="icon-button" id="toggle-portal-token" type="button" title="显示令牌" aria-label="显示令牌"><i data-lucide="eye"></i></button>
+    <div class="auth-layout">
+      <section class="auth-product-intro">
+        <div class="auth-product-brand"><img src="/static/loksystem-icon.png" alt="LokSystem"><span><strong>LokSystem</strong><small>LOKTOKEN</small></span></div>
+        <div class="auth-product-copy"><p>UNIFIED MODEL SERVICE</p><h1>LokToken</h1><h2>从模型选择到稳定调用</h2><span>统一使用模型广场、账户额度、API Key 与请求记录，让每一次调用清晰可控。</span></div>
+        <div class="auth-product-points"><div><i data-lucide="store"></i><span>可用模型一览</span></div><div><i data-lucide="key-round"></i><span>统一 API 接入</span></div><div><i data-lucide="chart-no-axes-combined"></i><span>调用用量可见</span></div></div>
+      </section>
+      <div class="auth-panel auth-panel-form">
+        <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / USER</p><h2>用户中心</h2><span>登录或注册后管理模型调用与账户额度。</span></div>
+        <div class="auth-mode-tabs" role="tablist" aria-label="用户中心登录方式">
+          <button type="button" class="active" data-auth-mode="trial">试用链接</button>
+          <button type="button" data-auth-mode="login">账号登录</button>
+          <button type="button" data-auth-mode="register">注册账号</button>
         </div>
-        <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
-      </form>
-      <form id="portal-login-form" hidden>
-        <label for="portal-login-id">账号</label>
-        <input id="portal-login-id" name="login_id" autocomplete="username" placeholder="用户名" required minlength="3">
-        <label for="portal-login-password">密码</label>
-        <div class="password-row"><input id="portal-login-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-login-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
-        <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
-      </form>
-      <form id="portal-register-form" hidden>
-        <label for="portal-register-name">显示名称</label>
-        <input id="portal-register-name" name="name" autocomplete="name" placeholder="你的名称" required maxlength="120">
-        <label for="portal-register-id">账号</label>
-        <input id="portal-register-id" name="login_id" autocomplete="username" placeholder="3-160 位字母、数字或 _.-" required minlength="3" maxlength="160">
-        <label for="portal-register-password">密码</label>
-        <div class="password-row"><input id="portal-register-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-register-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
-        <button class="primary-button full-button" type="submit"><i data-lucide="user-plus"></i><span>注册并进入</span></button>
-      </form>
-      <p class="auth-error" id="portal-auth-error" role="alert"></p>
+        <form id="portal-auth-form">
+          <label for="portal-token">试用令牌（trl_ 开头）</label>
+          <div class="password-row">
+            <input id="portal-token" name="token" type="password" autocomplete="off" placeholder="trl_..." required autofocus>
+            <button class="icon-button" id="toggle-portal-token" type="button" title="显示令牌" aria-label="显示令牌"><i data-lucide="eye"></i></button>
+          </div>
+          <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
+        </form>
+        <form id="portal-login-form" hidden>
+          <label for="portal-login-id">账号</label>
+          <input id="portal-login-id" name="login_id" autocomplete="username" placeholder="用户名" required minlength="3">
+          <label for="portal-login-password">密码</label>
+          <div class="password-row"><input id="portal-login-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-login-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
+          <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+        </form>
+        <form id="portal-register-form" hidden>
+          <label for="portal-register-name">显示名称</label>
+          <input id="portal-register-name" name="name" autocomplete="name" placeholder="你的名称" required maxlength="120">
+          <label for="portal-register-id">账号</label>
+          <input id="portal-register-id" name="login_id" autocomplete="username" placeholder="3-160 位字母、数字或 _.-" required minlength="3" maxlength="160">
+          <label for="portal-register-password">密码</label>
+          <div class="password-row"><input id="portal-register-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-register-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
+          <button class="primary-button full-button" type="submit"><i data-lucide="user-plus"></i><span>注册并进入</span></button>
+        </form>
+        <p class="auth-error" id="portal-auth-error" role="alert"></p>
+        <a class="auth-doc-link" href="/guide/user"><i data-lucide="book-open"></i><span>查看用户文档</span></a>
+      </div>
     </div>
   </section>
 
@@ -59,16 +63,16 @@
       </div>
       <p class="nav-label">用户中心</p>
       <nav aria-label="用户导航">
-        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
+        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>用户概览</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="store"></i><span>模型广场</span></button>
-        <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
+        <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
       </nav>
       <div class="sidebar-footer">
-        <a href="/docs" target="_blank"><i data-lucide="file-code-2"></i><span>API 文档</span></a>
+        <a href="/guide/user" target="_blank"><i data-lucide="book-open"></i><span>用户文档</span></a>
         <button id="portal-logout"><i data-lucide="log-out"></i><span>退出</span></button>
       </div>
     </aside>
@@ -77,7 +81,7 @@
       <header class="topbar">
         <div>
           <p class="eyebrow">LOKSYSTEM / TOKEN</p>
-          <h1 id="portal-page-title">概览</h1>
+          <h1 id="portal-page-title">用户概览</h1>
         </div>
         <div class="topbar-actions">
           <span class="portal-identity"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>

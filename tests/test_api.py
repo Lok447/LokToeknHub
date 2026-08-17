@@ -81,6 +81,55 @@ async def test_channel_health_check_updates_model_marketplace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_registered_user_can_complete_first_call_journey() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        benefit = await client.post(
+            "/admin/redemption-codes",
+            headers=admin_headers,
+            json={"label": "新用户试用额度", "amount_micros": 100_000, "code": "NEWUSER-2026"},
+        )
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "first-call-user", "name": "First Call User", "password": "correct-horse"},
+        )
+        portal_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+
+        models = await client.get("/portal/models", headers=portal_headers)
+        order = await client.post(
+            "/portal/payment-orders",
+            headers=portal_headers,
+            json={"account_id": registered.json()["account"]["id"], "amount_micros": 10_000, "provider": "manual"},
+        )
+        redeemed = await client.post("/portal/redemption-codes/redeem", headers=portal_headers, json={"code": benefit.json()["code"]})
+        key = await client.post("/portal/api-keys", headers=portal_headers, json={"name": "first-service"})
+        called = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key.json()['key']}"},
+            json={"model": "lok-chat", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        requests = await client.get("/portal/usage/records", headers=portal_headers)
+        orders = await client.get("/portal/payment-orders", headers=portal_headers)
+        user_guide = await client.get("/guide/user")
+        admin_guide = await client.get("/guide/admin")
+
+    assert benefit.status_code == 200
+    assert registered.status_code == 200
+    assert models.status_code == 200 and any(item["public_name"] == "lok-chat" for item in models.json()["data"])
+    assert order.status_code == 200 and order.json()["status"] == "pending"
+    assert redeemed.status_code == 200 and redeemed.json()["balance_micros"] == 100_000
+    assert key.status_code == 200
+    assert called.status_code == 200
+    assert requests.status_code == 200 and requests.json()["total"] == 1
+    assert orders.status_code == 200 and orders.json()["data"][0]["status"] == "pending"
+    assert user_guide.status_code == 200 and admin_guide.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_portal_registration_and_login() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -259,7 +308,7 @@ async def test_admin_console_queries_and_toggles() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         homepage = await client.get("/")
         assert homepage.status_code == 200
-        assert "TOKEN 控制台" in homepage.text
+        assert "LokToken管理控制台" in homepage.text
 
         account = await client.post(
             "/admin/accounts",
@@ -401,7 +450,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         portal_page = await client.get("/portal")
         assert portal_page.status_code == 200
-        assert "LokSystem TOKEN 用户中心" in portal_page.text
+        assert "LokToken用户中心" in portal_page.text
         assert "试用令牌（trl_ 开头）" in portal_page.text
 
         account = await client.post(

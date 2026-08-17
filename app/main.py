@@ -87,6 +87,13 @@ def user_portal() -> FileResponse:
     return FileResponse(static_dir / "portal.html")
 
 
+@app.get("/guide/{audience}", include_in_schema=False)
+def product_guide(audience: str) -> FileResponse:
+    if audience not in {"admin", "user"}:
+        raise HTTPException(status_code=404, detail="guide not found")
+    return FileResponse(static_dir / "guide.html")
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}

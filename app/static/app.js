@@ -6,14 +6,14 @@ const state = {
 };
 
 const titles = {
-  overview: "概览",
-  accounts: "账户",
-  keys: "API Key",
-  models: "模型",
-  payments: "订单",
-  redemptions: "福利",
-  usage: "用量",
-  audit: "审计",
+  overview: "管理概览",
+  models: "模型管理",
+  accounts: "账户管理",
+  keys: "API管理",
+  payments: "订单管理",
+  redemptions: "福利管理",
+  usage: "用量管理",
+  audit: "安全审计",
 };
 
 function icons() {

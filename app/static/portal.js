@@ -13,7 +13,7 @@ const portalState = {
   marketplace: { query: "", modality: "all" },
 };
 
-const portalTitles = { overview: "概览", keys: "API Key", models: "模型广场", usage: "请求记录", quota: "额度管理", orders: "订单管理", redeem: "兑换福利" };
+const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "API管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
 
 function portalIcons() {
   if (window.lucide) window.lucide.createIcons();
