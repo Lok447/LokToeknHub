@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     api_rate_limit_window_seconds: int = 60
     portal_rate_limit_requests: int = 60
     portal_rate_limit_window_seconds: int = 60
+    auth_rate_limit_requests: int = 10
+    auth_rate_limit_window_seconds: int = 60
+    portal_session_ttl_seconds: int = 604800
 
     model_config = SettingsConfigDict(
         env_prefix="TOKEN_",
@@ -77,5 +80,7 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("API rate limit settings must be positive")
     if settings.portal_rate_limit_requests < 1 or settings.portal_rate_limit_window_seconds < 1:
         errors.append("Portal rate limit settings must be positive")
+    if settings.auth_rate_limit_requests < 1 or settings.auth_rate_limit_window_seconds < 1:
+        errors.append("Auth rate limit settings must be positive")
     if errors:
         raise RuntimeError("Invalid production configuration: " + "; ".join(errors))

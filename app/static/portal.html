@@ -18,6 +18,11 @@
       </div>
       <p class="auth-kicker">统一模型服务</p>
       <h1>进入用户中心</h1>
+      <div class="auth-mode-tabs" role="tablist" aria-label="用户中心登录方式">
+        <button type="button" class="active" data-auth-mode="trial">试用链接</button>
+        <button type="button" data-auth-mode="login">账号登录</button>
+        <button type="button" data-auth-mode="register">注册账号</button>
+      </div>
       <form id="portal-auth-form">
         <label for="portal-token">试用令牌（trl_ 开头）</label>
         <div class="password-row">
@@ -25,6 +30,22 @@
           <button class="icon-button" id="toggle-portal-token" type="button" title="显示令牌" aria-label="显示令牌"><i data-lucide="eye"></i></button>
         </div>
         <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
+      </form>
+      <form id="portal-login-form" hidden>
+        <label for="portal-login-id">账号</label>
+        <input id="portal-login-id" name="login_id" autocomplete="username" placeholder="用户名" required minlength="3">
+        <label for="portal-login-password">密码</label>
+        <div class="password-row"><input id="portal-login-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-login-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
+        <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+      </form>
+      <form id="portal-register-form" hidden>
+        <label for="portal-register-name">显示名称</label>
+        <input id="portal-register-name" name="name" autocomplete="name" placeholder="你的名称" required maxlength="120">
+        <label for="portal-register-id">账号</label>
+        <input id="portal-register-id" name="login_id" autocomplete="username" placeholder="3-160 位字母、数字或 _.-" required minlength="3" maxlength="160">
+        <label for="portal-register-password">密码</label>
+        <div class="password-row"><input id="portal-register-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-register-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
+        <button class="primary-button full-button" type="submit"><i data-lucide="user-plus"></i><span>注册并进入</span></button>
       </form>
       <p class="auth-error" id="portal-auth-error" role="alert"></p>
     </div>

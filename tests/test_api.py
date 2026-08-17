@@ -62,6 +62,73 @@ async def test_seeded_builtin_model_is_directly_callable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_channel_health_check_updates_model_marketplace() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=admin_headers, json={"external_user_id": "health-user", "name": "Health User"})
+        trial = await client.post("/admin/trial-links", headers=admin_headers, json={"account_id": account.json()["id"], "expires_in_seconds": 3600})
+        health = await client.post("/admin/models/health-check", headers=admin_headers, json={})
+        models = await client.get("/portal/models", headers={"Authorization": f"Bearer {trial.json()['access_token']}"})
+    assert health.status_code == 200
+    assert health.json()["checked"] >= 3
+    assert health.json()["healthy"] == health.json()["checked"]
+    assert models.status_code == 200
+    assert {item["health_status"] for item in models.json()["data"]} == {"healthy"}
+
+
+@pytest.mark.asyncio
+async def test_portal_registration_and_login() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "new-user", "name": "New User", "password": "correct-horse"},
+        )
+        assert registered.status_code == 200
+        assert registered.json()["access_token"].startswith("usr_")
+        profile = await client.get(
+            "/portal/profile",
+            headers={"Authorization": f"Bearer {registered.json()['access_token']}"},
+        )
+        assert profile.status_code == 200
+        assert profile.json()["name"] == "New User"
+        duplicate = await client.post(
+            "/auth/register",
+            json={"login_id": "new-user", "name": "Duplicate", "password": "correct-horse"},
+        )
+        assert duplicate.status_code == 409
+        login = await client.post("/auth/login", json={"login_id": "NEW-USER", "password": "correct-horse"})
+        assert login.status_code == 200
+        invalid = await client.post("/auth/login", json={"login_id": "new-user", "password": "wrong-password"})
+        assert invalid.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_trial_bound_api_key_expires_with_trial(monkeypatch) -> None:
+    from app.models import BillingAccount
+
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=admin_headers, json={"external_user_id": "trial-expiry-user", "name": "Trial Expiry"})
+        trial = await client.post("/admin/trial-links", headers=admin_headers, json={"account_id": account.json()["id"], "expires_in_seconds": 3600})
+        portal_headers = {"Authorization": f"Bearer {trial.json()['access_token']}"}
+        key = await client.post("/portal/api-keys", headers=portal_headers, json={"name": "trial-bound"})
+        assert key.status_code == 200
+        with SessionLocal() as db:
+            account_record = db.get(BillingAccount, account.json()["id"])
+            api_key = db.query(ApiKey).filter(ApiKey.account_id == account_record.id, ApiKey.name == "trial-bound").one()
+            api_key.trial_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+        response = await client.get("/v1/models", headers={"Authorization": f"Bearer {key.json()['key']}"})
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_create_key_model_and_chat() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -380,7 +447,8 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         )
         assert dated_key.status_code == 200
         dated_key_list = await client.get("/portal/api-keys", headers=portal_headers)
-        assert next(item for item in dated_key_list.json()["data"] if item["id"] == dated_key.json()["id"])["expires_at"].startswith("2099-01-02")
+        dated_key_expiry = next(item for item in dated_key_list.json()["data"] if item["id"] == dated_key.json()["id"])["expires_at"]
+        assert dated_key_expiry < "2099-01-02T00:00:00"
         forbidden = await client.patch(
             f"/portal/api-keys/{other_key.json()['id']}", headers=portal_headers, json={"active": False}
         )

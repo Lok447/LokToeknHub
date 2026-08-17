@@ -16,10 +16,10 @@ from .builtin_models import model_metadata
 from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelConfig, PaymentOrder, RedemptionClaim, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionClaim, RedemptionCode, UsageRecord, utcnow
 from .payment_providers import payment_providers, require_available_provider
-from .schemas import ActiveUpdate, PaymentOrderCreate, PortalApiKeyCreate, RedemptionCodeRedeem, TrialLinkCreate
-from .security import create_key, create_trial_token, hash_key, require_admin, require_trial_account
+from .schemas import ActiveUpdate, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, RedemptionCodeRedeem, TrialLinkCreate
+from .security import PortalContext, create_key, create_portal_session_token, create_trial_token, hash_key, hash_password, require_admin, require_portal_context, require_trial_account, verify_password
 
 
 router = APIRouter()
@@ -29,7 +29,14 @@ def portal_account(
     authorization: Annotated[str | None, Header()] = None,
     db: Session = Depends(get_db),
 ) -> BillingAccount:
-    return require_trial_account(authorization, db)
+    return require_portal_context(authorization, db).account
+
+
+def portal_context(
+    authorization: Annotated[str | None, Header()] = None,
+    db: Session = Depends(get_db),
+) -> PortalContext:
+    return require_portal_context(authorization, db)
 
 
 def order_data(order: PaymentOrder) -> dict[str, object]:
@@ -112,6 +119,53 @@ def create_trial_link(payload: TrialLinkCreate, request: Request, db: Session = 
     }
 
 
+def auth_response(account: BillingAccount) -> dict[str, object]:
+    token, expires_at = create_portal_session_token(account)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+        "account": {"id": account.id, "name": account.name, "external_user_id": account.external_user_id},
+    }
+
+
+@router.post("/auth/register")
+def register(payload: PortalRegister, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    rate_limiter.check("auth-register", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
+    login_id = payload.login_id.lower()
+    if db.scalar(select(BillingAccount).where(BillingAccount.login_id == login_id)):
+        raise HTTPException(status_code=409, detail="login id already exists")
+    account = BillingAccount(
+        external_user_id=f"user-{uuid.uuid4().hex[:20]}",
+        login_id=login_id,
+        password_hash=hash_password(payload.password),
+        name=payload.name,
+    )
+    try:
+        db.add(account)
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="login id already exists") from exc
+    record_audit_event(db, actor_type="public", actor_id=login_id, action="account.registered", target_type="account", target_id=account.id, details={})
+    db.commit()
+    db.refresh(account)
+    return auth_response(account)
+
+
+@router.post("/auth/login")
+def login(payload: PortalLogin, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    rate_limiter.check("auth-login", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
+    account = db.scalar(select(BillingAccount).where(BillingAccount.login_id == payload.login_id.lower()))
+    if not account or not account.password_hash or not verify_password(payload.password, account.password_hash):
+        raise HTTPException(status_code=401, detail="invalid login credentials")
+    if not account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
+    return auth_response(account)
+
+
 @router.get("/portal/profile")
 def profile(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
     return {
@@ -136,13 +190,14 @@ def list_api_keys(account: BillingAccount = Depends(portal_account), db: Session
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
         "spending_limit_micros": item.spending_limit_micros,
         "spent_micros": item.spent_micros,
+        "trial_expires_at": item.trial_expires_at.isoformat() if item.trial_expires_at else None,
         "last_used_at": item.last_used_at.isoformat() if item.last_used_at else None,
         "created_at": item.created_at.isoformat(),
     } for item in keys]}
 
 
 @router.post("/portal/api-keys")
-def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depends(portal_account), context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
     settings = get_settings()
     rate_limiter.check("portal-key-create", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
     exact_expiry = payload.expires_at
@@ -151,12 +206,16 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
     if exact_expiry and exact_expiry <= utcnow():
         raise HTTPException(status_code=422, detail="expires_at must be in the future")
     raw_key = create_key()
+    trial_expires_at = context.expires_at if context.token_type == "trial" else None
+    if trial_expires_at and (exact_expiry is None or exact_expiry > trial_expires_at):
+        exact_expiry = trial_expires_at
     record = ApiKey(
         account_id=account.id,
         name=payload.name,
         key_prefix=raw_key[:12],
         key_hash=hash_key(raw_key),
         expires_at=exact_expiry or (utcnow() + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None),
+        trial_expires_at=trial_expires_at,
         spending_limit_micros=payload.spending_limit_micros,
     )
     db.add(record)
@@ -183,17 +242,36 @@ def list_models(account: BillingAccount = Depends(portal_account), db: Session =
     del account
     settings = get_settings()
     models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
-    return {"data": [{
-        "id": item.id,
-        "public_name": item.public_name,
-        "input_price_micros_per_1k": item.input_price_micros_per_1k,
-        "output_price_micros_per_1k": item.output_price_micros_per_1k,
-        "rate_limit": {
-            "requests": settings.api_rate_limit_requests,
-            "window_seconds": settings.api_rate_limit_window_seconds,
-        },
-        **model_metadata(item.public_name),
-    } for item in models]}
+    data = []
+    for item in models:
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == item.id)).all()
+        active_channels = [channel for channel in channels if channel.active]
+        healthy_channels = [channel for channel in active_channels if channel.status == "healthy"]
+        if not active_channels:
+            health_status = "unavailable"
+        elif healthy_channels:
+            health_status = "healthy"
+        elif any(channel.status == "unknown" for channel in active_channels):
+            health_status = "checking"
+        else:
+            health_status = "degraded"
+        data.append({
+            "id": item.id,
+            "public_name": item.public_name,
+            "input_price_micros_per_1k": item.input_price_micros_per_1k,
+            "output_price_micros_per_1k": item.output_price_micros_per_1k,
+            "rate_limit": {
+                "requests": settings.api_rate_limit_requests,
+                "window_seconds": settings.api_rate_limit_window_seconds,
+            },
+            "health_status": health_status,
+            "channel_count": len(channels),
+            "active_channel_count": len(active_channels),
+            "healthy_channel_count": len(healthy_channels),
+            "last_checked_at": max((channel.last_checked_at for channel in active_channels if channel.last_checked_at), default=None).isoformat() if any(channel.last_checked_at for channel in active_channels) else None,
+            **model_metadata(item.public_name),
+        })
+    return {"data": data}
 
 
 @router.get("/portal/usage")

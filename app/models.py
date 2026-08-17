@@ -15,6 +15,8 @@ class BillingAccount(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     external_user_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    login_id: Mapped[str | None] = mapped_column(String(160), unique=True, nullable=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
     name: Mapped[str] = mapped_column(String(120))
     balance_micros: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -31,6 +33,7 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    trial_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     spending_limit_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
     spent_micros: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -72,8 +72,25 @@ function activeBadge(active) {
   return `<span class="badge ${active ? "success" : "neutral"}">${active ? "有效" : "已停用"}</span>`;
 }
 
+function keyExpiry(item) {
+  const values = [item.expires_at, item.trial_expires_at].filter(Boolean).map((value) => new Date(value));
+  return values.length ? new Date(Math.min(...values.map((value) => value.getTime()))) : null;
+}
+
+function modelHealth(item) {
+  const map = {
+    healthy: ["success", "渠道健康"],
+    checking: ["warning", "待检测"],
+    degraded: ["warning", "部分异常"],
+    unavailable: ["error", "暂不可用"],
+  };
+  const [kind, label] = map[item.health_status] || ["neutral", "状态未知"];
+  return `<span class="badge ${kind}">${label}</span>`;
+}
+
 function keyStatusBadge(item) {
-  if (item.expires_at && new Date(item.expires_at) <= new Date()) return '<span class="badge warning">已过期</span>';
+  const expiry = keyExpiry(item);
+  if (expiry && expiry <= new Date()) return '<span class="badge warning">已过期</span>';
   return activeBadge(item.active);
 }
 
@@ -103,7 +120,10 @@ async function portalApi(path, options = {}) {
       "missing trial access token": "缺少试用令牌，请使用管理员生成的试用链接进入。",
       "invalid trial access token": "试用令牌格式无效，请重新生成试用链接。",
       "invalid or expired trial access token": "试用令牌无效或已过期，请重新生成试用链接。",
-      "billing account is inactive": "当前试用账户已停用，请联系管理员。",
+      "billing account is inactive": "当前账户已停用，请联系管理员。",
+      "invalid login credentials": "账号或密码错误。",
+      "account is inactive": "当前账户已停用，请联系管理员。",
+      "login id already exists": "该账号已存在，请更换账号或直接登录。",
       "redemption code not found": "兑换码不存在，请检查后重试。",
       "redemption code already used by this account": "当前账户已领取过该兑换码。",
       "redemption code is unavailable": "兑换码已失效、过期或已被领取完毕。",
@@ -119,6 +139,22 @@ async function portalApi(path, options = {}) {
     throw new Error(detail);
   }
   return response.json();
+}
+
+async function establishPortalSession(result) {
+  portalState.token = result.access_token;
+  sessionStorage.setItem("token_portal_access", portalState.token);
+  await loadProfile();
+  showPortalShell();
+  await switchPortalView("overview");
+}
+
+function setAuthMode(mode) {
+  const forms = { trial: "portal-auth-form", login: "portal-login-form", register: "portal-register-form" };
+  Object.entries(forms).forEach(([key, id]) => { document.getElementById(id).hidden = key !== mode; });
+  document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.authMode === mode));
+  document.getElementById("portal-auth-error").textContent = "";
+  portalIcons();
 }
 
 function showPortalAuth(message = "") {
@@ -317,14 +353,15 @@ function keyUsageMarkup(item) {
 
 function keyMatchesStatus(item, status) {
   if (!status) return true;
-  const expired = item.expires_at && new Date(item.expires_at) <= new Date();
+  const expiry = keyExpiry(item);
+  const expired = expiry && expiry <= new Date();
   if (status === "expired") return Boolean(expired);
   if (status === "active") return Boolean(item.active && !expired);
   return status === "inactive" && !item.active && !expired;
 }
 
 function renderKeyMetrics(items) {
-  const active = items.filter((item) => item.active && !(item.expires_at && new Date(item.expires_at) <= new Date())).length;
+  const active = items.filter((item) => item.active && !(keyExpiry(item) && keyExpiry(item) <= new Date())).length;
   const totalSpent = items.reduce((sum, item) => sum + Number(item.spent_micros || 0), 0);
   const limited = items.filter((item) => item.spending_limit_micros != null).length;
   const latest = items.map((item) => item.last_used_at).filter(Boolean).sort().at(-1);
@@ -332,7 +369,7 @@ function renderKeyMetrics(items) {
     { label: "Key 总数", value: formatNumber(items.length), meta: `${formatNumber(active)} 个当前有效`, icon: "key-round" },
     { label: "累计用量", value: formatMoney(totalSpent), meta: `${formatNumber(limited)} 个设置了额度`, icon: "receipt-text", color: "blue" },
     { label: "最近使用", value: latest ? formatDate(latest) : "暂无", meta: "最近一次 API 调用", icon: "clock-3", color: "orange" },
-    { label: "即将到期", value: formatNumber(items.filter((item) => item.expires_at && new Date(item.expires_at) > new Date() && new Date(item.expires_at) <= new Date(Date.now() + 30 * 86400000)).length), meta: "未来 30 天", icon: "calendar-clock" },
+    { label: "即将到期", value: formatNumber(items.filter((item) => keyExpiry(item) && keyExpiry(item) > new Date() && keyExpiry(item) <= new Date(Date.now() + 30 * 86400000)).length), meta: "未来 30 天", icon: "calendar-clock" },
   ]);
 }
 
@@ -354,7 +391,7 @@ function renderKeyTable() {
       <td data-key-cell="name"><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
       <td data-key-cell="key"><div class="key-prefix-cell"><code>${escapeHtml(item.key_prefix)}...</code><button class="icon-button compact-icon" data-copy-key-prefix="${escapeHtml(item.key_prefix)}" type="button" title="复制 Key 前缀" aria-label="复制 Key 前缀"><i data-lucide="copy"></i></button></div></td>
       <td data-key-cell="usage">${keyUsageMarkup(item)}</td>
-      <td data-key-cell="expires">${item.expires_at ? formatDate(item.expires_at) : "长期有效"}</td>
+      <td data-key-cell="expires">${keyExpiry(item) ? formatDate(keyExpiry(item)) : "长期有效"}</td>
       <td data-key-cell="last-used">${formatDate(item.last_used_at)}</td>
       <td data-key-cell="status">${keyStatusBadge(item)}</td>
       <td data-key-cell="created">${formatDate(item.created_at)}</td>
@@ -410,7 +447,7 @@ function renderModelMarketplace() {
       <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
       <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
       <div class="model-price-grid"><div><span>输入 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
-      <div class="model-card-footer"><span><i data-lucide="circle-check"></i> 可调用</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
+      <div class="model-card-footer"><span><i data-lucide="activity"></i> ${modelHealth(item)}</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
     </article>
   `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
   portalIcons();
@@ -431,7 +468,7 @@ function modelDetailDialog(modelName) {
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
     <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
   </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>创建 API Key</span></button></div>`);
@@ -724,7 +761,7 @@ function keyDetailDialog(keyId) {
       <div><span>Key 前缀</span><strong class="mono">${escapeHtml(item.key_prefix)}...</strong></div>
       <div><span>消费额度</span><strong>${escapeHtml(formatKeyBudget(item))}</strong></div>
       <div><span>创建时间</span><strong>${formatDate(item.created_at)}</strong></div>
-      <div><span>过期时间</span><strong>${item.expires_at ? formatDate(item.expires_at) : "长期有效"}</strong></div>
+      <div><span>过期时间</span><strong>${keyExpiry(item) ? formatDate(keyExpiry(item)) : "长期有效"}</strong></div>
       <div><span>最近使用</span><strong>${formatDate(item.last_used_at)}</strong></div>
       <div><span>安全提示</span><strong>完整密钥不可恢复</strong></div>
     </div>
@@ -808,6 +845,25 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     try { await loadProfile(); sessionStorage.setItem("token_portal_access", portalState.token); showPortalShell(); await switchPortalView("overview"); } catch (error) { showPortalAuth(error.message); }
+  });
+  document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.addEventListener("click", () => setAuthMode(button.dataset.authMode)));
+  document.querySelectorAll("[data-toggle-password]").forEach((button) => button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.togglePassword);
+    input.type = input.type === "password" ? "text" : "password";
+  }));
+  document.getElementById("portal-login-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = Object.fromEntries(new FormData(event.currentTarget));
+      await establishPortalSession(await portalApi("/auth/login", { method: "POST", body: JSON.stringify(data) }));
+    } catch (error) { showPortalAuth(error.message); }
+  });
+  document.getElementById("portal-register-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = Object.fromEntries(new FormData(event.currentTarget));
+      await establishPortalSession(await portalApi("/auth/register", { method: "POST", body: JSON.stringify(data) }));
+    } catch (error) { showPortalAuth(error.message); }
   });
   document.getElementById("toggle-portal-token").addEventListener("click", () => {
     const input = document.getElementById("portal-token");

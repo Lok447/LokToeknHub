@@ -24,9 +24,15 @@ def init_db() -> None:
         return
     Base.metadata.create_all(bind=engine)
     inspector = inspect(engine)
+    account_columns = {column["name"] for column in inspector.get_columns("billing_accounts")}
     api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
     usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
     with engine.begin() as connection:
+        if "login_id" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN login_id VARCHAR(160)"))
+        if "password_hash" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN password_hash VARCHAR(256)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_billing_accounts_login_id ON billing_accounts (login_id)"))
         if "account_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN account_id INTEGER"))
         if "expires_at" not in api_key_columns:
@@ -41,7 +47,10 @@ def init_db() -> None:
             ))
         if "last_used_at" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN last_used_at DATETIME"))
+        if "trial_expires_at" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_expires_at DATETIME"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
         if "account_id" not in usage_columns:
             connection.execute(text("ALTER TABLE usage_records ADD COLUMN account_id INTEGER"))
 
@@ -136,7 +145,7 @@ def seed_builtin_models() -> None:
     if not settings.mock_mode or not settings.seed_builtin_models:
         return
     from .builtin_models import BUILTIN_MODELS
-    from .models import ModelChannel, ModelConfig
+    from .models import ModelChannel, ModelConfig, utcnow
 
     with SessionLocal() as db:
         existing_names = set(db.scalars(select(ModelConfig.public_name)).all())
@@ -160,6 +169,10 @@ def seed_builtin_models() -> None:
                 priority=100,
                 weight=100,
             ))
+        if settings.mock_mode:
+            for channel in db.scalars(select(ModelChannel).where(ModelChannel.status == "unknown")).all():
+                channel.status = "healthy"
+                channel.last_checked_at = utcnow()
         db.commit()
 
 

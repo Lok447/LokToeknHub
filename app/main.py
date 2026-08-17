@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI):
     yield
 
 
-app = FastAPI(title="TOKEN Platform", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="TOKEN Platform", version="1.2.0", lifespan=lifespan)
 if cors_origin_list(get_settings()):
     app.add_middleware(
         CORSMiddleware,
@@ -120,6 +120,9 @@ def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> 
 
 @app.get("/admin/overview", dependencies=[Depends(require_admin)])
 def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
+    active_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True))) or 0
+    healthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "healthy")) or 0
+    unhealthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0
     return {
         "account_count": db.scalar(select(func.count(BillingAccount.id))) or 0,
         "active_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.active.is_(True))) or 0,
@@ -128,6 +131,9 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "request_count": db.scalar(select(func.count(UsageRecord.id))) or 0,
         "total_tokens": db.scalar(select(func.coalesce(func.sum(UsageRecord.total_tokens), 0))) or 0,
         "amount_micros": db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0))) or 0,
+        "active_channel_count": active_channels,
+        "healthy_channel_count": healthy_channels,
+        "unhealthy_channel_count": unhealthy_channels,
         "pending_payment_count": db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0,
     }
 
@@ -301,6 +307,7 @@ def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
         {
             "id": account.id,
             "external_user_id": account.external_user_id,
+            "login_id": account.login_id,
             "name": account.name,
             "balance_micros": account.balance_micros,
             "active": account.active,
@@ -338,6 +345,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
             "key_prefix": api_key.key_prefix,
             "active": api_key.active,
             "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
+            "trial_expires_at": api_key.trial_expires_at.isoformat() if api_key.trial_expires_at else None,
             "spending_limit_micros": api_key.spending_limit_micros,
             "spent_micros": api_key.spent_micros,
             "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
@@ -684,6 +692,21 @@ async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db
     result = await check_channel_health(db, channel)
     db.refresh(channel)
     return {**channel_data(channel), **result}
+
+
+@app.post("/admin/models/health-check", dependencies=[Depends(require_admin)])
+async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[str, object]:
+    channels = db.scalars(select(ModelChannel).where(ModelChannel.active.is_(True)).order_by(ModelChannel.priority, ModelChannel.id)).all()
+    results = []
+    for channel in channels:
+        result = await check_channel_health(db, channel)
+        results.append({"channel_id": channel.id, "model_config_id": channel.model_config_id, **result})
+    return {
+        "checked": len(results),
+        "healthy": sum(1 for item in results if item["healthy"]),
+        "unhealthy": sum(1 for item in results if not item["healthy"]),
+        "data": results,
+    }
 
 
 @app.get("/v1/models")

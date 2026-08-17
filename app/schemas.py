@@ -23,6 +23,17 @@ class TrialLinkCreate(BaseModel):
     expires_in_seconds: int | None = Field(default=None, ge=300, le=2592000)
 
 
+class PortalRegister(BaseModel):
+    login_id: str = Field(min_length=3, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,159}$")
+    name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PortalLogin(BaseModel):
+    login_id: str = Field(min_length=3, max_length=160)
+    password: str = Field(min_length=8, max_length=128)
+
+
 class AccountCreate(BaseModel):
     external_user_id: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)

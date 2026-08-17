@@ -1,8 +1,8 @@
-# LokSystem TOKEN 1.1
+# LokSystem TOKEN 1.2
 
-TOKEN 是 loksystem 的统一模型调用和用量计费平台 MVP。
+TOKEN 是 loksystem 的统一模型调用和用量计费平台 MVP，当前版本为 1.2.0。
 
-TOKEN 1.0 面向 LokSystem 用户提供统一模型调用、账户额度、API Key、试用接入、充值订单和兑换福利。它与后续观测运营平台保持独立边界：TOKEN 只保存调用元数据和计费结果，不保存模型输入或输出正文。
+TOKEN 1.2 面向 LokSystem 用户提供统一模型调用、账户额度、API Key、试用接入、充值订单和兑换福利。它与后续观测运营平台保持独立边界：TOKEN 只保存调用元数据和计费结果，不保存模型输入或输出正文。
 
 ## 快速开始
 
@@ -32,6 +32,15 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Header
 用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按文本、推理、代码、视觉和工具调用筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。
 
 ## 用户试用闭环 v0.2
+
+用户可以直接注册账号或使用管理员发放的限时试用链接：
+
+```text
+POST /auth/register   {"login_id":"demo-user","name":"Demo User","password":"至少 8 位"}
+POST /auth/login      {"login_id":"demo-user","password":"至少 8 位"}
+```
+
+注册或登录返回 `usr_...` 用户会话令牌；管理员试用链接返回 `trl_...` 试用令牌。两者都通过 `Authorization: Bearer <token>` 访问用户中心，但只有试用令牌会把新建 API Key 的有效期绑定到试用到期时间。会话令牌和试用令牌均有服务端签名和过期时间，账户停用后立即失效。
 
 管理员可为已有 LokSystem 账户生成限时用户中心链接：
 
@@ -71,6 +80,14 @@ POST  /admin/channels/{channel_id}/check
 ```
 
 主动健康检查调用渠道的 `GET /models`。生产环境建议根据供应商限流策略合理设置检查频率，并通过 `TOKEN_CHANNEL_FAILURE_THRESHOLD`、`TOKEN_CHANNEL_CIRCUIT_COOLDOWN_SECONDS`、`TOKEN_MAX_CHANNEL_ATTEMPTS` 和超时配置调整故障转移策略。
+
+管理员可以一次检查所有启用渠道：
+
+```text
+POST /admin/models/health-check
+```
+
+返回已检查、健康和异常渠道数量；用户模型广场会同步显示健康、待检测、部分异常或暂不可用状态。
 
 ## 模型接入与定价
 

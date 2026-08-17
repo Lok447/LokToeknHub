@@ -161,6 +161,7 @@ async function loadOverview() {
     ["server", "API 服务", "正常"],
     ["route", `模型网关 · ${overview.active_model_count}`, overview.active_model_count ? "正常" : "待配置"],
     ["key-round", `有效 Key · ${overview.active_key_count}`, overview.active_key_count ? "正常" : "待创建"],
+    ["activity", `渠道健康 · ${overview.healthy_channel_count}/${overview.active_channel_count}`, overview.active_channel_count && overview.unhealthy_channel_count === 0 ? "正常" : "需检查"],
     ["database", "计费账本", "正常"],
   ].map(([icon, name, value]) => `<div class="status-row"><span class="status-name"><i data-lucide="${icon}"></i>${escapeHtml(name)}</span><span class="badge ${value === "正常" ? "success" : "warning"}">${value}</span></div>`).join("");
   icons();
@@ -213,6 +214,12 @@ async function loadModels() {
     </tr>
   `).join("") : emptyRow(7);
   icons();
+}
+
+async function checkAllChannels() {
+  const result = await api("/admin/models/health-check", { method: "POST", body: "{}" });
+  toast(`已检测 ${result.checked} 个渠道：${result.healthy} 个健康，${result.unhealthy} 个异常`, result.unhealthy > 0);
+  await loadModels();
 }
 
 async function loadPayments() {
@@ -697,6 +704,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "create-account") accountDialog();
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
+    if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
     if (target.dataset.action === "import-models") modelImportDialog();
     if (target.dataset.action === "edit-model-pricing") modelPricingDialog(target.dataset.id, target.dataset.name, target.dataset.inputPrice, target.dataset.outputPrice);
     if (target.dataset.action === "manage-channels") channelDialog(target.dataset.id, target.dataset.name).catch((error) => toast(error.message, true));
