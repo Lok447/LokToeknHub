@@ -26,12 +26,60 @@ class BillingAccount(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    owner_account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OrganizationMember(Base):
+    __tablename__ = "organization_members"
+    __table_args__ = (UniqueConstraint("organization_id", "account_id", name="uq_organization_members_org_account"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(32), default="member", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (UniqueConstraint("owner_account_id", "workspace_type", name="uq_workspaces_owner_type"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    workspace_type: Mapped[str] = mapped_column(String(24), default="personal", index=True)
+    owner_account_id: Mapped[int | None] = mapped_column(ForeignKey("billing_accounts.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization_id: Mapped[int | None] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, unique=True, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (UniqueConstraint("workspace_id", "slug", name="uq_projects_workspace_slug"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    slug: Mapped[str] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ApiKey(Base):
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
     account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     key_prefix: Mapped[str] = mapped_column(String(24), index=True)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
@@ -54,6 +102,8 @@ class ModelConfig(Base):
     provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
     input_price_micros_per_1k: Mapped[int] = mapped_column(Integer, default=0)
     output_price_micros_per_1k: Mapped[int] = mapped_column(Integer, default=0)
+    catalog_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    official_pricing_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -86,6 +136,8 @@ class UsageRecord(Base):
     request_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     trace_id: Mapped[str] = mapped_column(String(64), index=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     api_key_id: Mapped[int] = mapped_column(Integer, index=True)
     model: Mapped[str] = mapped_column(String(120), index=True)
     upstream_model: Mapped[str] = mapped_column(String(120))
@@ -104,6 +156,8 @@ class AccountBalanceTransaction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     api_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     amount_micros: Mapped[int] = mapped_column(Integer)
     transaction_type: Mapped[str] = mapped_column(String(32), index=True)
@@ -118,6 +172,8 @@ class PaymentOrder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     order_no: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    workspace_id: Mapped[int | None] = mapped_column(ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     amount_micros: Mapped[int] = mapped_column(Integer)
     provider: Mapped[str] = mapped_column(String(32), default="manual", index=True)
     provider_order_id: Mapped[str | None] = mapped_column(String(120), nullable=True, unique=True)
@@ -174,6 +230,31 @@ class SecurityNotification(Base):
     details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class ExternalIdentity(Base):
+    __tablename__ = "external_identities"
+    __table_args__ = (UniqueConstraint("issuer", "subject", name="uq_external_identities_issuer_subject"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="oidc", index=True)
+    issuer: Mapped[str] = mapped_column(String(500), index=True)
+    subject: Mapped[str] = mapped_column(String(255), index=True)
+    email: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class OidcLoginChallenge(Base):
+    __tablename__ = "oidc_login_challenges"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    nonce: Mapped[str] = mapped_column(String(128))
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class RedemptionCode(Base):

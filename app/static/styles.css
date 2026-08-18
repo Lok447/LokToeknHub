@@ -69,9 +69,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .auth-panel label { color: #3d4650; font-size: 12px; font-weight: 700; }
 .auth-panel .primary-button { min-height: 42px; }
 .auth-error { min-height: 20px; margin: 14px 0 0; color: var(--danger); font-size: 12px; }
-.auth-doc-link { display: inline-flex; align-items: center; gap: 7px; justify-self: start; margin-top: 18px; color: #2856d8; font-size: 11px; font-weight: 700; text-decoration: none; }
-.auth-doc-link:hover { color: var(--ink); }
-.auth-doc-link svg { width: 15px; height: 15px; }
 
 .brand { height: 76px; display: flex; align-items: center; gap: 11px; padding: 0 18px; color: var(--ink); }
 .brand-mark { width: 34px; height: 34px; flex: 0 0 34px; border: 1px solid var(--line); border-radius: 6px; object-fit: cover; box-shadow: 0 2px 8px rgba(17, 24, 32, 0.06); }
@@ -83,13 +80,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; background: #fbfbfb; border-right: 1px solid var(--line); }
 .nav-label { margin: 8px 20px 7px; color: var(--faint); font-size: 10px; font-weight: 750; }
 .sidebar nav { display: grid; gap: 4px; padding: 0 10px 14px; }
-.nav-item, .sidebar-footer button, .sidebar-footer a { position: relative; width: 100%; min-height: 42px; display: flex; align-items: center; gap: 11px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent; color: #626c76; text-decoration: none; cursor: pointer; }
-.nav-item:hover, .sidebar-footer button:hover, .sidebar-footer a:hover { background: var(--surface-muted); color: var(--ink); }
+.nav-item, .sidebar-action, .sidebar-footer button, .sidebar-footer a { position: relative; width: 100%; min-height: 42px; display: flex; align-items: center; gap: 11px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent; color: #626c76; text-decoration: none; cursor: pointer; }
+.nav-item:hover, .sidebar-action:hover, .sidebar-footer button:hover, .sidebar-footer a:hover { background: var(--surface-muted); color: var(--ink); }
 .nav-item.active { background: var(--signal-soft); color: #2856d8; font-weight: 700; }
 .nav-item.active::before { content: ""; position: absolute; left: 0; width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--signal); }
 .nav-item span { white-space: nowrap; }
-.nav-item svg, .sidebar-footer svg { width: 17px; height: 17px; flex: 0 0 17px; stroke-width: 1.8; }
+.nav-item svg, .sidebar-action svg, .sidebar-footer svg { width: 17px; height: 17px; flex: 0 0 17px; stroke-width: 1.8; }
+.sidebar-workspace { display: grid; gap: 4px; margin-top: 2px; padding: 12px 10px 14px; border-top: 1px solid var(--line); }
+.sidebar-section-label { margin: 0 10px 4px; color: var(--faint); font-size: 10px; font-weight: 750; }
+.sidebar-action { min-height: 36px; font-size: 11px; }
+.sidebar-action svg { width: 15px; height: 15px; flex-basis: 15px; }
 .sidebar-footer { margin-top: auto; padding: 12px 10px; border-top: 1px solid var(--line); }
+.sidebar-account { display: grid; gap: 2px; min-width: 0; padding: 0 12px 10px; }
+.sidebar-account strong { overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-account small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 main { min-width: 0; }
 .topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 30px; background: rgba(255, 255, 255, 0.96); border-bottom: 1px solid var(--line); }
@@ -236,6 +240,10 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .sidebar nav { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 7px 8px 9px; }
   .nav-item { min-width: 0; justify-content: center; gap: 6px; padding: 0 8px; }
   .nav-item.active::before { inset: auto auto 0; width: 22px; height: 3px; border-radius: 3px 3px 0 0; }
+  .sidebar-workspace { grid-template-columns: 1fr 1fr; align-items: center; padding: 8px; }
+  .sidebar-section-label { display: none; }
+  .sidebar-workspace .workspace-switcher { grid-column: 1 / -1; }
+  .sidebar-action { justify-content: center; gap: 6px; padding: 0 8px; }
   .sidebar-footer { display: none; }
   .topbar { height: 64px; padding: 0 16px; }
   .environment { display: none; }

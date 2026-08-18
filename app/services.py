@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import get_settings
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, UsageRecord, utcnow
 from .schemas import ChatCompletionRequest
 
 
@@ -64,8 +64,11 @@ def reserve_balance(
         raise ValueError("insufficient balance")
     locked_account.balance_micros -= amount_micros
     locked_key.spent_micros += amount_micros
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key.id,
         amount_micros=-amount_micros,
         transaction_type="reservation",
@@ -93,8 +96,11 @@ def settle_balance(
         return
     locked_account.balance_micros += delta
     locked_key.spent_micros = max(0, locked_key.spent_micros - delta)
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key.id,
         amount_micros=delta,
         transaction_type="settlement",
@@ -112,6 +118,7 @@ def credit_balance(
     reference_id: str,
     description: str | None,
     api_key_id: int | None = None,
+    project_id: int | None = None,
     audit_event: dict[str, object] | None = None,
 ) -> BillingAccount:
     existing = db.scalar(select(AccountBalanceTransaction).where(AccountBalanceTransaction.reference_id == reference_id))
@@ -123,8 +130,11 @@ def credit_balance(
     if not locked_account:
         raise ValueError("account not found")
     locked_account.balance_micros += amount_micros
+    project = db.get(Project, project_id) if project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key_id,
         amount_micros=amount_micros,
         transaction_type="topup",
@@ -392,6 +402,8 @@ def save_usage(
         request_id=request_id,
         trace_id=trace_id,
         account_id=api_key.account_id,
+        workspace_id=db.get(Project, api_key.project_id).workspace_id if api_key.project_id and db.get(Project, api_key.project_id) else None,
+        project_id=api_key.project_id,
         api_key_id=api_key.id,
         model=model.public_name,
         upstream_model=model.upstream_model,

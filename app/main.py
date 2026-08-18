@@ -19,13 +19,15 @@ from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
 from .db import engine, get_db, init_db
 from .guardrails import rate_limiter
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, RedemptionCodeCreate, UsageSummary
+from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
+from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -72,7 +74,7 @@ async def production_response_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("X-Request-ID", correlation_id)
-    if request.url.path == "/portal":
+    if request.url.path in {"/portal", "/static/portal.js", "/static/portal.css", "/static/styles.css"}:
         response.headers.setdefault("Cache-Control", "no-store")
     return response
 
@@ -271,9 +273,14 @@ def create_payment_order(payload: PaymentOrderCreate, db: Session = Depends(get_
         require_available_provider(payload.provider)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    project = db.get(Project, payload.project_id) if payload.project_id else None
+    if payload.project_id and not project:
+        raise HTTPException(status_code=404, detail="project not found")
     order = PaymentOrder(
         order_no="pay_" + uuid.uuid4().hex,
         account_id=account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         amount_micros=payload.amount_micros,
         provider=payload.provider,
     )
@@ -552,9 +559,11 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
         account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name)
         db.add(account)
         db.flush()
+    project = ensure_default_project(db, ensure_personal_workspace(db, account))
     raw_key = create_key()
     record = ApiKey(
         account_id=account.id,
+        project_id=project.id,
         name=payload.name,
         key_prefix=raw_key[:12],
         key_hash=hash_key(raw_key),
@@ -576,6 +585,7 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dic
     account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name)
     db.add(account)
     db.flush()
+    ensure_personal_workspace(db, account)
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.created", target_type="account", target_id=account.id, details={"external_user_id": account.external_user_id})
     db.commit()
     db.refresh(account)
@@ -698,6 +708,56 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
     return {"id": record.id, "public_name": record.public_name, "upstream_model": record.upstream_model}
 
 
+@app.get("/admin/provider-presets", dependencies=[Depends(require_admin)])
+def list_provider_presets() -> dict[str, object]:
+    return {"data": [provider_preset_data(item) for item in PROVIDER_PRESETS]}
+
+
+@app.post("/admin/provider-presets/{preset_id}/install", dependencies=[Depends(require_operator)])
+def install_provider_preset(preset_id: str, payload: ProviderPresetInstall, db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    invalid = sorted(set(payload.model_ids) - set(preset.model_ids))
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"model is not included in provider preset: {invalid[0]}")
+    preset_models = [preset.get_model(model_id) for model_id in payload.model_ids]
+    if any(model is None for model in preset_models):
+        raise HTTPException(status_code=422, detail="model is not included in provider preset")
+    selected_models = [model for model in preset_models if model is not None]
+    public_names = [model.public_name for model in selected_models]
+    existing = set(db.scalars(select(ModelConfig.public_name).where(ModelConfig.public_name.in_(public_names))).all())
+    if existing:
+        raise HTTPException(status_code=409, detail=f"model already exists: {sorted(existing)[0]}")
+    created: list[ModelConfig] = []
+    for preset_model in selected_models:
+        record = ModelConfig(
+            public_name=preset_model.public_name,
+            upstream_model=preset_model.model_id,
+            provider_base_url=preset.base_url,
+            provider_api_key_env=preset.api_key_env,
+            input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k,
+            output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k,
+            catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
+            official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
+            active=False,
+        )
+        db.add(record)
+        db.flush()
+        db.add(ModelChannel(
+            model_config_id=record.id,
+            name=preset.name,
+            upstream_model=preset_model.model_id,
+            provider_base_url=preset.base_url,
+            provider_api_key_env=preset.api_key_env,
+            active=False,
+        ))
+        created.append(record)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.provider_preset_installed", target_type="provider_preset", target_id=preset.id, details={"models": payload.model_ids})
+    db.commit()
+    return {"preset": provider_preset_data(preset), "data": [{"id": item.id, "public_name": item.public_name, "active": item.active} for item in created]}
+
+
 @app.get("/admin/upstream-models", dependencies=[Depends(require_admin)])
 async def list_upstream_models(
     provider_base_url: str,
@@ -761,6 +821,8 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "provider_api_key_env": model.provider_api_key_env,
             "input_price_micros_per_1k": model.input_price_micros_per_1k,
             "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "catalog_metadata": parse_model_json(model.catalog_metadata_json),
+            "official_pricing": parse_model_json(model.official_pricing_json),
             "active": model.active,
             "channel_count": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.model_config_id == model.id)) or 0,
             "healthy_channel_count": db.scalar(select(func.count(ModelChannel.id)).where(
@@ -782,6 +844,18 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="no model changes provided")
+    if changes.get("active"):
+        input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
+        output_price = changes.get("output_price_micros_per_1k", model.output_price_micros_per_1k)
+        if input_price <= 0 and output_price <= 0:
+            raise HTTPException(status_code=422, detail="configure a platform billing price before publishing a model")
+        healthy_channel = db.scalar(select(ModelChannel.id).where(
+            ModelChannel.model_config_id == model.id,
+            ModelChannel.active.is_(True),
+            ModelChannel.status == "healthy",
+        ))
+        if healthy_channel is None:
+            raise HTTPException(status_code=422, detail="run a successful channel health check before publishing a model")
     for field, value in changes.items():
         setattr(model, field, value)
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.updated", target_type="model", target_id=model.id, details=changes)
@@ -792,6 +866,16 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
         "input_price_micros_per_1k": model.input_price_micros_per_1k,
         "output_price_micros_per_1k": model.output_price_micros_per_1k,
     }
+
+
+def parse_model_json(value: str | None) -> dict[str, object] | None:
+    if not value:
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
 
 
 def channel_data(channel: ModelChannel) -> dict[str, object]:

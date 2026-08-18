@@ -9,10 +9,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./token.db"
     auto_create_schema: bool = True
     admin_token: str = "change-me"
-    mock_mode: bool = True
-    seed_builtin_models: bool = True
+    mock_mode: bool = False
+    seed_builtin_models: bool = False
     default_provider_base_url: str = "http://localhost:4000/v1"
     default_provider_api_key: str = ""
+    usd_to_cny_rate: float = 7.2
     reservation_output_tokens: int = 1024
     provider_timeout_seconds: int = 120
     channel_health_timeout_seconds: int = 10
@@ -44,6 +45,21 @@ class Settings(BaseSettings):
     security_delivery_mode: str = "development"
     security_delivery_webhook_url: str = ""
     security_delivery_webhook_secret: str = ""
+    oidc_enabled: bool = False
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_authorization_endpoint: str = ""
+    oidc_token_endpoint: str = ""
+    oidc_userinfo_endpoint: str = ""
+    oidc_redirect_uri: str = ""
+    oidc_frontend_redirect_url: str = ""
+    oidc_scopes: str = "openid profile email lok_user_id"
+    oidc_account_id_claim: str = "lok_user_id"
+    oidc_allow_account_creation: bool = True
+    loksystem_sso_enabled: bool = True
+    loksystem_sso_base_url: str = "http://127.0.0.1:25809"
+    loksystem_sso_issuer: str = "loksystem://desktop"
 
     model_config = SettingsConfigDict(
         env_prefix="TOKEN_",
@@ -63,6 +79,8 @@ def cors_origin_list(settings: Settings) -> list[str]:
 
 def validate_startup_settings(settings: Settings) -> None:
     """Fail early when a production deployment still has development safeguards enabled."""
+    if settings.usd_to_cny_rate <= 0:
+        raise RuntimeError("TOKEN_USD_TO_CNY_RATE must be greater than zero")
     if settings.environment.lower() != "production":
         return
     errors: list[str] = []
@@ -96,5 +114,22 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_SECURITY_DELIVERY_WEBHOOK_URL must be a public HTTPS URL in production")
     if len(settings.security_delivery_webhook_secret) < 24:
         errors.append("TOKEN_SECURITY_DELIVERY_WEBHOOK_SECRET must be at least 24 characters in production")
+    if settings.loksystem_sso_enabled:
+        errors.append("TOKEN_LOKSYSTEM_SSO_ENABLED must be false in production; configure OIDC for cross-device sign-in")
+    if settings.oidc_enabled:
+        oidc_urls = {
+            "TOKEN_OIDC_ISSUER_URL": settings.oidc_issuer_url,
+            "TOKEN_OIDC_AUTHORIZATION_ENDPOINT": settings.oidc_authorization_endpoint,
+            "TOKEN_OIDC_TOKEN_ENDPOINT": settings.oidc_token_endpoint,
+            "TOKEN_OIDC_USERINFO_ENDPOINT": settings.oidc_userinfo_endpoint,
+            "TOKEN_OIDC_REDIRECT_URI": settings.oidc_redirect_uri,
+        }
+        errors.extend(
+            f"{name} must be a public HTTPS URL when OIDC is enabled"
+            for name, value in oidc_urls.items()
+            if urlparse(value).scheme != "https" or not urlparse(value).netloc
+        )
+        if not settings.oidc_client_id or not settings.oidc_client_secret:
+            errors.append("TOKEN_OIDC_CLIENT_ID and TOKEN_OIDC_CLIENT_SECRET are required when OIDC is enabled")
     if errors:
         raise RuntimeError("Invalid production configuration: " + "; ".join(errors))

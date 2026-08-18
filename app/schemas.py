@@ -13,6 +13,7 @@ class ApiKeyCreate(BaseModel):
 
 class PortalApiKeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    project_id: int | None = Field(default=None, gt=0)
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
     expires_at: datetime | None = None
     spending_limit_micros: int | None = Field(default=None, gt=0)
@@ -67,6 +68,20 @@ class AccountCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
+class OrganizationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class OrganizationMemberCreate(BaseModel):
+    login_id: str = Field(min_length=3, max_length=160)
+    role: Literal["admin", "member", "viewer"] = "member"
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    slug: str | None = Field(default=None, min_length=2, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{1,119}$")
+
+
 class ActiveUpdate(BaseModel):
     active: bool
 
@@ -79,6 +94,7 @@ class BalanceAdjust(BaseModel):
 
 class PaymentOrderCreate(BaseModel):
     account_id: int = Field(gt=0)
+    project_id: int | None = Field(default=None, gt=0)
     amount_micros: int = Field(gt=0)
     provider: str = Field(default="manual", min_length=1, max_length=32)
 
@@ -132,6 +148,10 @@ class ModelBatchImport(BaseModel):
     provider_base_url: str = Field(min_length=1, max_length=500)
     provider_api_key_env: str | None = Field(default=None, max_length=120)
     models: list[ModelCreate] = Field(min_length=1, max_length=100)
+
+
+class ProviderPresetInstall(BaseModel):
+    model_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 class ModelUpdate(BaseModel):

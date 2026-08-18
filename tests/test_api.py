@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ import pytest
 os.environ["TOKEN_DATABASE_URL"] = "sqlite:///./test-token.db"
 os.environ["TOKEN_ADMIN_TOKEN"] = "test-admin"
 os.environ["TOKEN_MOCK_MODE"] = "true"
+os.environ["TOKEN_SEED_BUILTIN_MODELS"] = "true"
 os.environ["TOKEN_PAYMENT_WEBHOOK_SECRET"] = "test-webhook"
 os.environ["TOKEN_TRIAL_SIGNING_SECRET"] = "test-trial-secret"
 os.environ["TOKEN_PUBLIC_BASE_URL"] = "http://testserver"
@@ -19,7 +21,7 @@ from app.config import Settings, validate_startup_settings
 from app.guardrails import rate_limiter
 from app.main import app
 from app.config import get_settings
-from app.models import ApiKey
+from app.models import ApiKey, ExternalIdentity, UsageRecord
 
 
 def setup_function() -> None:
@@ -451,7 +453,30 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         portal_page = await client.get("/portal")
         assert portal_page.status_code == 200
         assert "LokToken用户中心" in portal_page.text
+        assert '<span>密钥管理</span>' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260818-6"' in portal_page.text
+        assert portal_page.text.index('id="portal-integration-guide"') < portal_page.text.index('class="overview-quickbar panel"')
+        assert '<strong>LokToken</strong>' in portal_page.text
+        assert '<p class="sidebar-section-label">工作台</p>' in portal_page.text
+        assert 'class="topbar-actions"' in portal_page.text
+        assert 'id="portal-workspace-manager"' in portal_page.text
+        assert 'id="portal-security"' in portal_page.text
+        assert 'id="portal-refresh"' in portal_page.text
+        assert "LokSystem 一键注册 / 登录" in portal_page.text
+        assert 'id="loksystem-login-button"' in portal_page.text
+        assert 'id="portal-integration-guide"' in portal_page.text
+        assert "重置密码" not in portal_page.text
+        assert "查看用户文档" not in portal_page.text
         assert "试用令牌（trl_ 开头）" in portal_page.text
+        portal_script = await client.get("/static/portal.js?v=portal-20260818-6")
+        assert portal_script.headers["cache-control"] == "no-store"
+        assert "复制并前往 LokSystem" in portal_script.text
+        assert "loksystem://add-provider?platform=LokToken" in portal_script.text
+        assert "应用接入" in portal_script.text
+        assert "在应用中完成配置" in portal_script.text
+        assert 'keys: "密钥管理"' in portal_script.text
+        assert "API管理" not in portal_page.text
+        assert "创建 API Key" not in portal_script.text
 
         account = await client.post(
             "/admin/accounts",
@@ -758,6 +783,19 @@ async def test_batch_model_import_pricing_and_api_rate_limit(monkeypatch) -> Non
 def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
     with pytest.raises(RuntimeError, match="TOKEN_MOCK_MODE"):
         validate_startup_settings(Settings(environment="production"))
+    with pytest.raises(RuntimeError, match="TOKEN_LOKSYSTEM_SSO_ENABLED"):
+        validate_startup_settings(Settings(
+            environment="production",
+            auto_create_schema=False,
+            mock_mode=False,
+            admin_token="a" * 32,
+            payment_webhook_secret="b" * 32,
+            trial_signing_secret="c" * 32,
+            public_base_url="https://token.example.com",
+            security_delivery_mode="webhook",
+            security_delivery_webhook_url="https://security.example.com/events",
+            security_delivery_webhook_secret="d" * 32,
+        ))
     validate_startup_settings(Settings(
         environment="production",
         auto_create_schema=False,
@@ -769,6 +807,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
         security_delivery_mode="webhook",
         security_delivery_webhook_url="https://security.example.com/events",
         security_delivery_webhook_secret="d" * 32,
+        loksystem_sso_enabled=False,
     ))
 
 
@@ -842,6 +881,208 @@ async def test_model_preflight_reports_streaming_token_usage() -> None:
     assert report.json()["chat_probe"]["ok"] is True
     assert report.json()["stream_probe"]["ok"] is True
     assert report.json()["stream_probe"]["token_usage_reported"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_presets_install_disabled_candidates_without_credentials() -> None:
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        presets = await client.get("/admin/provider-presets", headers=admin_headers)
+        assert presets.status_code == 200
+        deepseek = next(item for item in presets.json()["data"] if item["id"] == "deepseek")
+        assert deepseek["models"][0]["official_pricing"]["currency"] == "CNY"
+        assert deepseek["models"][0]["platform_input_price_micros_per_1k"] == 1584
+        assert deepseek["models"][0]["platform_output_price_micros_per_1k"] == 4752
+        installed = await client.post(
+            "/admin/provider-presets/deepseek/install",
+            headers=admin_headers,
+            json={"model_ids": deepseek["model_ids"]},
+        )
+        assert installed.status_code == 200
+        assert all(item["active"] is False for item in installed.json()["data"])
+        listed = await client.get("/admin/models", headers=admin_headers)
+        candidates = {item["public_name"]: item for item in listed.json()["data"] if item["public_name"].startswith("deepseek-v4-")}
+        assert set(candidates) == {"deepseek-v4-flash", "deepseek-v4-pro"}
+        assert all(item["active"] is False for item in candidates.values())
+        duplicate = await client.post(
+            "/admin/provider-presets/deepseek/install",
+            headers=admin_headers,
+            json={"model_ids": [deepseek["model_ids"][0]]},
+        )
+        assert duplicate.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_oidc_login_links_stable_loksystem_identity(monkeypatch) -> None:
+    import app.portal as portal_module
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "oidc_enabled", True)
+    monkeypatch.setattr(settings, "oidc_issuer_url", "https://auth.lokai.example")
+    monkeypatch.setattr(settings, "oidc_client_id", "loktoken-web")
+    monkeypatch.setattr(settings, "oidc_client_secret", "test-oidc-client-secret")
+    monkeypatch.setattr(settings, "oidc_authorization_endpoint", "https://auth.lokai.example/oauth/authorize")
+    monkeypatch.setattr(settings, "oidc_token_endpoint", "https://auth.lokai.example/oauth/token")
+    monkeypatch.setattr(settings, "oidc_userinfo_endpoint", "https://auth.lokai.example/oauth/userinfo")
+    monkeypatch.setattr(settings, "oidc_redirect_uri", "http://testserver/auth/oidc/callback")
+    monkeypatch.setattr(settings, "oidc_frontend_redirect_url", "http://testserver/portal")
+
+    class ProviderResponse:
+        def __init__(self, payload: dict[str, object]):
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class ProviderClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, _url: str, **_kwargs) -> ProviderResponse:
+            return ProviderResponse({"access_token": "provider-access-token"})
+
+        async def get(self, _url: str, **_kwargs) -> ProviderResponse:
+            return ProviderResponse({"sub": "lok-subject-1", "lok_user_id": "lok-user-oidc-1", "name": "Lok OIDC User", "email": "oidc@example.com", "email_verified": True})
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        assert (await client.get("/auth/oidc/status")).json()["enabled"] is True
+        started = await client.get("/auth/oidc/start")
+        assert started.status_code == 302
+        state = parse_qs(urlparse(started.headers["location"]).query)["state"][0]
+        monkeypatch.setattr(portal_module.httpx, "AsyncClient", ProviderClient)
+        completed = await client.get("/auth/oidc/callback", params={"code": "provider-code", "state": state})
+        assert completed.status_code == 302, completed.text
+        access_token = parse_qs(urlparse(completed.headers["location"]).fragment)["access_token"][0]
+        profile = await client.get("/portal/profile", headers={"Authorization": f"Bearer {access_token}"})
+        assert profile.status_code == 200
+        assert profile.json()["external_user_id"] == "lok-user-oidc-1"
+
+    with SessionLocal() as db:
+        assert db.query(ExternalIdentity).filter_by(issuer="https://auth.lokai.example", subject="lok-subject-1").count() == 1
+
+
+@pytest.mark.asyncio
+async def test_loksystem_desktop_sso_creates_and_reuses_a_loktoken_account(monkeypatch) -> None:
+    import app.portal as portal_module
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "loksystem_sso_enabled", True)
+    monkeypatch.setattr(settings, "loksystem_sso_base_url", "http://127.0.0.1:25809")
+    monkeypatch.setattr(settings, "loksystem_sso_issuer", "loksystem://desktop")
+
+    class LokSystemResponse:
+        def __init__(self, payload: dict[str, object]):
+            self.payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self.payload
+
+    class LokSystemClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs) -> LokSystemResponse:
+            if url.endswith("/tickets"):
+                return LokSystemResponse({"success": True, "ticket": "single-use-ticket"})
+            assert kwargs["json"] == {"ticket": "single-use-ticket"}
+            return LokSystemResponse({"success": True, "user": {"id": "lok-user-sso-1", "username": "Lok Desktop User", "email": "desktop@example.com"}})
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", follow_redirects=False) as client:
+        assert (await client.get("/auth/loksystem/status")).json()["enabled"] is True
+        monkeypatch.setattr(portal_module.httpx, "AsyncClient", LokSystemClient)
+        first = await client.get("/auth/loksystem/start")
+        second = await client.get("/auth/loksystem/start")
+        assert first.status_code == 302
+        assert second.status_code == 302
+        first_token = parse_qs(urlparse(first.headers["location"]).fragment)["access_token"][0]
+        second_token = parse_qs(urlparse(second.headers["location"]).fragment)["access_token"][0]
+        first_profile = await client.get("/portal/profile", headers={"Authorization": f"Bearer {first_token}"})
+        second_profile = await client.get("/portal/profile", headers={"Authorization": f"Bearer {second_token}"})
+        assert first_profile.json()["external_user_id"] == "loksystem-lok-user-sso-1"
+        assert second_profile.json()["id"] == first_profile.json()["id"]
+
+    with SessionLocal() as db:
+        assert db.query(ExternalIdentity).filter_by(issuer="loksystem://desktop", subject="lok-user-sso-1").count() == 1
+
+
+@pytest.mark.asyncio
+async def test_personal_workspaces_organizations_projects_and_key_attribution() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        owner = await client.post("/auth/register", json={"login_id": "workspace-owner", "name": "Workspace Owner", "password": "correct-horse"})
+        member = await client.post("/auth/register", json={"login_id": "workspace-member", "name": "Workspace Member", "password": "correct-horse"})
+        assert owner.status_code == 200 and member.status_code == 200
+        owner_headers = {"Authorization": f"Bearer {owner.json()['access_token']}"}
+        member_headers = {"Authorization": f"Bearer {member.json()['access_token']}"}
+
+        personal = await client.get("/portal/workspaces", headers=owner_headers)
+        assert personal.status_code == 200
+        assert personal.json()["data"][0]["type"] == "personal"
+
+        organization = await client.post("/portal/organizations", headers=owner_headers, json={"name": "Lok Team"})
+        assert organization.status_code == 200
+        workspace_id = organization.json()["workspace_id"]
+        added = await client.post(
+            f"/portal/workspaces/{workspace_id}/members", headers=owner_headers,
+            json={"login_id": "workspace-member", "role": "viewer"},
+        )
+        assert added.status_code == 200
+        member_spaces = await client.get("/portal/workspaces", headers=member_headers)
+        assert any(item["id"] == workspace_id and item["role"] == "viewer" for item in member_spaces.json()["data"])
+        assert (await client.post(
+            f"/portal/workspaces/{workspace_id}/projects", headers=member_headers, json={"name": "Blocked project"},
+        )).status_code == 403
+
+        project = await client.post(
+            f"/portal/workspaces/{workspace_id}/projects", headers=owner_headers, json={"name": "生产环境", "slug": "production"},
+        )
+        assert project.status_code == 200
+        project_id = project.json()["id"]
+        key = await client.post("/portal/api-keys", headers=owner_headers, json={"name": "production-key", "project_id": project_id})
+        assert key.status_code == 200
+        assert key.json()["project_id"] == project_id
+
+        admin_headers = {"X-Admin-Token": "test-admin"}
+        owner_profile = await client.get("/portal/profile", headers=owner_headers)
+        await client.post(
+            f"/admin/accounts/{owner_profile.json()['id']}/balance", headers=admin_headers,
+            json={"amount_micros": 100_000, "idempotency_key": "workspace-test-topup"},
+        )
+        called = await client.post(
+            "/v1/chat/completions", headers={"Authorization": f"Bearer {key.json()['key']}"},
+            json={"model": "lok-chat", "messages": [{"role": "user", "content": "hello"}]},
+        )
+        assert called.status_code == 200
+
+    with SessionLocal() as db:
+        record = db.query(UsageRecord).one()
+        assert record.project_id == project_id
+        assert record.workspace_id == workspace_id
 
 
 class FakeProviderResponse:

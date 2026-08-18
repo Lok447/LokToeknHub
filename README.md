@@ -20,15 +20,15 @@ uvicorn app.main:app --reload
 - 用户文档：`http://127.0.0.1:8000/guide/user`
 - OpenAPI 开发参考：`http://127.0.0.1:8000/docs`
 
-默认开启 `TOKEN_MOCK_MODE=true`，不需要真实模型供应商即可验证完整调用链路。生产环境应关闭 Mock，并通过 `provider_api_key_env` 引用环境变量中的供应商密钥，不要把密钥写入数据库。
+默认关闭 Mock（`TOKEN_MOCK_MODE=false`），服务只调用已配置的真实供应商。测试需要联调模拟链路时，必须在测试环境显式设置 `TOKEN_MOCK_MODE=true` 和 `TOKEN_SEED_BUILTIN_MODELS=true`；生产环境不得启用这两个开关。供应商密钥通过 `provider_api_key_env` 引用环境变量，不写入数据库。
 
-开发与试用环境会自动初始化 `lok-chat`、`lok-reason`、`lok-vision` 三个 LokSystem 内置模型。它们可立即使用 API Key 走完整的统一调用、计费、请求记录与渠道健康检查链路；Mock 返回仅用于联调验证，不代表真实模型推理。生产环境默认不创建这些模型，需在管理后台为真实上游完成模型和渠道配置后再对用户公开。
+管理台的 DeepSeek 预设已提供 `deepseek-v4-flash` 与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
 
-内置模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
+真实模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
 
 ```powershell
 $headers = @{ Authorization = "Bearer $($key.key)" }
-Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType "application/json" -Body '{"model":"lok-chat","messages":[{"role":"user","content":"你好，请介绍一下 LokSystem TOKEN"}]}'
+Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType "application/json" -Body '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"你好，请介绍一下 LokToken"}]}'
 ```
 
 用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按文本、推理、代码、视觉和工具调用筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。
@@ -100,6 +100,8 @@ POST /admin/models/health-check
 - 单模型：为公开模型指定上游模型、统一输入/输出价格和 Primary 渠道。
 - 批量接入：填写上游 OpenAI 兼容 API 地址与已部署的密钥环境变量名，读取 `/models` 目录后选择多个模型统一导入。
 
+管理控制台还提供 DeepSeek、Qwen / DashScope、Kimi / Moonshot、MiniMax 渠道模板。DeepSeek V4 模板会保存官网美元价格按 `TOKEN_USD_TO_CNY_RATE`（默认 7.2）换算后的人民币参考价，并以未命中缓存、低峰价格作为平台默认计费价；运营仍可在定价操作中调整人民币售价。模板不包含供应商密钥，管理员需要注入 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`，完成渠道检测与模型预检后再启用。
+
 批量导入仅在服务端读取环境变量中的上游密钥；浏览器、数据库和用户中心均不会接触密钥明文。每个公开模型的默认 Primary 渠道可在“渠道”中继续扩展备用上游、优先级、权重和独立健康检查。用户中心只展示 TOKEN 的公开模型名称和价格。
 
 管理接口：
@@ -168,6 +170,16 @@ Invoke-RestMethod "http://127.0.0.1:8000/admin/accounts/$($account.id)/balance" 
 ```
 
 预发布执行步骤与发布门槛见 [docs/UAT_PREPROD.md](docs/UAT_PREPROD.md)。
+
+## LokSystem 统一账号
+
+本地桌面联调默认启用 LokSystem 一键注册 / 登录。LokToken 只会回连 `TOKEN_LOKSYSTEM_SSO_BASE_URL` 指向的本机回环地址，向已登录的 LokSystem 桌面端申请 60 秒、单次可用的票据；票据在 LokToken 服务端交换，不会出现在浏览器地址、日志、密码字段或 API Key 中。首次进入自动创建 LokToken 账户，之后按 LokSystem 用户 ID 自动识别并登录。此方式仅适合本机桌面联调；跨设备或生产环境应使用下方的 OIDC 集成。
+
+LokToken 可作为 OpenID Connect 客户端接入 LokSystem 身份中心。启用后，用户中心会出现“LokSystem 一键注册 / 登录”，并通过授权码 + PKCE 完成登录。首次登录会按 LokSystem 的稳定用户标识自动创建 LokToken 账户；后续登录会复用同一账户。LokToken 只保存 `issuer + subject` 身份映射，额度、订单、API Key 和模型权限仍保留在 LokToken。
+
+配置 `TOKEN_OIDC_ENABLED=true` 后，必须提供 LokSystem 身份中心的 issuer、客户端凭据、授权端点、令牌端点、UserInfo 端点和回调地址。建议 LokSystem 在 UserInfo 中提供稳定的 `lok_user_id`，并通过 `TOKEN_OIDC_ACCOUNT_ID_CLAIM=lok_user_id` 将其映射到 LokToken 的 `external_user_id`。首次登录可自动创建账户；设置 `TOKEN_OIDC_ALLOW_ACCOUNT_CREATION=false` 后，只允许已经由运营人员创建或已绑定的账户登录。
+
+跨设备或生产部署时，`.env.docker.example` 默认启用 OIDC，并保持 `TOKEN_LOKSYSTEM_SSO_ENABLED=false`。在 LokSystem 身份中心为 `TOKEN_OIDC_REDIRECT_URI` 注册 HTTPS 回调地址后，填入真实的 `TOKEN_OIDC_CLIENT_ID`、`TOKEN_OIDC_CLIENT_SECRET` 与各 OIDC 端点。应用会拒绝以不完整、非 HTTPS 的 OIDC 配置启动，也会拒绝在生产环境启用本机桌面 SSO。
 
 ## OpenAI-compatible 调用
 

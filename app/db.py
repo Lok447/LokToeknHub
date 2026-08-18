@@ -28,6 +28,8 @@ def init_db() -> None:
     api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
     payment_order_columns = {column["name"] for column in inspector.get_columns("payment_orders")}
     usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
+    transaction_columns = {column["name"] for column in inspector.get_columns("account_balance_transactions")}
+    model_columns = {column["name"] for column in inspector.get_columns("model_configs")}
     with engine.begin() as connection:
         if "login_id" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN login_id VARCHAR(160)"))
@@ -58,18 +60,47 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_expires_at DATETIME"))
         if "rotated_from_key_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER"))
+        if "project_id" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN project_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_project_id ON api_keys (project_id)"))
         if "reviewed_by_admin_id" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_by_admin_id INTEGER"))
         if "reviewed_at" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_at DATETIME"))
         if "review_note" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN review_note TEXT"))
+        if "workspace_id" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN workspace_id INTEGER"))
+        if "project_id" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN project_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_payment_orders_reviewed_by_admin_id ON payment_orders (reviewed_by_admin_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_payment_orders_workspace_id ON payment_orders (workspace_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_payment_orders_project_id ON payment_orders (project_id)"))
         if "account_id" not in usage_columns:
             connection.execute(text("ALTER TABLE usage_records ADD COLUMN account_id INTEGER"))
+        if "workspace_id" not in usage_columns:
+            connection.execute(text("ALTER TABLE usage_records ADD COLUMN workspace_id INTEGER"))
+        if "project_id" not in usage_columns:
+            connection.execute(text("ALTER TABLE usage_records ADD COLUMN project_id INTEGER"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_workspace_id ON usage_records (workspace_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_project_id ON usage_records (project_id)"))
+        if "workspace_id" not in transaction_columns:
+            connection.execute(text("ALTER TABLE account_balance_transactions ADD COLUMN workspace_id INTEGER"))
+        if "project_id" not in transaction_columns:
+            connection.execute(text("ALTER TABLE account_balance_transactions ADD COLUMN project_id INTEGER"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_account_balance_transactions_workspace_id ON account_balance_transactions (workspace_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_account_balance_transactions_project_id ON account_balance_transactions (project_id)"))
+        if "catalog_metadata_json" not in model_columns:
+            connection.execute(text("ALTER TABLE model_configs ADD COLUMN catalog_metadata_json TEXT"))
+        if "official_pricing_json" not in model_columns:
+            connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
+        if not settings.mock_mode:
+            connection.execute(text(
+                "UPDATE model_configs SET active = 0 WHERE public_name IN ('lok-chat', 'lok-reason', 'lok-vision')"
+            ))
 
     inspector = inspect(engine)
     api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
@@ -112,6 +143,37 @@ def init_db() -> None:
             "(SELECT api_keys.account_id FROM api_keys WHERE api_keys.id = usage_records.api_key_id) "
             "WHERE account_id IS NULL"
         ))
+
+        # Every legacy account gets a personal workspace and default project before
+        # project attribution is enabled for new API keys and operational records.
+        connection.execute(text(
+            "INSERT INTO workspaces (name, workspace_type, owner_account_id, active, created_at) "
+            "SELECT billing_accounts.name || ' 的个人空间', 'personal', billing_accounts.id, 1, :created_at "
+            "FROM billing_accounts WHERE NOT EXISTS ("
+            "SELECT 1 FROM workspaces WHERE workspaces.owner_account_id = billing_accounts.id "
+            "AND workspaces.workspace_type = 'personal')"
+        ), {"created_at": now})
+        connection.execute(text(
+            "INSERT INTO projects (workspace_id, name, slug, active, created_at) "
+            "SELECT workspaces.id, '默认项目', 'default', 1, :created_at FROM workspaces "
+            "WHERE workspaces.workspace_type = 'personal' AND NOT EXISTS ("
+            "SELECT 1 FROM projects WHERE projects.workspace_id = workspaces.id AND projects.slug = 'default')"
+        ), {"created_at": now})
+        connection.execute(text(
+            "UPDATE api_keys SET project_id = (SELECT projects.id FROM projects JOIN workspaces "
+            "ON projects.workspace_id = workspaces.id WHERE workspaces.owner_account_id = api_keys.account_id "
+            "AND workspaces.workspace_type = 'personal' AND projects.slug = 'default') WHERE project_id IS NULL"
+        ))
+        for table in ("usage_records", "account_balance_transactions", "payment_orders"):
+            connection.execute(text(
+                f"UPDATE {table} SET project_id = (SELECT projects.id FROM projects JOIN workspaces "
+                f"ON projects.workspace_id = workspaces.id WHERE workspaces.owner_account_id = {table}.account_id "
+                "AND workspaces.workspace_type = 'personal' AND projects.slug = 'default') WHERE project_id IS NULL"
+            ))
+            connection.execute(text(
+                f"UPDATE {table} SET workspace_id = (SELECT projects.workspace_id FROM projects WHERE projects.id = {table}.project_id) "
+                "WHERE workspace_id IS NULL"
+            ))
 
         connection.execute(text(
             "INSERT INTO model_channels "

@@ -7,6 +7,7 @@
 - `TOKEN_ENVIRONMENT=production`，数据库使用独立的预发布实例，且已执行 `alembic upgrade head`。
 - 关闭 `TOKEN_MOCK_MODE` 与 `TOKEN_SEED_BUILTIN_MODELS`；配置 HTTPS 公网域名、CORS 白名单与支付 Webhook 密钥。
 - 配置 `TOKEN_SECURITY_DELIVERY_MODE=webhook`、安全投递 Webhook URL 和密钥。Webhook 接收方必须校验 `X-LokToken-Signature`。
+- 如启用 LokSystem 统一账号，配置 OIDC issuer、客户端凭据、授权/令牌/UserInfo 端点和精确回调地址；身份中心须提供稳定的 `lok_user_id` 声明。
 - 至少准备一个真实模型渠道的受限测试密钥、一个备用渠道、测试账户、测试管理员和支付沙箱账号。
 
 ## 管理员与权限
@@ -21,13 +22,15 @@
 2. 发起密码重置，确认安全投递 Webhook 收到带签名的事件；使用一次性凭证更新密码。
 3. 验证旧会话失效、新密码可登录、凭证不能重复使用，并在安全通知中看到对应事件。
 4. 创建 API Key 后执行轮换；确认旧 Key 被拒绝、新 Key 可调用；执行“退出其他会话”后重新登录。
+5. 使用 LokSystem 账号完成 OIDC 登录，确认首次登录按 `lok_user_id` 创建或绑定正确的 LokToken 账户；重复登录不得创建重复账户。
 
 ## 模型与账本
 
 1. 对每个拟上架模型执行预检：定价已配置、渠道健康、非流式成功、流式至少收到一个数据块。
-2. 主渠道模拟失败，确认备用渠道接管且熔断状态、请求记录、Token 与实际费用一致。
-3. 用真实测试 Key 执行一次非流式和一次流式调用，核对供应商用量、LokToken 用量记录、账户余额和账本流水。
-4. 创建、确认和退款一笔支付沙箱订单；验证角色限制、状态只能按 `pending -> paid -> refunded` 迁移，并执行账本对账至“无差异”。
+2. 对 DeepSeek、Qwen / DashScope、Kimi / Moonshot、MiniMax 分别安装渠道模板，注入服务器密钥环境变量，核对模型目录和价格后再启用候选模型。
+3. 主渠道模拟失败，确认备用渠道接管且熔断状态、请求记录、Token 与实际费用一致。
+4. 用真实测试 Key 执行一次非流式和一次流式调用，核对供应商用量、LokToken 用量记录、账户余额和账本流水。
+5. 创建、确认和退款一笔支付沙箱订单；验证角色限制、状态只能按 `pending -> paid -> refunded` 迁移，并执行账本对账至“无差异”。
 
 ## 发布判定
 

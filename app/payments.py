@@ -38,6 +38,8 @@ def mark_order_paid(
         account.balance_micros += locked_order.amount_micros
         db.add(AccountBalanceTransaction(
             account_id=account.id,
+            workspace_id=locked_order.workspace_id,
+            project_id=locked_order.project_id,
             api_key_id=None,
             amount_micros=locked_order.amount_micros,
             transaction_type="payment",
@@ -91,6 +93,8 @@ def refund_order(
         account.balance_micros -= locked_order.amount_micros
         db.add(AccountBalanceTransaction(
             account_id=account.id,
+            workspace_id=locked_order.workspace_id,
+            project_id=locked_order.project_id,
             api_key_id=None,
             amount_micros=-locked_order.amount_micros,
             transaction_type="refund",

@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken用户中心</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css">
-  <link rel="stylesheet" href="/static/portal.css">
+  <link rel="stylesheet" href="/static/styles.css?v=portal-20260818-6">
+  <link rel="stylesheet" href="/static/portal.css?v=portal-20260818-6">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/portal.js" defer></script>
+  <script src="/static/portal.js?v=portal-20260818-6" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
@@ -21,10 +21,9 @@
       <div class="auth-panel auth-panel-form">
         <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / USER</p><h2>用户中心</h2><span>登录或注册后管理模型调用与账户额度。</span></div>
         <div class="auth-mode-tabs" role="tablist" aria-label="用户中心登录方式">
-          <button type="button" class="active" data-auth-mode="trial">试用链接</button>
           <button type="button" data-auth-mode="login">账号登录</button>
           <button type="button" data-auth-mode="register">注册账号</button>
-          <button type="button" data-auth-mode="reset">重置密码</button>
+          <button type="button" class="active" data-auth-mode="trial">试用链接</button>
         </div>
         <form id="portal-auth-form">
           <label for="portal-token">试用令牌（trl_ 开头）</label>
@@ -33,6 +32,8 @@
             <button class="icon-button" id="toggle-portal-token" type="button" title="显示令牌" aria-label="显示令牌"><i data-lucide="eye"></i></button>
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
+          <button class="primary-button full-button" id="loksystem-login-button" type="button" hidden><i data-lucide="log-in"></i><span>LokSystem 一键注册 / 登录</span></button>
+          <button class="primary-button full-button" id="oidc-login-button" type="button" hidden><i data-lucide="log-in"></i><span>统一身份登录</span></button>
         </form>
         <form id="portal-login-form" hidden>
           <label for="portal-login-id">账号</label>
@@ -50,13 +51,7 @@
           <div class="password-row"><input id="portal-register-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-register-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
           <button class="primary-button full-button" type="submit"><i data-lucide="user-plus"></i><span>注册并进入</span></button>
         </form>
-        <form id="portal-reset-form" hidden>
-          <label for="portal-reset-id">账号</label>
-          <input id="portal-reset-id" name="login_id" autocomplete="username" placeholder="输入需要重置的账号" required minlength="3">
-          <button class="primary-button full-button" type="submit"><i data-lucide="mail"></i><span>获取重置凭证</span></button>
-        </form>
         <p class="auth-error" id="portal-auth-error" role="alert"></p>
-        <a class="auth-doc-link" href="/guide/user"><i data-lucide="book-open"></i><span>查看用户文档</span></a>
       </div>
     </div>
   </section>
@@ -65,19 +60,26 @@
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
-        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+        <span class="brand-copy"><strong>LokToken</strong><small>MODEL SERVICE</small></span>
       </div>
       <p class="nav-label">用户中心</p>
       <nav aria-label="用户导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>用户概览</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="store"></i><span>模型广场</span></button>
         <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
       </nav>
+      <section class="sidebar-workspace" aria-label="工作台">
+        <p class="sidebar-section-label">工作台</p>
+        <div class="workspace-switcher"><label for="portal-workspace">新建资源归属空间</label><select id="portal-workspace" aria-label="选择新建资源归属空间"></select></div>
+        <button class="sidebar-action" id="portal-workspace-manager" type="button"><i data-lucide="building-2"></i><span>空间与项目</span></button>
+        <button class="sidebar-action" id="portal-security" type="button"><i data-lucide="shield-check"></i><span>账号安全</span></button>
+      </section>
       <div class="sidebar-footer">
+        <div class="sidebar-account"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></div>
         <a href="/guide/user" target="_blank"><i data-lucide="book-open"></i><span>用户文档</span></a>
         <button id="portal-logout"><i data-lucide="log-out"></i><span>退出</span></button>
       </div>
@@ -86,18 +88,16 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">LOKSYSTEM / TOKEN</p>
+          <p class="eyebrow">LOKTOKEN / USER</p>
           <h1 id="portal-page-title">用户概览</h1>
         </div>
-        <div class="topbar-actions">
-          <span class="portal-identity"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>
-          <button class="icon-button" id="portal-security" title="账号安全" aria-label="账号安全"><i data-lucide="shield-check"></i></button>
-          <button class="icon-button" id="portal-refresh" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
-        </div>
+        <div class="topbar-actions"><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
       </header>
 
       <div class="content">
         <section class="view active" id="portal-view-overview">
+          <section class="panel integration-guide" id="portal-integration-guide" aria-label="应用接入指引" hidden></section>
+
           <section class="overview-quickbar panel" aria-label="账户摘要">
             <div><span>账户余额</span><strong id="overview-balance">-</strong></div>
             <div><span>有效 Key</span><strong id="overview-key-count">-</strong></div>

@@ -2,6 +2,7 @@ const state = {
   token: sessionStorage.getItem("token_admin_token") || "",
   view: "overview",
   accounts: [],
+  models: [],
   channels: [],
 };
 
@@ -40,6 +41,14 @@ function formatMoney(micros) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
   });
+}
+
+function officialPriceSummary(item) {
+  const pricing = item.official_pricing;
+  if (!pricing?.off_peak) return "-";
+  const input = pricing.off_peak.input_cache_miss_micros;
+  const output = pricing.off_peak.output_micros;
+  return `${formatMoney(input)} / ${formatMoney(output)}`;
 }
 
 function formatDate(value) {
@@ -204,17 +213,19 @@ async function loadKeys() {
 
 async function loadModels() {
   const result = await api("/admin/models");
+  state.models = result.data;
   document.getElementById("models-table").innerHTML = result.data.length ? result.data.map((item) => `
     <tr>
-      <td><div class="primary-cell"><strong>${escapeHtml(item.public_name)}</strong><span class="secondary">兼容 OpenAI Chat Completions</span></div></td>
+      <td><div class="primary-cell"><strong>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</strong><span class="secondary mono">${escapeHtml(item.public_name)} · ${escapeHtml(item.catalog_metadata?.model_version || "OpenAI 兼容")}</span></div></td>
       <td>${formatMoney(item.input_price_micros_per_1k)}</td>
       <td>${formatMoney(item.output_price_micros_per_1k)}</td>
+      <td>${escapeHtml(officialPriceSummary(item))}<span class="secondary block-text">未命中缓存 · 低峰 / 输出</span></td>
       <td>${formatNumber(item.channel_count)}</td>
       <td><span class="channel-health"><strong>${formatNumber(item.healthy_channel_count)}</strong> / ${formatNumber(item.channel_count)}</span></td>
       <td>${activeBadge(item.active)}</td>
       <td class="align-right"><div class="table-actions"><button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="flask-conical"></i><span>预检</span></button><button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}"><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></div></td>
     </tr>
-  `).join("") : emptyRow(7);
+  `).join("") : emptyRow(8);
   icons();
 }
 
@@ -432,13 +443,16 @@ function modelDialog() {
   });
 }
 
-function modelImportDialog() {
+async function modelImportDialog() {
+  let presets = [];
+  try { presets = (await api("/admin/provider-presets")).data || []; } catch (error) { toast(error.message, true); return; }
   openDialog("批量接入模型", `
     <div class="dialog-body">
+      <div class="field"><label for="provider-preset">主流服务商模板</label><select id="provider-preset"><option value="">自定义 OpenAI 兼容渠道</option>${presets.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")}</select><small class="field-hint">模板只创建停用的候选模型，不包含供应商密钥；DeepSeek V4 会自动带入按汇率换算的人民币参考价。</small></div>
       <form id="model-discovery-form" class="model-discovery-form">
         <div class="field"><label for="import-provider-url">上游兼容 API 地址</label><input id="import-provider-url" name="provider_base_url" required maxlength="500" placeholder="https://api.example.com/v1"></div>
         <div class="field"><label for="import-key-env">服务器密钥环境变量</label><input id="import-key-env" name="provider_api_key_env" maxlength="120" placeholder="OPENAI_API_KEY"><small class="field-hint">只填写已部署在 TOKEN 服务环境中的变量名，密钥不会提交到浏览器。</small></div>
-        <button class="secondary-button" type="submit"><i data-lucide="refresh-cw"></i><span>读取上游模型</span></button>
+        <div class="table-actions"><button class="secondary-button" type="submit"><i data-lucide="refresh-cw"></i><span>读取上游模型</span></button><button class="secondary-button" id="install-provider-preset" type="button" disabled><i data-lucide="package-plus"></i><span>安装模板候选</span></button></div>
       </form>
       <form id="model-import-form" hidden>
         <div class="field"><label>选择要公开的模型</label><div id="model-import-options" class="model-import-options"></div></div>
@@ -448,6 +462,26 @@ function modelImportDialog() {
         <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="list-plus"></i><span>接入所选模型</span></button></div>
       </form>
     </div>`);
+  const presetSelect = document.getElementById("provider-preset");
+  const providerUrl = document.getElementById("import-provider-url");
+  const providerKeyEnv = document.getElementById("import-key-env");
+  const installPresetButton = document.getElementById("install-provider-preset");
+  presetSelect.addEventListener("change", () => {
+    const preset = presets.find((item) => item.id === presetSelect.value);
+    providerUrl.value = preset?.base_url || "";
+    providerKeyEnv.value = preset?.api_key_env || "";
+    installPresetButton.disabled = !preset;
+  });
+  installPresetButton.addEventListener("click", async () => {
+    const preset = presets.find((item) => item.id === presetSelect.value);
+    if (!preset) return;
+    try {
+      const result = await api(`/admin/provider-presets/${preset.id}/install`, { method: "POST", body: JSON.stringify({ model_ids: preset.model_ids }) });
+      closeDialog();
+      toast(`已安装 ${result.data.length} 个停用候选，请配置密钥、启用渠道并执行预检`);
+      await loadModels();
+    } catch (error) { toast(error.message, true); }
+  });
   const discoveryForm = document.getElementById("model-discovery-form");
   const importForm = document.getElementById("model-import-form");
   discoveryForm.addEventListener("submit", async (event) => {
@@ -488,11 +522,17 @@ function modelImportDialog() {
 }
 
 function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMicros) {
+  const model = state.models.find((item) => item.id === Number(modelId));
+  const pricing = model?.official_pricing;
+  const reference = pricing?.off_peak ? `
+    <div class="field-hint">官网参考价（人民币 / 1M，已按 ${pricing.exchange_rate_usd_to_cny || "部署配置"} 汇率换算）</div>
+    <div class="key-detail-grid"><div><span>缓存命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>未命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出 · 低峰</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div><div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">DeepSeek 官网</a></strong></div></div>` : "";
   openDialog(`模型定价 · ${modelName}`, `
     <form id="model-pricing-form">
       <div class="dialog-body">
         <div class="field-row"><div class="field"><label for="model-input-price">输入价格 / 1K（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.000001" value="${Number(inputPriceMicros) / 1_000_000}" required></div><div class="field"><label for="model-output-price">输出价格 / 1K（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.000001" value="${Number(outputPriceMicros) / 1_000_000}" required></div></div>
-        <p class="dialog-copy">新价格会用于后续请求；已结算请求不会被修改。</p>
+        ${reference}
+        <p class="dialog-copy">平台价格使用人民币；新价格会用于后续请求，已结算请求不会被修改。</p>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存定价</span></button></div>
     </form>`);
@@ -774,7 +814,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "create-model") modelDialog();
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
     if (target.dataset.action === "preflight-model") preflightModel(target.dataset.id, target.dataset.name);
-    if (target.dataset.action === "import-models") modelImportDialog();
+    if (target.dataset.action === "import-models") modelImportDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "edit-model-pricing") modelPricingDialog(target.dataset.id, target.dataset.name, target.dataset.inputPrice, target.dataset.outputPrice);
     if (target.dataset.action === "manage-channels") channelDialog(target.dataset.id, target.dataset.name).catch((error) => toast(error.message, true));
     if (target.dataset.action === "edit-channel") editChannelDialog(target.dataset.id, target.dataset.modelId, target.dataset.modelName);
