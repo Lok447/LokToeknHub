@@ -766,7 +766,82 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
         payment_webhook_secret="b" * 32,
         trial_signing_secret="c" * 32,
         public_base_url="https://token.example.com",
+        security_delivery_mode="webhook",
+        security_delivery_webhook_url="https://security.example.com/events",
+        security_delivery_webhook_secret="d" * 32,
     ))
+
+
+@pytest.mark.asyncio
+async def test_admin_accounts_roles_and_revocable_sessions() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        bootstrap = await client.post(
+            "/admin/auth/bootstrap",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"login_id": "root-admin", "password": "correct-horse", "role": "operator"},
+        )
+        assert bootstrap.status_code == 200
+        admin_headers = {"Authorization": f"Bearer {bootstrap.json()['access_token']}"}
+        assert (await client.get("/admin/overview", headers={"X-Admin-Token": "test-admin"})).status_code == 401
+        created = await client.post(
+            "/admin/users", headers=admin_headers,
+            json={"login_id": "read-only", "password": "correct-horse", "role": "auditor"},
+        )
+        assert created.status_code == 200
+        login = await client.post("/admin/auth/login", json={"login_id": "read-only", "password": "correct-horse"})
+        auditor_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        assert (await client.get("/admin/audit-events", headers=auditor_headers)).status_code == 200
+        assert (await client.post("/admin/accounts", headers=auditor_headers, json={"external_user_id": "blocked", "name": "Blocked"})).status_code == 403
+        assert (await client.post("/admin/auth/logout", headers=admin_headers)).status_code == 200
+        assert (await client.get("/admin/overview", headers=admin_headers)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_password_reset_key_rotation_and_security_sessions() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        registered = await client.post("/auth/register", json={"login_id": "security-user", "name": "Security User", "password": "correct-horse"})
+        assert registered.status_code == 200
+        first_token = registered.json()["access_token"]
+        reset = await client.post("/auth/password-reset/request", json={"login_id": "security-user"})
+        assert reset.status_code == 200 and reset.json()["development_reset_token"].startswith("rst_")
+        reset_done = await client.post("/auth/password-reset/confirm", json={"reset_token": reset.json()["development_reset_token"], "password": "new-correct-horse"})
+        assert reset_done.status_code == 200
+        assert (await client.get("/portal/profile", headers={"Authorization": f"Bearer {first_token}"})).status_code == 401
+        portal_headers = {"Authorization": f"Bearer {reset_done.json()['access_token']}"}
+        key = await client.post("/portal/api-keys", headers=portal_headers, json={"name": "rotating-key"})
+        rotated = await client.post(f"/portal/api-keys/{key.json()['id']}/rotate", headers=portal_headers)
+        assert rotated.status_code == 200 and rotated.json()["key"].startswith("tok_")
+        listed = await client.get("/portal/api-keys", headers=portal_headers)
+        old_key = next(item for item in listed.json()["data"] if item["id"] == key.json()["id"])
+        assert old_key["active"] is False
+        bound = await client.put("/portal/security/contact", headers=portal_headers, json={"contact": "security@example.com", "password": "new-correct-horse"})
+        assert bound.status_code == 200
+        notices = await client.get("/portal/security-notifications", headers=portal_headers)
+        assert {item["event_type"] for item in notices.json()["data"]} >= {"api_key_rotated", "security_contact_bound"}
+        assert (await client.post("/portal/security/logout-all", headers=portal_headers)).status_code == 200
+        assert (await client.get("/portal/profile", headers=portal_headers)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_model_preflight_reports_streaming_token_usage() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        models = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
+        model = next(item for item in models.json()["data"] if item["public_name"] == "lok-chat")
+        report = await client.post(
+            f"/admin/models/{model['id']}/preflight",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"chat_probe": True, "stream_probe": True},
+        )
+    assert report.status_code == 200
+    assert report.json()["chat_probe"]["ok"] is True
+    assert report.json()["stream_probe"]["ok"] is True
+    assert report.json()["stream_probe"]["token_usage_reported"] is True
 
 
 class FakeProviderResponse:

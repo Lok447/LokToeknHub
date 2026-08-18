@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     auth_rate_limit_requests: int = 10
     auth_rate_limit_window_seconds: int = 60
     portal_session_ttl_seconds: int = 604800
+    admin_session_ttl_seconds: int = 28800
+    password_reset_ttl_seconds: int = 900
+    security_delivery_mode: str = "development"
+    security_delivery_webhook_url: str = ""
+    security_delivery_webhook_secret: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="TOKEN_",
@@ -82,5 +87,14 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("Portal rate limit settings must be positive")
     if settings.auth_rate_limit_requests < 1 or settings.auth_rate_limit_window_seconds < 1:
         errors.append("Auth rate limit settings must be positive")
+    if settings.admin_session_ttl_seconds < 300 or settings.password_reset_ttl_seconds < 300:
+        errors.append("Session and password reset TTL settings must be at least 300 seconds")
+    if settings.security_delivery_mode != "webhook":
+        errors.append("TOKEN_SECURITY_DELIVERY_MODE must be webhook in production")
+    delivery_url = urlparse(settings.security_delivery_webhook_url)
+    if delivery_url.scheme != "https" or not delivery_url.netloc:
+        errors.append("TOKEN_SECURITY_DELIVERY_WEBHOOK_URL must be a public HTTPS URL in production")
+    if len(settings.security_delivery_webhook_secret) < 24:
+        errors.append("TOKEN_SECURITY_DELIVERY_WEBHOOK_SECRET must be at least 24 characters in production")
     if errors:
         raise RuntimeError("Invalid production configuration: " + "; ".join(errors))

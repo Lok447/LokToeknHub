@@ -133,11 +133,12 @@ docker compose --env-file .env.docker ps
 
 生产部署前请完成以下配置：
 
-- 为 `POSTGRES_PASSWORD`、`TOKEN_ADMIN_TOKEN`、`TOKEN_PAYMENT_WEBHOOK_SECRET`、`TOKEN_TRIAL_SIGNING_SECRET` 设置互不相同的高强度随机值。
+- 为 `POSTGRES_PASSWORD`、`TOKEN_ADMIN_TOKEN`、`TOKEN_PAYMENT_WEBHOOK_SECRET`、`TOKEN_TRIAL_SIGNING_SECRET` 和 `TOKEN_SECURITY_DELIVERY_WEBHOOK_SECRET` 设置互不相同的高强度随机值。
 - 将 `TOKEN_MOCK_MODE` 改为 `false`，配置真实模型网关地址和供应商 API Key。
 - 在公网入口配置 HTTPS、访问控制、日志采集和数据库备份。
 - 不要提交 `.env.docker`、供应商密钥、商户私钥或证书到版本库。
 - `TOKEN_ENVIRONMENT=production` 下，应用会拒绝启动：Mock 模式、自动建表、HTTP 公网地址、默认或过短的管理/签名密钥均不允许进入生产。
+- 配置 `TOKEN_SECURITY_DELIVERY_MODE=webhook` 与 HTTPS 安全投递 Webhook；密码重置仅发送给已绑定安全联系方式的账户，Webhook 接收方需验证 `X-LokToken-Signature`。
 - 在公网入口终止 TLS，并将 `TOKEN_PUBLIC_BASE_URL` 设置为实际 HTTPS 域名；浏览器跨域调用时仅将可信域写入 `TOKEN_CORS_ORIGINS`。
 - TOKEN 内置的是单服务实例的进程内滑动窗口限流。横向扩容前，应在网关/WAF 层配置共享限流或将该能力接入集中式存储。
 
@@ -150,12 +151,13 @@ docker compose --env-file .env.docker run --rm token alembic upgrade head
 
 停止服务时使用 `docker compose --env-file .env.docker down`。只有明确需要删除全部 PostgreSQL 数据时才使用带 `--volumes` 的命令。
 
-## 管理接口
+## 管理员账号与会话
 
-管理接口使用 `X-Admin-Token`：
+首次部署仅使用一次 `TOKEN_ADMIN_TOKEN` 创建超级管理员；创建成功后该密钥不能再访问管理接口。后续管理接口使用管理员账号登录后取得的 Bearer 会话令牌。管理员角色包括：`superadmin`（全量）、`operator`（运营）和 `auditor`（只读）。
 
 ```powershell
-$headers = @{ "X-Admin-Token" = "change-me" }
+$bootstrap = Invoke-RestMethod http://127.0.0.1:8000/admin/auth/bootstrap -Method Post -Headers @{ "X-Admin-Token" = "change-me" } -ContentType "application/json" -Body '{"login_id":"admin","password":"replace-with-a-strong-password"}'
+$headers = @{ "Authorization" = "Bearer $($bootstrap.access_token)" }
 $account = Invoke-RestMethod http://127.0.0.1:8000/admin/accounts -Method Post -Headers $headers -ContentType "application/json" -Body '{"external_user_id":"lok-user-001","name":"Demo User"}'
 $keyBody = @{ name = "demo"; account_id = $account.id } | ConvertTo-Json
 $key = Invoke-RestMethod http://127.0.0.1:8000/admin/api-keys -Method Post -Headers $headers -ContentType "application/json" -Body $keyBody
@@ -164,6 +166,8 @@ Invoke-RestMethod http://127.0.0.1:8000/admin/models -Method Post -Headers $head
 # 给账户充值。amount_micros 使用平台内部的百万分之一货币单位。
 Invoke-RestMethod "http://127.0.0.1:8000/admin/accounts/$($account.id)/balance" -Method Post -Headers $headers -ContentType "application/json" -Body '{"amount_micros":1000000,"idempotency_key":"demo-topup-001"}'
 ```
+
+预发布执行步骤与发布门槛见 [docs/UAT_PREPROD.md](docs/UAT_PREPROD.md)。
 
 ## OpenAI-compatible 调用
 

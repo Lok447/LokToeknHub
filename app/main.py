@@ -19,12 +19,12 @@ from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
 from .db import engine, get_db, init_db
 from .guardrails import rate_limiter
-from .models import AccountBalanceTransaction, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentWebhook, RedemptionCodeCreate, UsageSummary
-from .security import create_key, create_redemption_code, hash_key, require_admin, require_api_key, verify_webhook_signature
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, RedemptionCodeCreate, UsageSummary
+from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
 
 @asynccontextmanager
@@ -122,7 +122,124 @@ def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> 
         "created_at": order.created_at.isoformat(),
         "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         "refunded_at": order.refunded_at.isoformat() if order.refunded_at else None,
+        "reviewed_by_admin_id": order.reviewed_by_admin_id,
+        "reviewed_at": order.reviewed_at.isoformat() if order.reviewed_at else None,
+        "review_note": order.review_note,
     }
+
+
+def admin_user_data(user: AdminUser) -> dict[str, object]:
+    return {
+        "id": user.id,
+        "login_id": user.login_id,
+        "role": user.role,
+        "active": user.active,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
+def admin_auth_response(user: AdminUser, db: Session) -> dict[str, object]:
+    token, session = create_admin_session(db, user)
+    db.flush()
+    user.last_login_at = utcnow()
+    record_audit_event(db, actor_type="admin", actor_id=user.login_id, action="admin.session_created", target_type="admin_session", target_id=session.id, details={"role": user.role})
+    db.commit()
+    db.refresh(session)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": session.expires_at.isoformat(),
+        "admin": admin_user_data(user),
+    }
+
+
+@app.post("/admin/auth/bootstrap")
+def bootstrap_admin(
+    payload: AdminUserCreate,
+    _: None = Depends(require_bootstrap_admin_token),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    if db.scalar(select(AdminUser.id).limit(1)) is not None:
+        raise HTTPException(status_code=409, detail="administrator bootstrap is no longer available")
+    user = AdminUser(login_id=payload.login_id.lower(), password_hash=hash_password(payload.password), role="superadmin")
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="administrator login already exists") from exc
+    record_audit_event(db, actor_type="bootstrap", actor_id="bootstrap-admin", action="admin.bootstrap_created", target_type="admin_user", target_id=user.id, details={"login_id": user.login_id})
+    return admin_auth_response(user, db)
+
+
+@app.post("/admin/auth/login")
+def login_admin(payload: AdminLogin, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    rate_limiter.check("admin-login", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
+    user = db.scalar(select(AdminUser).where(AdminUser.login_id == payload.login_id.lower()))
+    if not user or not user.active or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="invalid administrator credentials")
+    return admin_auth_response(user, db)
+
+
+@app.post("/admin/auth/logout", dependencies=[Depends(require_admin)])
+def logout_admin(context: AdminContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, bool]:
+    if context.session:
+        context.session.revoked_at = utcnow()
+        record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.session_revoked", target_type="admin_session", target_id=context.session.id, details={"self": True})
+        db.commit()
+    return {"revoked": True}
+
+
+@app.get("/admin/auth/me", dependencies=[Depends(require_admin)])
+def admin_identity(context: AdminContext = Depends(require_admin)) -> dict[str, object]:
+    if context.bootstrap:
+        return {"bootstrap": True, "role": context.role, "login_id": context.actor_id}
+    return {"bootstrap": False, "admin": admin_user_data(context.user)}
+
+
+@app.get("/admin/users", dependencies=[Depends(require_superadmin)])
+def list_admin_users(db: Session = Depends(get_db)) -> dict[str, object]:
+    users = db.scalars(select(AdminUser).order_by(AdminUser.id)).all()
+    return {"data": [admin_user_data(user) for user in users]}
+
+
+@app.post("/admin/users", dependencies=[Depends(require_superadmin)])
+def create_admin_user(payload: AdminUserCreate, context: AdminContext = Depends(require_superadmin), db: Session = Depends(get_db)) -> dict[str, object]:
+    user = AdminUser(login_id=payload.login_id.lower(), password_hash=hash_password(payload.password), role=payload.role)
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="administrator login already exists") from exc
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.user_created", target_type="admin_user", target_id=user.id, details={"login_id": user.login_id, "role": user.role})
+    db.commit()
+    db.refresh(user)
+    return admin_user_data(user)
+
+
+@app.patch("/admin/users/{admin_user_id}", dependencies=[Depends(require_superadmin)])
+def update_admin_user(admin_user_id: int, payload: AdminUserUpdate, context: AdminContext = Depends(require_superadmin), db: Session = Depends(get_db)) -> dict[str, object]:
+    user = db.get(AdminUser, admin_user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="administrator not found")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="no administrator changes provided")
+    if context.user and context.user.id == user.id and changes.get("active") is False:
+        raise HTTPException(status_code=422, detail="administrator cannot deactivate their own account")
+    for field, value in changes.items():
+        setattr(user, field, value)
+    if changes.get("active") is False:
+        user.session_version += 1
+        for session in db.scalars(select(AdminSession).where(AdminSession.admin_user_id == user.id, AdminSession.revoked_at.is_(None))).all():
+            session.revoked_at = utcnow()
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.user_updated", target_type="admin_user", target_id=user.id, details=changes)
+    db.commit()
+    db.refresh(user)
+    return admin_user_data(user)
 
 
 @app.get("/admin/overview", dependencies=[Depends(require_admin)])
@@ -145,7 +262,7 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
     }
 
 
-@app.post("/admin/payment-orders", dependencies=[Depends(require_admin)])
+@app.post("/admin/payment-orders", dependencies=[Depends(require_finance_operator)])
 def create_payment_order(payload: PaymentOrderCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(BillingAccount, payload.account_id)
     if not account or not account.active:
@@ -184,7 +301,46 @@ def list_payment_orders(db: Session = Depends(get_db)) -> dict[str, object]:
     return {"data": [payment_order_data(order, account_name) for order, account_name in rows]}
 
 
-@app.post("/admin/redemption-codes", dependencies=[Depends(require_admin)])
+@app.get("/admin/reconciliation", dependencies=[Depends(require_admin)])
+def reconcile_ledger(db: Session = Depends(get_db)) -> dict[str, object]:
+    account_rows = db.execute(
+        select(
+            BillingAccount.id,
+            BillingAccount.name,
+            BillingAccount.balance_micros,
+            func.coalesce(func.sum(AccountBalanceTransaction.amount_micros), 0),
+        )
+        .outerjoin(AccountBalanceTransaction, AccountBalanceTransaction.account_id == BillingAccount.id)
+        .group_by(BillingAccount.id, BillingAccount.name, BillingAccount.balance_micros)
+        .order_by(BillingAccount.id)
+    ).all()
+    balance_mismatches = [
+        {"account_id": account_id, "account_name": name, "balance_micros": balance, "ledger_micros": ledger}
+        for account_id, name, balance, ledger in account_rows
+        if balance != ledger
+    ]
+    order_issues = []
+    for order in db.scalars(select(PaymentOrder).where(PaymentOrder.status.in_(("paid", "refunded"))).order_by(PaymentOrder.id)).all():
+        payment_exists = db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == f"payment:{order.order_no}")) is not None
+        refund_exists = db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == f"refund:{order.order_no}")) is not None
+        if not payment_exists or (order.status == "refunded" and not refund_exists):
+            order_issues.append({
+                "order_id": order.id,
+                "order_no": order.order_no,
+                "status": order.status,
+                "payment_recorded": payment_exists,
+                "refund_recorded": refund_exists,
+            })
+    return {
+        "ok": not balance_mismatches and not order_issues,
+        "balance_mismatch_count": len(balance_mismatches),
+        "order_issue_count": len(order_issues),
+        "balance_mismatches": balance_mismatches,
+        "order_issues": order_issues,
+    }
+
+
+@app.post("/admin/redemption-codes", dependencies=[Depends(require_operator)])
 def admin_create_redemption_code(payload: RedemptionCodeCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     expires_at = payload.expires_at
     if expires_at and expires_at.tzinfo is None:
@@ -240,7 +396,7 @@ def list_redemption_codes(db: Session = Depends(get_db)) -> dict[str, object]:
     } for item in codes]}
 
 
-@app.patch("/admin/redemption-codes/{code_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/redemption-codes/{code_id}", dependencies=[Depends(require_operator)])
 def update_redemption_code(code_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     record = db.get(RedemptionCode, code_id)
     if not record:
@@ -251,30 +407,44 @@ def update_redemption_code(code_id: int, payload: ActiveUpdate, db: Session = De
     return {"id": record.id, "active": record.active}
 
 
-@app.post("/admin/payment-orders/{order_id}/confirm", dependencies=[Depends(require_admin)])
-def confirm_payment_order(order_id: int, payload: PaymentConfirm, db: Session = Depends(get_db)) -> dict[str, object]:
+@app.post("/admin/payment-orders/{order_id}/confirm", dependencies=[Depends(require_finance_operator)])
+def confirm_payment_order(
+    order_id: int,
+    payload: PaymentConfirm,
+    context: AdminContext = Depends(require_finance_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
     order = db.get(PaymentOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="payment order not found")
     try:
         order = mark_order_paid(
             db, order, payload.provider_order_id or f"manual:{order.order_no}",
-            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+            reviewer_admin_id=context.user.id if context.user else None,
+            review_note=payload.review_note,
+            audit_event={"actor_type": "admin", "actor_id": context.actor_id, "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return payment_order_data(order)
 
 
-@app.post("/admin/payment-orders/{order_id}/refund", dependencies=[Depends(require_admin)])
-def refund_payment_order(order_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+@app.post("/admin/payment-orders/{order_id}/refund", dependencies=[Depends(require_superadmin)])
+def refund_payment_order(
+    order_id: int,
+    payload: PaymentRefund | None = None,
+    context: AdminContext = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
     order = db.get(PaymentOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="payment order not found")
     try:
         order = refund_order(
             db, order,
-            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.refunded", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+            reviewer_admin_id=context.user.id if context.user else None,
+            review_note=payload.review_note if payload else None,
+            audit_event={"actor_type": "admin", "actor_id": context.actor_id, "action": "payment_order.refunded", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -325,7 +495,7 @@ def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
-@app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_operator)])
 def update_account(account_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(BillingAccount, account_id)
     if not account:
@@ -362,7 +532,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
-@app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_operator)])
 def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
@@ -373,7 +543,7 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends
     return {"id": api_key.id, "active": api_key.active}
 
 
-@app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_admin)])
+@app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_operator)])
 def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiKeyResponse:
     account = db.get(BillingAccount, payload.account_id) if payload.account_id else None
     if payload.account_id and (not account or not account.active):
@@ -399,7 +569,7 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
     return ApiKeyResponse(id=record.id, account_id=record.account_id, name=record.name, key=raw_key, key_prefix=record.key_prefix)
 
 
-@app.post("/admin/accounts", dependencies=[Depends(require_admin)])
+@app.post("/admin/accounts", dependencies=[Depends(require_operator)])
 def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == payload.external_user_id)):
         raise HTTPException(status_code=409, detail="external user already has an account")
@@ -412,7 +582,7 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dic
     return {"id": account.id, "external_user_id": account.external_user_id, "name": account.name, "balance_micros": account.balance_micros}
 
 
-@app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_admin)])
+@app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_finance_operator)])
 def adjust_account_balance(account_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
     account = db.get(BillingAccount, account_id)
     if not account:
@@ -428,7 +598,7 @@ def adjust_account_balance(account_id: int, payload: BalanceAdjust, db: Session 
     return {"account_id": account.id, "balance_micros": account.balance_micros}
 
 
-@app.post("/admin/api-keys/{api_key_id}/balance", dependencies=[Depends(require_admin)])
+@app.post("/admin/api-keys/{api_key_id}/balance", dependencies=[Depends(require_finance_operator)])
 def adjust_balance(api_key_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
@@ -499,7 +669,7 @@ def list_account_transactions(account_id: int, db: Session = Depends(get_db)) ->
     }
 
 
-@app.post("/admin/models", dependencies=[Depends(require_admin)])
+@app.post("/admin/models", dependencies=[Depends(require_operator)])
 def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.public_name)):
         raise HTTPException(status_code=409, detail="model already exists")
@@ -540,7 +710,7 @@ async def list_upstream_models(
     return {"data": [{"id": model_id} for model_id in model_ids]}
 
 
-@app.post("/admin/models/batch", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/batch", dependencies=[Depends(require_operator)])
 def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> dict[str, object]:
     names = [item.public_name for item in payload.models]
     if len(set(names)) != len(names):
@@ -604,7 +774,7 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
-@app.patch("/admin/models/{model_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/models/{model_id}", dependencies=[Depends(require_operator)])
 def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     model = db.get(ModelConfig, model_id)
     if not model:
@@ -656,7 +826,7 @@ def list_model_channels(model_id: int, db: Session = Depends(get_db)) -> dict[st
     return {"data": [channel_data(channel) for channel in channels]}
 
 
-@app.post("/admin/models/{model_id}/channels", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/{model_id}/channels", dependencies=[Depends(require_operator)])
 def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if not db.get(ModelConfig, model_id):
         raise HTTPException(status_code=404, detail="model not found")
@@ -672,7 +842,7 @@ def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session
     return channel_data(channel)
 
 
-@app.patch("/admin/channels/{channel_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/channels/{channel_id}", dependencies=[Depends(require_operator)])
 def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     channel = db.get(ModelChannel, channel_id)
     if not channel:
@@ -691,7 +861,7 @@ def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Sessi
     return channel_data(channel)
 
 
-@app.post("/admin/channels/{channel_id}/check", dependencies=[Depends(require_admin)])
+@app.post("/admin/channels/{channel_id}/check", dependencies=[Depends(require_operator)])
 async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
     channel = db.get(ModelChannel, channel_id)
     if not channel:
@@ -701,7 +871,7 @@ async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db
     return {**channel_data(channel), **result}
 
 
-@app.post("/admin/models/health-check", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/health-check", dependencies=[Depends(require_operator)])
 async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[str, object]:
     channels = db.scalars(select(ModelChannel).where(ModelChannel.active.is_(True)).order_by(ModelChannel.priority, ModelChannel.id)).all()
     results = []
@@ -714,6 +884,72 @@ async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[s
         "unhealthy": sum(1 for item in results if not item["healthy"]),
         "data": results,
     }
+
+
+@app.post("/admin/models/{model_id}/preflight", dependencies=[Depends(require_superadmin)])
+async def preflight_model(
+    model_id: int,
+    payload: ModelPreflightRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Run explicit pre-release checks. Chat and stream probes may incur provider charges."""
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id, ModelChannel.active.is_(True))).all()
+    health = []
+    for channel in channels:
+        result = await check_channel_health(db, channel)
+        health.append({"channel_id": channel.id, "name": channel.name, **result})
+    report: dict[str, object] = {
+        "model": model.public_name,
+        "price_configured": model.input_price_micros_per_1k > 0 or model.output_price_micros_per_1k > 0,
+        "channel_health": health,
+        "chat_probe": None,
+        "stream_probe": None,
+    }
+    probe = ChatCompletionRequest(model=model.public_name, messages=[{"role": "user", "content": payload.prompt}], max_tokens=32)
+    if payload.chat_probe:
+        try:
+            _, input_tokens, output_tokens = await call_provider(db, model, probe)
+            report["chat_probe"] = {
+                "ok": True,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "estimated_amount_micros": calculate_amount(model, input_tokens, output_tokens),
+            }
+        except Exception as exc:
+            report["chat_probe"] = {"ok": False, "detail": str(exc)}
+    if payload.stream_probe:
+        stream_chunks = 0
+        stream_usage: dict[str, int] | None = None
+        try:
+            streaming_probe = probe.model_copy(update={"stream": True})
+            async for raw_chunk in stream_provider(db, model, streaming_probe):
+                stream_chunks += 1
+                text = raw_chunk.decode("utf-8", errors="replace").strip()
+                if not text.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(text[6:])
+                    usage = event.get("usage") if isinstance(event, dict) else None
+                    if isinstance(usage, dict) and "prompt_tokens" in usage and "completion_tokens" in usage:
+                        stream_usage = {
+                            "input_tokens": int(usage["prompt_tokens"]),
+                            "output_tokens": int(usage["completion_tokens"]),
+                        }
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            report["stream_probe"] = {
+                "ok": stream_chunks > 0,
+                "chunk_count": stream_chunks,
+                "token_usage_reported": stream_usage is not None,
+                **(stream_usage or {}),
+                **({"estimated_amount_micros": calculate_amount(model, stream_usage["input_tokens"], stream_usage["output_tokens"])} if stream_usage else {}),
+            }
+        except Exception as exc:
+            report["stream_probe"] = {"ok": False, "chunk_count": stream_chunks, "detail": str(exc)}
+    return report
 
 
 @app.get("/v1/models")

@@ -18,14 +18,26 @@
         <div class="auth-product-points"><div><i data-lucide="boxes"></i><span>多模型统一接入</span></div><div><i data-lucide="shield-check"></i><span>账户与凭证治理</span></div><div><i data-lucide="activity"></i><span>调用链路可追溯</span></div></div>
       </section>
       <div class="auth-panel auth-panel-form">
-        <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / ADMIN</p><h2>管理控制台</h2><span>使用管理员密钥进入服务运营与配置界面。</span></div>
+        <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / ADMIN</p><h2>管理控制台</h2><span>使用管理员账号进入服务运营与配置界面。</span></div>
         <form id="auth-form">
-          <label for="admin-token">管理员密钥</label>
+          <label for="admin-login-id">管理员账号</label>
+          <input id="admin-login-id" name="login_id" autocomplete="username" placeholder="输入管理员账号" required autofocus>
+          <label for="admin-password">密码</label>
           <div class="password-row">
-            <input id="admin-token" name="token" type="password" autocomplete="current-password" placeholder="输入管理员密钥" required autofocus>
-            <button class="icon-button" id="toggle-token" type="button" title="显示密钥" aria-label="显示密钥"><i data-lucide="eye"></i></button>
+            <input id="admin-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8">
+            <button class="icon-button" id="toggle-token" type="button" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入管理控制台</span></button>
+        </form>
+        <button class="text-button auth-bootstrap-link" id="show-bootstrap" type="button">首次初始化管理员</button>
+        <form id="bootstrap-form" hidden>
+          <label for="bootstrap-token">初始化密钥</label>
+          <input id="bootstrap-token" name="token" type="password" autocomplete="off" placeholder="仅首次部署时使用" required>
+          <label for="bootstrap-login-id">管理员账号</label>
+          <input id="bootstrap-login-id" name="login_id" autocomplete="username" required minlength="3">
+          <label for="bootstrap-password">设置密码</label>
+          <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" required minlength="8">
+          <button class="primary-button full-button" type="submit"><i data-lucide="shield-check"></i><span>创建超级管理员</span></button>
         </form>
         <p class="auth-error" id="auth-error" role="alert"></p>
         <a class="auth-doc-link" href="/guide/admin"><i data-lucide="book-open"></i><span>查看管理文档</span></a>
@@ -99,7 +111,7 @@
         </section>
 
         <section class="view" id="view-payments">
-          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button></div>
+          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><div class="table-actions"><button class="secondary-button" data-action="reconcile-ledger"><i data-lucide="scale"></i><span>账本对账</span></button><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button></div></div>
           <div class="metric-grid compact" id="payment-metrics"></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>订单号</th><th>账户</th><th>渠道</th><th>金额</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="payments-table"></tbody></table></div></section>
         </section>
@@ -116,7 +128,7 @@
         </section>
 
         <section class="view" id="view-audit">
-          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div></div>
+          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div><button class="secondary-button" data-action="manage-admins"><i data-lucide="users-round"></i><span>管理员与角色</span></button></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>摘要</th></tr></thead><tbody id="audit-table"></tbody></table></div></section>
         </section>
       </div>

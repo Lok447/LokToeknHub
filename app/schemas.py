@@ -34,6 +34,34 @@ class PortalLogin(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class PasswordResetRequest(BaseModel):
+    login_id: str = Field(min_length=3, max_length=160)
+
+
+class PasswordResetConfirm(BaseModel):
+    reset_token: str = Field(min_length=16, max_length=160)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class SecurityContactUpdate(BaseModel):
+    contact: str = Field(min_length=3, max_length=160)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class AdminLogin(BaseModel):
+    login_id: str = Field(min_length=3, max_length=160)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class AdminUserCreate(AdminLogin):
+    role: Literal["superadmin", "operator", "auditor"] = "operator"
+
+
+class AdminUserUpdate(BaseModel):
+    role: Literal["superadmin", "operator", "auditor"] | None = None
+    active: bool | None = None
+
+
 class AccountCreate(BaseModel):
     external_user_id: str = Field(min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
@@ -69,6 +97,11 @@ class RedemptionCodeRedeem(BaseModel):
 
 class PaymentConfirm(BaseModel):
     provider_order_id: str | None = Field(default=None, min_length=1, max_length=120)
+    review_note: str | None = Field(default=None, max_length=500)
+
+
+class PaymentRefund(BaseModel):
+    review_note: str | None = Field(default=None, max_length=500)
 
 
 class PaymentWebhook(BaseModel):
@@ -125,6 +158,12 @@ class ModelChannelUpdate(BaseModel):
     priority: int | None = Field(default=None, ge=0, le=10000)
     weight: int | None = Field(default=None, ge=1, le=10000)
     active: bool | None = None
+
+
+class ModelPreflightRequest(BaseModel):
+    chat_probe: bool = False
+    stream_probe: bool = False
+    prompt: str = Field(default="Respond with OK.", min_length=1, max_length=500)
 
 
 class ChatMessage(BaseModel):

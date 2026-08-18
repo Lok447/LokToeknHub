@@ -150,7 +150,7 @@ async function establishPortalSession(result) {
 }
 
 function setAuthMode(mode) {
-  const forms = { trial: "portal-auth-form", login: "portal-login-form", register: "portal-register-form" };
+  const forms = { trial: "portal-auth-form", login: "portal-login-form", register: "portal-register-form", reset: "portal-reset-form" };
   Object.entries(forms).forEach(([key, id]) => { document.getElementById(id).hidden = key !== mode; });
   document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.authMode === mode));
   document.getElementById("portal-auth-error").textContent = "";
@@ -395,7 +395,7 @@ function renderKeyTable() {
       <td data-key-cell="last-used">${formatDate(item.last_used_at)}</td>
       <td data-key-cell="status">${keyStatusBadge(item)}</td>
       <td data-key-cell="created">${formatDate(item.created_at)}</td>
-      <td class="align-right"><div class="key-row-actions"><button class="icon-button compact-icon" data-key-detail="${item.id}" type="button" title="查看 Key 详情" aria-label="查看 Key 详情"><i data-lucide="arrow-up-right"></i></button><button class="icon-button compact-icon ${item.active ? "danger-icon" : "success-icon"}" data-toggle-key="${item.id}" data-active="${!item.active}" type="button" title="${item.active ? "停用 Key" : "启用 Key"}" aria-label="${item.active ? "停用 Key" : "启用 Key"}"><i data-lucide="${item.active ? "ban" : "check"}"></i></button></div></td>
+      <td class="align-right"><div class="key-row-actions"><button class="icon-button compact-icon" data-key-detail="${item.id}" type="button" title="查看 Key 详情" aria-label="查看 Key 详情"><i data-lucide="arrow-up-right"></i></button>${item.active ? `<button class="icon-button compact-icon" data-rotate-key="${item.id}" type="button" title="轮换 Key" aria-label="轮换 Key"><i data-lucide="refresh-cw"></i></button>` : ""}<button class="icon-button compact-icon ${item.active ? "danger-icon" : "success-icon"}" data-toggle-key="${item.id}" data-active="${!item.active}" type="button" title="${item.active ? "停用 Key" : "启用 Key"}" aria-label="${item.active ? "停用 Key" : "启用 Key"}"><i data-lucide="${item.active ? "ban" : "check"}"></i></button></div></td>
     </tr>
   `).join("") : emptyRow(8);
   applyKeyColumns();
@@ -829,6 +829,41 @@ async function paymentDialog() {
   });
 }
 
+async function rotatePortalKey(keyId) {
+  const item = portalState.keys.find((key) => key.id === Number(keyId));
+  if (!item || !window.confirm(`轮换“${item.name}”后，旧 Key 将立即失效。是否继续？`)) return;
+  try {
+    const result = await portalApi(`/portal/api-keys/${keyId}/rotate`, { method: "POST", body: "{}" });
+    openPortalDialog("API Key 已轮换", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>新 Key 只展示一次，旧 Key 已失效。请立即更新你的应用配置。</span></div><div class="field"><label>新 API Key</label><div class="secret-box mono" id="portal-key-secret">${escapeHtml(result.key)}</div></div><div class="secret-actions"><button class="secondary-button" id="portal-copy-key"><i data-lucide="copy"></i><span>复制新 Key</span></button></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>我已保存</button></div>`);
+    document.getElementById("portal-copy-key").addEventListener("click", async () => { await navigator.clipboard.writeText(result.key); portalToast("新 Key 已复制"); });
+    await loadKeys();
+  } catch (error) { portalToast(error.message, true); }
+}
+
+async function portalSecurityDialog() {
+  try {
+    const notifications = await portalApi("/portal/security-notifications");
+    const contact = portalState.profile?.security_contact || "未绑定";
+    const items = notifications.data.slice(0, 6).map((item) => `<div class="status-row"><span class="status-name"><i data-lucide="shield-check"></i>${escapeHtml(item.event_type)}</span><span class="secondary">${formatDate(item.created_at)}</span></div>`).join("") || '<p class="dialog-copy">暂无安全事件。</p>';
+    openPortalDialog("账号安全", `<div class="dialog-body"><div class="key-detail-grid"><div><span>安全联系方式</span><strong>${escapeHtml(contact)}</strong></div><div><span>登录会话</span><strong>可全部退出</strong></div></div><div class="field"><label for="security-contact">绑定安全联系方式</label><input id="security-contact" value="${escapeHtml(portalState.profile?.security_contact || "")}" placeholder="邮箱或手机号"><small class="field-hint">需要输入当前密码确认账号归属。</small></div><div class="field"><label for="security-password">当前密码</label><input id="security-password" type="password" autocomplete="current-password"></div><div class="section-header"><div><h2>最近安全事件</h2></div></div><div class="status-list">${items}</div></div><div class="dialog-actions"><button class="secondary-button" type="button" id="portal-logout-all">退出其他会话</button><button class="primary-button" type="button" id="portal-bind-security">保存联系方式</button></div>`);
+    document.getElementById("portal-bind-security").addEventListener("click", async () => {
+      try {
+        const contactValue = document.getElementById("security-contact").value.trim();
+        const password = document.getElementById("security-password").value;
+        if (!contactValue || !password) throw new Error("请填写联系方式和当前密码");
+        await portalApi("/portal/security/contact", { method: "PUT", body: JSON.stringify({ contact: contactValue, password }) });
+        await loadProfile(); closePortalDialog(); portalToast("安全联系方式已更新");
+      } catch (error) { portalToast(error.message, true); }
+    });
+    document.getElementById("portal-logout-all").addEventListener("click", async () => {
+      try {
+        await portalApi("/portal/security/logout-all", { method: "POST", body: "{}" });
+        sessionStorage.removeItem("token_portal_access"); portalState.token = ""; closePortalDialog(); showPortalAuth("所有登录会话已退出，请重新登录。");
+      } catch (error) { portalToast(error.message, true); }
+    });
+  } catch (error) { portalToast(error.message, true); }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   portalIcons();
   const fragmentToken = new URLSearchParams(window.location.hash.slice(1)).get("access_token");
@@ -865,6 +900,21 @@ document.addEventListener("DOMContentLoaded", async () => {
       await establishPortalSession(await portalApi("/auth/register", { method: "POST", body: JSON.stringify(data) }));
     } catch (error) { showPortalAuth(error.message); }
   });
+  document.getElementById("portal-reset-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const result = await portalApi("/auth/password-reset/request", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
+      if (result.development_reset_token) {
+        openPortalDialog("开发环境重置凭证", `<form id="portal-reset-confirm-form"><div class="dialog-body"><p class="dialog-copy">生产环境会通过已配置的安全通知渠道投递凭证。本地 UAT 才显示该值。</p><div class="field"><label for="reset-token">重置凭证</label><input id="reset-token" name="reset_token" value="${escapeHtml(result.development_reset_token)}" required></div><div class="field"><label for="reset-password">新密码</label><input id="reset-password" name="password" type="password" required minlength="8"></div></div><div class="dialog-actions"><button class="primary-button" type="submit">重置并登录</button></div></form>`);
+        document.getElementById("portal-reset-confirm-form").addEventListener("submit", async (confirmEvent) => {
+          confirmEvent.preventDefault();
+          try { await establishPortalSession(await portalApi("/auth/password-reset/confirm", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(confirmEvent.currentTarget))) })); closePortalDialog(); portalToast("密码已更新，其他会话已退出"); } catch (error) { portalToast(error.message, true); }
+        });
+      } else {
+        showPortalAuth("若账号存在，重置指引已发送至已绑定的安全联系方式。");
+      }
+    } catch (error) { showPortalAuth(error.message); }
+  });
   document.getElementById("toggle-portal-token").addEventListener("click", () => {
     const input = document.getElementById("portal-token");
     input.type = input.type === "password" ? "text" : "password";
@@ -873,6 +923,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     sessionStorage.removeItem("token_portal_access"); portalState.token = ""; document.getElementById("portal-token").value = ""; showPortalAuth();
   });
   document.getElementById("portal-refresh").addEventListener("click", () => switchPortalView(portalState.view));
+  document.getElementById("portal-security").addEventListener("click", () => portalSecurityDialog());
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
   document.getElementById("keys-refresh").addEventListener("click", () => loadKeys().catch((error) => portalToast(error.message, true)));
   document.getElementById("key-search").addEventListener("input", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
@@ -917,6 +968,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.toggleKey) {
       try { await portalApi(`/portal/api-keys/${target.dataset.toggleKey}`, { method: "PATCH", body: JSON.stringify({ active: target.dataset.active === "true" }) }); portalToast(target.dataset.active === "true" ? "Key 已启用" : "Key 已停用"); await loadKeys(); } catch (error) { portalToast(error.message, true); }
     }
+    if (target.dataset.rotateKey) rotatePortalKey(target.dataset.rotateKey);
     if (target.dataset.copy === "base-url") { await navigator.clipboard.writeText(document.getElementById("portal-base-url").textContent); portalToast("Base URL 已复制"); }
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
     if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }

@@ -91,18 +91,20 @@ function emptyRow(columns, label = "暂无数据") {
 }
 
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
   const response = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Admin-Token": state.token,
-      ...(options.headers || {}),
-    },
+    headers,
   });
   let data = {};
   try { data = await response.json(); } catch (_) { data = {}; }
   if (!response.ok) {
-    if (response.status === 401) showAuth();
+    if (response.status === 401) {
+      sessionStorage.removeItem("token_admin_token");
+      state.token = "";
+      showAuth();
+    }
     throw new Error(data.detail || `请求失败 (${response.status})`);
   }
   return data;
@@ -210,7 +212,7 @@ async function loadModels() {
       <td>${formatNumber(item.channel_count)}</td>
       <td><span class="channel-health"><strong>${formatNumber(item.healthy_channel_count)}</strong> / ${formatNumber(item.channel_count)}</span></td>
       <td>${activeBadge(item.active)}</td>
-      <td class="align-right"><div class="table-actions"><button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}"><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></div></td>
+      <td class="align-right"><div class="table-actions"><button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="flask-conical"></i><span>预检</span></button><button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}"><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></div></td>
     </tr>
   `).join("") : emptyRow(7);
   icons();
@@ -666,6 +668,49 @@ async function refundPayment(orderId) {
   try { await api(`/admin/payment-orders/${orderId}/refund`, { method: "POST", body: "{}" }); toast("订单已退款"); await loadPayments(); } catch (error) { toast(error.message, true); }
 }
 
+async function preflightModel(modelId, modelName) {
+  openDialog(`模型预发布检查 · ${modelName}`, `
+    <form id="preflight-form"><div class="dialog-body">
+      <p class="dialog-copy">会先验证渠道健康和定价。调用探针会向上游发送一条短请求，可能产生供应商费用。</p>
+      <label class="check-field"><input name="chat_probe" type="checkbox"><span>执行非流式调用探针</span></label>
+      <label class="check-field"><input name="stream_probe" type="checkbox"><span>执行流式响应探针</span></label>
+    </div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="flask-conical"></i><span>开始检查</span></button></div></form>`);
+  document.getElementById("preflight-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await api(`/admin/models/${modelId}/preflight`, { method: "POST", body: JSON.stringify({ chat_probe: form.get("chat_probe") === "on", stream_probe: form.get("stream_probe") === "on" }) });
+      const health = result.channel_health.map((item) => `${escapeHtml(item.name)}：${item.healthy ? "健康" : "异常"}`).join("<br>") || "没有启用的渠道";
+      const streamUsage = result.stream_probe ? (result.stream_probe.token_usage_reported ? `流式 Token：${result.stream_probe.input_tokens} / ${result.stream_probe.output_tokens}` : "流式 Token：上游未返回 usage，不能作为计费发布依据") : "流式 Token：未执行";
+      openDialog(`预检结果 · ${modelName}`, `<div class="dialog-body"><div class="key-detail-grid"><div><span>定价</span><strong>${result.price_configured ? "已配置" : "未配置"}</strong></div><div><span>非流式</span><strong>${result.chat_probe ? (result.chat_probe.ok ? "通过" : "失败") : "未执行"}</strong></div><div><span>流式</span><strong>${result.stream_probe ? (result.stream_probe.ok ? "通过" : "失败") : "未执行"}</strong></div></div><p class="dialog-copy">${escapeHtml(streamUsage)}<br>渠道检查<br>${health}</p></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+async function reconcileLedger() {
+  try {
+    const result = await api("/admin/reconciliation");
+    openDialog("账本对账结果", `<div class="dialog-body"><div class="key-detail-grid"><div><span>对账状态</span><strong>${result.ok ? "一致" : "发现差异"}</strong></div><div><span>余额差异</span><strong>${result.balance_mismatch_count}</strong></div><div><span>订单差异</span><strong>${result.order_issue_count}</strong></div></div><p class="dialog-copy">${result.ok ? "账户余额、订单和账本记录一致。" : "请先处理差异，再执行下一次运营结算。"}</p></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function manageAdmins() {
+  try {
+    const result = await api("/admin/users");
+    const rows = result.data.map((item) => `<tr><td>${escapeHtml(item.login_id)}</td><td>${escapeHtml(item.role)}</td><td>${activeBadge(item.active)}</td><td>${formatDate(item.last_login_at)}</td></tr>`).join("") || emptyRow(4);
+    openDialog("管理员与角色", `<div class="dialog-body"><p class="dialog-copy">超级管理员拥有全量权限；运营人员可管理模型、账户与订单；审计员仅可查看运营数据。</p><div class="table-wrap"><table><thead><tr><th>账号</th><th>角色</th><th>状态</th><th>最近登录</th></tr></thead><tbody>${rows}</tbody></table></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="button" id="create-admin-user"><i data-lucide="user-plus"></i><span>新增管理员</span></button></div>`);
+    document.getElementById("create-admin-user").addEventListener("click", () => adminUserDialog());
+  } catch (error) { toast(error.message, true); }
+}
+
+function adminUserDialog() {
+  openDialog("新增管理员", `<form id="admin-user-form"><div class="dialog-body"><div class="field"><label for="new-admin-login">管理员账号</label><input id="new-admin-login" name="login_id" required minlength="3" maxlength="160"></div><div class="field"><label for="new-admin-password">初始密码</label><input id="new-admin-password" name="password" type="password" required minlength="8"></div><div class="field"><label for="new-admin-role">角色</label><select id="new-admin-role" name="role"><option value="operator">运营人员</option><option value="auditor">审计员</option><option value="superadmin">超级管理员</option></select></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-action="manage-admins">返回</button><button class="primary-button" type="submit">创建</button></div></form>`);
+  document.getElementById("admin-user-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try { await api("/admin/users", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) }); toast("管理员已创建"); await manageAdmins(); } catch (error) { toast(error.message, true); }
+  });
+}
+
 async function toggleEntity(kind, id, active) {
   try {
     await api(`/admin/${kind}/${id}`, { method: "PATCH", body: JSON.stringify({ active }) });
@@ -678,20 +723,43 @@ document.addEventListener("DOMContentLoaded", async () => {
   icons();
   document.getElementById("auth-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    state.token = new FormData(event.currentTarget).get("token");
     try {
-      await api("/admin/overview");
+      const result = await fetch("/admin/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
+      const data = await result.json();
+      if (!result.ok) throw new Error(data.detail || "管理员登录失败");
+      state.token = data.access_token;
+      sessionStorage.setItem("token_admin_token", state.token);
+      showApp();
+      await switchView("overview");
+    } catch (error) { showAuth(error.message); }
+  });
+  document.getElementById("show-bootstrap").addEventListener("click", () => {
+    const form = document.getElementById("bootstrap-form");
+    form.hidden = !form.hidden;
+    document.getElementById("show-bootstrap").hidden = !form.hidden;
+  });
+  document.getElementById("bootstrap-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    const bootstrapToken = data.token;
+    delete data.token;
+    try {
+      const result = await fetch("/admin/auth/bootstrap", { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": bootstrapToken }, body: JSON.stringify(data) });
+      const response = await result.json();
+      if (!result.ok) throw new Error(response.detail || "管理员初始化失败");
+      state.token = response.access_token;
       sessionStorage.setItem("token_admin_token", state.token);
       showApp();
       await switchView("overview");
     } catch (error) { showAuth(error.message); }
   });
   document.getElementById("toggle-token").addEventListener("click", () => {
-    const input = document.getElementById("admin-token");
+    const input = document.getElementById("admin-password");
     input.type = input.type === "password" ? "text" : "password";
   });
   document.getElementById("logout-button").addEventListener("click", () => {
-    sessionStorage.removeItem("token_admin_token"); state.token = ""; document.getElementById("admin-token").value = ""; showAuth();
+    api("/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
+    sessionStorage.removeItem("token_admin_token"); state.token = ""; document.getElementById("admin-password").value = ""; showAuth();
   });
   document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view));
   document.getElementById("close-dialog").addEventListener("click", closeDialog);
@@ -705,6 +773,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
+    if (target.dataset.action === "preflight-model") preflightModel(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "import-models") modelImportDialog();
     if (target.dataset.action === "edit-model-pricing") modelPricingDialog(target.dataset.id, target.dataset.name, target.dataset.inputPrice, target.dataset.outputPrice);
     if (target.dataset.action === "manage-channels") channelDialog(target.dataset.id, target.dataset.name).catch((error) => toast(error.message, true));
@@ -716,13 +785,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "toggle-redemption") toggleRedemption(target.dataset.id, target.dataset.active === "true");
     if (target.dataset.action === "confirm-payment") confirmPayment(target.dataset.id);
     if (target.dataset.action === "refund-payment") refundPayment(target.dataset.id);
+    if (target.dataset.action === "reconcile-ledger") reconcileLedger();
+    if (target.dataset.action === "manage-admins") manageAdmins();
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");
   });
   if (state.token) {
-    document.getElementById("admin-token").value = state.token;
-    try { await api("/admin/overview"); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员密钥已失效"); }
+    try { await api("/admin/auth/me"); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
   } else {
     showAuth();
   }

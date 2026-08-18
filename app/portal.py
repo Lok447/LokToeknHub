@@ -1,10 +1,14 @@
 import csv
+import hashlib
+import hmac
 import io
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from urllib.parse import quote
 import uuid
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy import func, select
@@ -16,13 +20,48 @@ from .builtin_models import model_metadata
 from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionClaim, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityNotification, UsageRecord, utcnow
 from .payment_providers import payment_providers, require_available_provider
-from .schemas import ActiveUpdate, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, RedemptionCodeRedeem, TrialLinkCreate
-from .security import PortalContext, create_key, create_portal_session_token, create_trial_token, hash_key, hash_password, require_admin, require_portal_context, require_trial_account, verify_password
+from .schemas import ActiveUpdate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, RedemptionCodeRedeem, SecurityContactUpdate, TrialLinkCreate
+from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, verify_password
 
 
 router = APIRouter()
+
+
+def record_security_notification(db: Session, account: BillingAccount, event_type: str, details: dict[str, object] | None = None) -> None:
+    db.add(SecurityNotification(
+        account_id=account.id,
+        event_type=event_type,
+        details_json=json.dumps(details, ensure_ascii=False, separators=(",", ":"), sort_keys=True) if details else None,
+    ))
+
+
+def deliver_password_reset(account: BillingAccount, raw_token: str, expires_at: datetime) -> None:
+    """Deliver a reset challenge through the deployment's configured security channel."""
+    settings = get_settings()
+    if settings.security_delivery_mode == "development":
+        return
+    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or not account.security_contact:
+        raise HTTPException(status_code=503, detail="password reset delivery is not configured")
+    payload = json.dumps({
+        "event": "password_reset",
+        "contact": account.security_contact,
+        "login_id": account.login_id,
+        "reset_token": raw_token,
+        "expires_at": expires_at.isoformat(),
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(settings.security_delivery_webhook_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    try:
+        response = httpx.post(
+            settings.security_delivery_webhook_url,
+            content=payload,
+            headers={"Content-Type": "application/json", "X-LokToken-Signature": signature},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="password reset delivery failed") from exc
 
 
 def portal_account(
@@ -103,7 +142,7 @@ def csv_safe(value: object) -> object:
     return value
 
 
-@router.post("/admin/trial-links", dependencies=[Depends(require_admin)])
+@router.post("/admin/trial-links", dependencies=[Depends(require_operator)])
 def create_trial_link(payload: TrialLinkCreate, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(BillingAccount, payload.account_id)
     if not account or not account.active:
@@ -149,6 +188,7 @@ def register(payload: PortalRegister, request: Request, db: Session = Depends(ge
         db.rollback()
         raise HTTPException(status_code=409, detail="login id already exists") from exc
     record_audit_event(db, actor_type="public", actor_id=login_id, action="account.registered", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "account_registered")
     db.commit()
     db.refresh(account)
     return auth_response(account)
@@ -163,6 +203,57 @@ def login(payload: PortalLogin, request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=401, detail="invalid login credentials")
     if not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
+    record_security_notification(db, account, "account_logged_in")
+    db.commit()
+    return auth_response(account)
+
+
+@router.post("/auth/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    rate_limiter.check("password-reset-request", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
+    account = db.scalar(select(BillingAccount).where(BillingAccount.login_id == payload.login_id.lower()))
+    response: dict[str, object] = {"accepted": True}
+    if not account or not account.active or not account.password_hash:
+        return response
+    raw_token = create_password_reset_token()
+    challenge = PasswordResetChallenge(
+        account_id=account.id,
+        token_hash=hash_key(raw_token),
+        expires_at=utcnow() + timedelta(seconds=settings.password_reset_ttl_seconds),
+    )
+    deliver_password_reset(account, raw_token, challenge.expires_at)
+    db.add(challenge)
+    record_audit_event(db, actor_type="public", actor_id=account.external_user_id, action="account.password_reset_requested", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "password_reset_requested")
+    db.commit()
+    # Development exposes the token only for local UAT. Production delivery must use an external notifier.
+    if settings.security_delivery_mode == "development":
+        response["development_reset_token"] = raw_token
+    return response
+
+
+@router.post("/auth/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(get_db)) -> dict[str, object]:
+    challenge = db.scalar(select(PasswordResetChallenge).where(
+        PasswordResetChallenge.token_hash == hash_key(payload.reset_token),
+        PasswordResetChallenge.consumed_at.is_(None),
+    ))
+    if not challenge:
+        raise HTTPException(status_code=400, detail="password reset token is invalid or expired")
+    now = utcnow()
+    expires_at = challenge.expires_at if challenge.expires_at.tzinfo else challenge.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        raise HTTPException(status_code=400, detail="password reset token is invalid or expired")
+    account = db.get(BillingAccount, challenge.account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
+    account.password_hash = hash_password(payload.password)
+    account.session_version += 1
+    challenge.consumed_at = now
+    record_audit_event(db, actor_type="public", actor_id=account.external_user_id, action="account.password_reset_completed", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "password_reset_completed")
+    db.commit()
     return auth_response(account)
 
 
@@ -175,6 +266,8 @@ def profile(account: BillingAccount = Depends(portal_account), db: Session = Dep
         "balance_micros": account.balance_micros,
         "api_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id, ApiKey.active.is_(True))) or 0,
         "request_count": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.account_id == account.id)) or 0,
+        "security_contact": account.security_contact,
+        "security_contact_verified_at": account.security_contact_verified_at.isoformat() if account.security_contact_verified_at else None,
         "created_at": account.created_at.isoformat(),
     }
 
@@ -194,6 +287,71 @@ def list_api_keys(account: BillingAccount = Depends(portal_account), db: Session
         "last_used_at": item.last_used_at.isoformat() if item.last_used_at else None,
         "created_at": item.created_at.isoformat(),
     } for item in keys]}
+
+
+@router.post("/portal/api-keys/{api_key_id}/rotate")
+def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    if not api_key.active:
+        raise HTTPException(status_code=409, detail="only an active api key can be rotated")
+    raw_key = create_key()
+    replacement = ApiKey(
+        account_id=account.id,
+        name=f"{api_key.name} (rotated)",
+        key_prefix=raw_key[:12],
+        key_hash=hash_key(raw_key),
+        expires_at=api_key.expires_at,
+        trial_expires_at=api_key.trial_expires_at,
+        spending_limit_micros=api_key.spending_limit_micros,
+        rotated_from_key_id=api_key.id,
+    )
+    api_key.active = False
+    db.add(replacement)
+    db.flush()
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.rotated", target_type="api_key", target_id=replacement.id, details={"replaced_api_key_id": api_key.id})
+    record_security_notification(db, account, "api_key_rotated", {"replaced_api_key_id": api_key.id, "replacement_api_key_id": replacement.id})
+    db.commit()
+    return {"id": replacement.id, "name": replacement.name, "key": raw_key, "key_prefix": replacement.key_prefix, "replaced_api_key_id": api_key.id}
+
+
+@router.put("/portal/security/contact")
+def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    if not account.password_hash or not verify_password(payload.password, account.password_hash):
+        raise HTTPException(status_code=401, detail="invalid account password")
+    account.security_contact = payload.contact.strip()
+    account.security_contact_verified_at = utcnow()
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.security_contact_bound", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "security_contact_bound")
+    db.commit()
+    return {"security_contact": account.security_contact, "security_contact_verified_at": account.security_contact_verified_at.isoformat()}
+
+
+@router.get("/portal/security-notifications")
+def security_notifications(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    notifications = db.scalars(
+        select(SecurityNotification)
+        .where(SecurityNotification.account_id == account.id)
+        .order_by(SecurityNotification.id.desc())
+        .limit(100)
+    ).all()
+    return {"data": [{
+        "id": item.id,
+        "event_type": item.event_type,
+        "details": json.loads(item.details_json) if item.details_json else {},
+        "read_at": item.read_at.isoformat() if item.read_at else None,
+        "created_at": item.created_at.isoformat(),
+    } for item in notifications]}
+
+
+@router.post("/portal/security/logout-all")
+def logout_portal_sessions(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, bool]:
+    account.session_version += 1
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.sessions_revoked", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "portal_sessions_revoked")
+    db.commit()
+    return {"revoked": True}
 
 
 @router.post("/portal/api-keys")

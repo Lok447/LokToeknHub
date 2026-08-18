@@ -26,12 +26,19 @@ def init_db() -> None:
     inspector = inspect(engine)
     account_columns = {column["name"] for column in inspector.get_columns("billing_accounts")}
     api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
+    payment_order_columns = {column["name"] for column in inspector.get_columns("payment_orders")}
     usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
     with engine.begin() as connection:
         if "login_id" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN login_id VARCHAR(160)"))
         if "password_hash" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN password_hash VARCHAR(256)"))
+        if "security_contact" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN security_contact VARCHAR(160)"))
+        if "security_contact_verified_at" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN security_contact_verified_at DATETIME"))
+        if "session_version" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0"))
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_billing_accounts_login_id ON billing_accounts (login_id)"))
         if "account_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN account_id INTEGER"))
@@ -49,8 +56,18 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN last_used_at DATETIME"))
         if "trial_expires_at" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_expires_at DATETIME"))
+        if "rotated_from_key_id" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
+        if "reviewed_by_admin_id" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_by_admin_id INTEGER"))
+        if "reviewed_at" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_at DATETIME"))
+        if "review_note" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN review_note TEXT"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_payment_orders_reviewed_by_admin_id ON payment_orders (reviewed_by_admin_id)"))
         if "account_id" not in usage_columns:
             connection.execute(text("ALTER TABLE usage_records ADD COLUMN account_id INTEGER"))
 

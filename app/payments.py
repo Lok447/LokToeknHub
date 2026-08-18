@@ -12,6 +12,8 @@ def mark_order_paid(
     db: Session,
     order: PaymentOrder,
     provider_order_id: str | None,
+    reviewer_admin_id: int | None = None,
+    review_note: str | None = None,
     audit_event: dict[str, object] | None = None,
 ) -> PaymentOrder:
     locked_order = db.scalar(select(PaymentOrder).where(PaymentOrder.id == order.id).with_for_update())
@@ -46,6 +48,10 @@ def mark_order_paid(
     locked_order.status = "paid"
     locked_order.provider_order_id = provider_order_id or locked_order.provider_order_id
     locked_order.paid_at = locked_order.paid_at or datetime.now(timezone.utc)
+    if reviewer_admin_id is not None:
+        locked_order.reviewed_by_admin_id = reviewer_admin_id
+        locked_order.reviewed_at = datetime.now(timezone.utc)
+        locked_order.review_note = review_note
     if audit_event:
         record_audit_event(db, **audit_event)
     try:
@@ -60,7 +66,13 @@ def mark_order_paid(
     return locked_order
 
 
-def refund_order(db: Session, order: PaymentOrder, audit_event: dict[str, object] | None = None) -> PaymentOrder:
+def refund_order(
+    db: Session,
+    order: PaymentOrder,
+    reviewer_admin_id: int | None = None,
+    review_note: str | None = None,
+    audit_event: dict[str, object] | None = None,
+) -> PaymentOrder:
     locked_order = db.scalar(select(PaymentOrder).where(PaymentOrder.id == order.id).with_for_update())
     if not locked_order:
         raise ValueError("payment order not found")
@@ -88,6 +100,10 @@ def refund_order(db: Session, order: PaymentOrder, audit_event: dict[str, object
 
     locked_order.status = "refunded"
     locked_order.refunded_at = locked_order.refunded_at or datetime.now(timezone.utc)
+    if reviewer_admin_id is not None:
+        locked_order.reviewed_by_admin_id = reviewer_admin_id
+        locked_order.reviewed_at = datetime.now(timezone.utc)
+        locked_order.review_note = review_note
     if audit_event:
         record_audit_event(db, **audit_event)
     try:
