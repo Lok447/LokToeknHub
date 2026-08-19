@@ -4,6 +4,9 @@
 .auth-mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 20px 0 18px; padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
 .auth-mode-tabs button { min-height: 31px; border: 0; border-radius: 3px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
 .auth-mode-tabs button.active { color: var(--ink); background: var(--surface); box-shadow: 0 1px 3px rgba(17, 24, 32, 0.1); }
+.auth-login-support { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; color: var(--muted); font-size: 10px; }
+.auth-login-support .text-button { width: auto; min-height: 26px; padding: 0; color: var(--signal); font-size: 10px; }
+.auth-login-support .text-button:hover { color: var(--signal-strong, #1d43b8); background: transparent; }
 #portal-login-form, #portal-register-form { display: grid; gap: 8px; }
 #portal-login-form label, #portal-register-form label { margin-top: 3px; color: #3d4650; font-size: 11px; font-weight: 700; }
 .model-detail-grid small { color: var(--muted); font-size: 9px; font-weight: 600; }

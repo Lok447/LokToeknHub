@@ -161,7 +161,11 @@ async function portalApi(path, options = {}) {
       "insufficient balance": "账户余额不足，请先充值或兑换额度后再调用模型。",
       "api key spending limit exceeded": "该 API Key 已达到消费上限，请更换 Key 或调整额度限制。",
       "invalid login credentials": "账号或密码错误。",
+      "invalid account password": "当前密码错误。",
       "account is inactive": "当前账户已停用，请联系管理员。",
+      "security contact verification token is invalid or expired": "安全联系方式验证码无效或已过期，请重新发送。",
+      "security contact verification delivery is not configured": "安全验证服务尚未配置，请联系管理员。",
+      "security contact verification delivery failed": "验证码发送失败，请稍后重试。",
       "login id already exists": "该账号已存在，请更换账号或直接登录。",
       "redemption code not found": "兑换码不存在，请检查后重试。",
       "redemption code already used by this account": "当前账户已领取过该兑换码。",
@@ -198,7 +202,7 @@ function setAuthMode(mode) {
 }
 
 function passwordResetDialog() {
-  openPortalDialog("重置密码", `<form id="portal-password-reset-form"><div class="dialog-body"><p class="dialog-copy">输入注册账号后，我们会发送一次性重置凭证。为保护账号，不论账号是否存在都会返回相同提示。</p><div class="field"><label for="reset-login-id">账号</label><input id="reset-login-id" name="login_id" autocomplete="username" required minlength="3"></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">发送重置凭证</button></div></div></form>`);
+  openPortalDialog("重置密码", `<form id="portal-password-reset-form"><div class="dialog-body"><p class="dialog-copy">输入注册账号后，我们会向已验证的安全联系方式发送一次性重置凭证。为保护账号，不论账号是否存在都会返回相同提示。</p><div class="field"><label for="reset-login-id">账号</label><input id="reset-login-id" name="login_id" autocomplete="username" required minlength="3"></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">发送重置凭证</button></div></div></form>`);
   document.getElementById("portal-password-reset-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -212,6 +216,20 @@ function passwordResetDialog() {
           portalToast("密码已更新，其他登录会话已失效");
         } catch (error) { portalToast(error.message, true); }
       });
+    } catch (error) { portalToast(error.message, true); }
+  });
+}
+
+function securityContactVerificationDialog(result = {}) {
+  const developmentToken = result.development_verification_token || "";
+  openPortalDialog("验证安全联系方式", `<form id="portal-contact-verification-form"><div class="dialog-body"><p class="dialog-copy">验证码已发送到你填写的安全联系方式。验证成功后，该联系方式才能用于找回密码。</p><div class="field"><label for="contact-verification-token">验证码</label><input id="contact-verification-token" name="verification_token" value="${escapeHtml(developmentToken)}" autocomplete="one-time-code" required minlength="16"><small class="field-hint">${developmentToken ? "开发环境已自动填入测试验证码。" : "请输入收到的一次性验证码。"}</small></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后验证</button><button class="primary-button" type="submit">确认验证</button></div></form>`);
+  document.getElementById("portal-contact-verification-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await portalApi("/portal/security/contact/confirm", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
+      await loadProfile();
+      closePortalDialog();
+      portalToast("安全联系方式已验证，可用于找回密码");
     } catch (error) { portalToast(error.message, true); }
   });
 }
@@ -966,15 +984,17 @@ async function portalSecurityDialog() {
   try {
     const notifications = await portalApi("/portal/security-notifications");
     const contact = portalState.profile?.security_contact || "未绑定";
+    const contactStatus = portalState.profile?.security_contact_verified_at ? "已验证" : (portalState.profile?.security_contact ? "待验证" : "未绑定");
     const items = notifications.data.slice(0, 6).map((item) => `<div class="status-row"><span class="status-name"><i data-lucide="shield-check"></i>${escapeHtml(item.event_type)}</span><span class="secondary">${formatDate(item.created_at)}</span></div>`).join("") || '<p class="dialog-copy">暂无安全事件。</p>';
-    openPortalDialog("账号安全", `<div class="dialog-body"><div class="key-detail-grid"><div><span>安全联系方式</span><strong>${escapeHtml(contact)}</strong></div><div><span>登录会话</span><strong>可全部退出</strong></div></div><div class="field"><label for="security-contact">绑定安全联系方式</label><input id="security-contact" value="${escapeHtml(portalState.profile?.security_contact || "")}" placeholder="邮箱或手机号"><small class="field-hint">需要输入当前密码确认账号归属。</small></div><div class="field"><label for="security-password">当前密码</label><input id="security-password" type="password" autocomplete="current-password"></div><div class="section-header"><div><h2>最近安全事件</h2></div></div><div class="status-list">${items}</div></div><div class="dialog-actions"><button class="secondary-button" type="button" id="portal-logout-all">退出其他会话</button><button class="primary-button" type="button" id="portal-bind-security">保存联系方式</button></div>`);
+    openPortalDialog("账号安全", `<div class="dialog-body"><div class="key-detail-grid"><div><span>安全联系方式 · ${escapeHtml(contactStatus)}</span><strong>${escapeHtml(contact)}</strong></div><div><span>登录会话</span><strong>可全部退出</strong></div></div><div class="field"><label for="security-contact">绑定安全联系方式</label><input id="security-contact" value="${escapeHtml(portalState.profile?.security_contact || "")}" placeholder="邮箱或手机号"><small class="field-hint">保存后需要通过一次性验证码确认，才能用于找回密码。</small></div><div class="field"><label for="security-password">当前密码</label><input id="security-password" type="password" autocomplete="current-password"></div><div class="section-header"><div><h2>最近安全事件</h2></div></div><div class="status-list">${items}</div></div><div class="dialog-actions"><button class="secondary-button" type="button" id="portal-logout-all">退出其他会话</button><button class="primary-button" type="button" id="portal-bind-security">发送验证码</button></div>`);
     document.getElementById("portal-bind-security").addEventListener("click", async () => {
       try {
         const contactValue = document.getElementById("security-contact").value.trim();
         const password = document.getElementById("security-password").value;
         if (!contactValue || !password) throw new Error("请填写联系方式和当前密码");
-        await portalApi("/portal/security/contact", { method: "PUT", body: JSON.stringify({ contact: contactValue, password }) });
-        await loadProfile(); closePortalDialog(); portalToast("安全联系方式已更新");
+        const result = await portalApi("/portal/security/contact", { method: "PUT", body: JSON.stringify({ contact: contactValue, password }) });
+        await loadProfile();
+        securityContactVerificationDialog(result);
       } catch (error) { portalToast(error.message, true); }
     });
     document.getElementById("portal-logout-all").addEventListener("click", async () => {
@@ -1008,6 +1028,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try { await loadProfile(); await loadWorkspaces(); sessionStorage.setItem("token_portal_access", portalState.token); showPortalShell(); await switchPortalView("overview"); } catch (error) { showPortalAuth(error.message); }
   });
   document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.addEventListener("click", () => setAuthMode(button.dataset.authMode)));
+  setAuthMode("login");
   const loksystemLoginButton = document.getElementById("loksystem-login-button");
   try {
     const loksystemStatus = await fetch("/auth/loksystem/status").then((response) => response.json());
@@ -1036,7 +1057,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     event.preventDefault();
     try {
       const data = Object.fromEntries(new FormData(event.currentTarget));
-      await establishPortalSession(await portalApi("/auth/register", { method: "POST", body: JSON.stringify(data) }));
+      const result = await portalApi("/auth/register", { method: "POST", body: JSON.stringify(data) });
+      await establishPortalSession(result);
+      if (result.security_contact_verification_required) securityContactVerificationDialog(result);
     } catch (error) { showPortalAuth(error.message); }
   });
   document.getElementById("toggle-portal-token").addEventListener("click", () => {

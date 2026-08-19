@@ -759,7 +759,11 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert portal_page.status_code == 200
         assert "LokToken用户中心" in portal_page.text
         assert '<span>API管理</span>' in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260818-6"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260819-8"' in portal_page.text
+        assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
+        assert 'id="portal-forgot-password"' in portal_page.text
+        assert 'id="portal-register-contact"' in portal_page.text
+        assert 'data-auth-mode="trial">试用入口</button>' in portal_page.text
         assert portal_page.text.index('id="portal-integration-guide"') < portal_page.text.index('class="overview-quickbar panel"')
         assert '<strong>LokToken</strong>' in portal_page.text
         assert '<p class="sidebar-section-label">工作台</p>' in portal_page.text
@@ -769,17 +773,19 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert 'id="portal-refresh"' in portal_page.text
         assert "LokSystem 一键注册 / 登录" in portal_page.text
         assert 'id="loksystem-login-button"' in portal_page.text
+        assert portal_page.text.index('id="portal-login-form"') < portal_page.text.index('id="loksystem-login-button"') < portal_page.text.index('id="portal-register-form"')
         assert 'id="portal-integration-guide"' in portal_page.text
         assert "重置密码" not in portal_page.text
         assert "查看用户文档" not in portal_page.text
         assert "试用令牌（trl_ 开头）" in portal_page.text
-        portal_script = await client.get("/static/portal.js?v=portal-20260818-6")
+        portal_script = await client.get("/static/portal.js?v=portal-20260819-8")
         assert portal_script.headers["cache-control"] == "no-store"
         assert "复制并前往 LokSystem" in portal_script.text
         assert "loksystem://add-provider?platform=LokToken" in portal_script.text
         assert "应用接入" in portal_script.text
         assert "在应用中完成配置" in portal_script.text
         assert 'keys: "API管理"' in portal_script.text
+        assert "if (loksystemStatus.enabled) loksystemLoginButton.hidden = false;" in portal_script.text
         assert "创建 API Key" not in portal_script.text
 
         account = await client.post(
@@ -1146,9 +1152,20 @@ async def test_admin_accounts_roles_and_revocable_sessions() -> None:
 async def test_password_reset_key_rotation_and_security_sessions() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        registered = await client.post("/auth/register", json={"login_id": "security-user", "name": "Security User", "password": "correct-horse"})
+        registered = await client.post("/auth/register", json={"login_id": "security-user", "name": "Security User", "password": "correct-horse", "security_contact": "security@example.com"})
         assert registered.status_code == 200
         first_token = registered.json()["access_token"]
+        profile = await client.get("/portal/profile", headers={"Authorization": f"Bearer {first_token}"})
+        assert profile.json()["security_contact"] == "security@example.com"
+        assert profile.json()["security_contact_verified_at"] is None
+        unverified_reset = await client.post("/auth/password-reset/request", json={"login_id": "security-user"})
+        assert unverified_reset.status_code == 200 and "development_reset_token" not in unverified_reset.json()
+        verification = await client.post(
+            "/portal/security/contact/confirm",
+            headers={"Authorization": f"Bearer {first_token}"},
+            json={"verification_token": registered.json()["development_verification_token"]},
+        )
+        assert verification.status_code == 200 and verification.json()["security_contact_verified_at"]
         reset = await client.post("/auth/password-reset/request", json={"login_id": "security-user"})
         assert reset.status_code == 200 and reset.json()["development_reset_token"].startswith("rst_")
         reset_done = await client.post("/auth/password-reset/confirm", json={"reset_token": reset.json()["development_reset_token"], "password": "new-correct-horse"})
@@ -1163,8 +1180,14 @@ async def test_password_reset_key_rotation_and_security_sessions() -> None:
         assert old_key["active"] is False
         bound = await client.put("/portal/security/contact", headers=portal_headers, json={"contact": "security@example.com", "password": "new-correct-horse"})
         assert bound.status_code == 200
+        rebound = await client.post(
+            "/portal/security/contact/confirm",
+            headers=portal_headers,
+            json={"verification_token": bound.json()["development_verification_token"]},
+        )
+        assert rebound.status_code == 200
         notices = await client.get("/portal/security-notifications", headers=portal_headers)
-        assert {item["event_type"] for item in notices.json()["data"]} >= {"api_key_rotated", "security_contact_bound"}
+        assert {item["event_type"] for item in notices.json()["data"]} >= {"api_key_rotated", "security_contact_verified"}
         assert (await client.post("/portal/security/logout-all", headers=portal_headers)).status_code == 200
         assert (await client.get("/portal/profile", headers=portal_headers)).status_code == 401
 

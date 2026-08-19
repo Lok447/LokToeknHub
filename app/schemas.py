@@ -28,6 +28,7 @@ class PortalRegister(BaseModel):
     login_id: str = Field(min_length=3, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,159}$")
     name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=8, max_length=128)
+    security_contact: str | None = Field(default=None, min_length=3, max_length=160)
 
 
 class PortalLogin(BaseModel):
@@ -47,6 +48,10 @@ class PasswordResetConfirm(BaseModel):
 class SecurityContactUpdate(BaseModel):
     contact: str = Field(min_length=3, max_length=160)
     password: str = Field(min_length=8, max_length=128)
+
+
+class SecurityContactConfirm(BaseModel):
+    verification_token: str = Field(min_length=16, max_length=160)
 
 
 class AdminLogin(BaseModel):

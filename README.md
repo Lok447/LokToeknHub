@@ -20,6 +20,10 @@ uvicorn app.main:app --reload
 - 用户文档：`http://127.0.0.1:8000/guide/user`
 - OpenAPI 开发参考：`http://127.0.0.1:8000/docs`
 
+从新用户注册到模型调用、以及管理控制台商用验收的完整手册见 [docs/LOKTOKEN_USER_MANUAL.md](docs/LOKTOKEN_USER_MANUAL.md)。
+
+按产品分层、角色、业务闭环和成熟度整理的能力地图见 [docs/LOKTOKEN_PRODUCT_CAPABILITY_MAP.md](docs/LOKTOKEN_PRODUCT_CAPABILITY_MAP.md)。
+
 默认关闭 Mock（`TOKEN_MOCK_MODE=false`），服务只调用已配置的真实供应商。测试需要联调模拟链路时，必须在测试环境显式设置 `TOKEN_MOCK_MODE=true` 和 `TOKEN_SEED_BUILTIN_MODELS=true`；生产环境不得启用这两个开关。供应商密钥通过 `provider_api_key_env` 引用环境变量，不写入数据库。
 
 管理台的 DeepSeek 预设已提供 `deepseek-v4-flash` 与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。

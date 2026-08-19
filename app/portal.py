@@ -23,9 +23,9 @@ from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
 from .model_release import model_is_callable
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
-from .schemas import ActiveUpdate, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactUpdate, TrialLinkCreate
+from .schemas import ActiveUpdate, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
 from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, verify_password
 from .workspaces import accessible_workspaces, create_organization, create_project, ensure_default_project, ensure_personal_workspace, project_access, require_workspace_manager, workspace_access, workspace_data
 
@@ -46,7 +46,7 @@ def deliver_password_reset(account: BillingAccount, raw_token: str, expires_at: 
     settings = get_settings()
     if settings.security_delivery_mode == "development":
         return
-    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or not account.security_contact:
+    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or not account.security_contact or not account.security_contact_verified_at:
         raise HTTPException(status_code=503, detail="password reset delivery is not configured")
     payload = json.dumps({
         "event": "password_reset",
@@ -66,6 +66,35 @@ def deliver_password_reset(account: BillingAccount, raw_token: str, expires_at: 
         response.raise_for_status()
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=503, detail="password reset delivery failed") from exc
+
+
+def create_security_contact_challenge(db: Session, account: BillingAccount, contact: str) -> tuple[SecurityContactChallenge, str]:
+    settings = get_settings()
+    raw_token = create_password_reset_token().replace("rst_", "vfy_", 1)
+    challenge = SecurityContactChallenge(
+        account_id=account.id,
+        contact=contact,
+        token_hash=hash_key(raw_token),
+        expires_at=utcnow() + timedelta(seconds=settings.password_reset_ttl_seconds),
+    )
+    if settings.security_delivery_mode != "development":
+        if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url:
+            raise HTTPException(status_code=503, detail="security contact verification delivery is not configured")
+        payload = json.dumps({
+            "event": "security_contact_verification",
+            "contact": contact,
+            "login_id": account.login_id,
+            "verification_token": raw_token,
+            "expires_at": challenge.expires_at.isoformat(),
+        }, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        signature = hmac.new(settings.security_delivery_webhook_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        try:
+            response = httpx.post(settings.security_delivery_webhook_url, content=payload, headers={"Content-Type": "application/json", "X-LokToken-Signature": signature}, timeout=10)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="security contact verification delivery failed") from exc
+    db.add(challenge)
+    return challenge, raw_token
 
 
 def portal_account(
@@ -424,6 +453,7 @@ def register(payload: PortalRegister, request: Request, db: Session = Depends(ge
         login_id=login_id,
         password_hash=hash_password(payload.password),
         name=payload.name,
+        security_contact=payload.security_contact.strip() if payload.security_contact else None,
     )
     try:
         db.add(account)
@@ -432,11 +462,18 @@ def register(payload: PortalRegister, request: Request, db: Session = Depends(ge
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="login id already exists") from exc
-    record_audit_event(db, actor_type="public", actor_id=login_id, action="account.registered", target_type="account", target_id=account.id, details={})
+    verification_token = None
+    if account.security_contact:
+        _, verification_token = create_security_contact_challenge(db, account, account.security_contact)
+    record_audit_event(db, actor_type="public", actor_id=login_id, action="account.registered", target_type="account", target_id=account.id, details={"security_contact_pending": bool(account.security_contact)})
     record_security_notification(db, account, "account_registered")
     db.commit()
     db.refresh(account)
-    return auth_response(account)
+    response = auth_response(account)
+    response["security_contact_verification_required"] = bool(account.security_contact)
+    if verification_token and settings.security_delivery_mode == "development":
+        response["development_verification_token"] = verification_token
+    return response
 
 
 @router.post("/auth/login")
@@ -459,7 +496,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request, db: 
     rate_limiter.check("password-reset-request", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
     account = db.scalar(select(BillingAccount).where(BillingAccount.login_id == payload.login_id.lower()))
     response: dict[str, object] = {"accepted": True}
-    if not account or not account.active or not account.password_hash:
+    if not account or not account.active or not account.password_hash or not account.security_contact or not account.security_contact_verified_at:
         return response
     raw_token = create_password_reset_token()
     challenge = PasswordResetChallenge(
@@ -632,9 +669,34 @@ def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccoun
     if not account.password_hash or not verify_password(payload.password, account.password_hash):
         raise HTTPException(status_code=401, detail="invalid account password")
     account.security_contact = payload.contact.strip()
-    account.security_contact_verified_at = utcnow()
-    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.security_contact_bound", target_type="account", target_id=account.id, details={})
-    record_security_notification(db, account, "security_contact_bound")
+    account.security_contact_verified_at = None
+    _, raw_token = create_security_contact_challenge(db, account, account.security_contact)
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.security_contact_verification_requested", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "security_contact_verification_requested")
+    db.commit()
+    response: dict[str, object] = {"security_contact": account.security_contact, "security_contact_verified_at": None, "verification_required": True}
+    if get_settings().security_delivery_mode == "development":
+        response["development_verification_token"] = raw_token
+    return response
+
+
+@router.post("/portal/security/contact/confirm")
+def confirm_security_contact(payload: SecurityContactConfirm, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    challenge = db.scalar(select(SecurityContactChallenge).where(
+        SecurityContactChallenge.account_id == account.id,
+        SecurityContactChallenge.token_hash == hash_key(payload.verification_token),
+        SecurityContactChallenge.consumed_at.is_(None),
+    ))
+    if not challenge:
+        raise HTTPException(status_code=400, detail="security contact verification token is invalid or expired")
+    now = utcnow()
+    expires_at = challenge.expires_at if challenge.expires_at.tzinfo else challenge.expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now or account.security_contact != challenge.contact:
+        raise HTTPException(status_code=400, detail="security contact verification token is invalid or expired")
+    challenge.consumed_at = now
+    account.security_contact_verified_at = now
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.security_contact_verified", target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, "security_contact_verified")
     db.commit()
     return {"security_contact": account.security_contact, "security_contact_verified_at": account.security_contact_verified_at.isoformat()}
 
