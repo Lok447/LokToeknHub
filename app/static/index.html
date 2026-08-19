@@ -75,7 +75,7 @@
           <h1 id="page-title">管理概览</h1>
         </div>
         <div class="topbar-actions">
-          <span class="environment"><span class="status-dot"></span>Mock 环境</span>
+          <span class="environment" id="environment-badge"><span class="status-dot"></span>读取环境</span>
           <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
         </div>
       </header>
@@ -106,8 +106,16 @@
         </section>
 
         <section class="view" id="view-models">
-          <div class="section-header page-section-header"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="table-actions"><button class="secondary-button" data-action="health-check-all"><i data-lucide="activity"></i><span>检测全部渠道</span></button><button class="secondary-button" data-action="import-models"><i data-lucide="list-plus"></i><span>批量接入</span></button><button class="primary-button" data-action="create-model"><i data-lucide="plus"></i><span>添加模型</span></button></div></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>公开模型</th><th>平台输入 / 1K（元）</th><th>平台输出 / 1K（元）</th><th>官网参考价 / 1M（元）</th><th>渠道</th><th>健康状态</th><th>模型状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div></section>
+          <div class="section-header page-section-header model-page-header"><div class="model-page-heading"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="model-type-tabs" aria-label="模型类型筛选"><button class="active" type="button" data-model-type=""><i data-lucide="layout-grid"></i><span>全部模型</span><small data-model-type-count="all">0</small></button><button type="button" data-model-type="text"><i data-lucide="message-square-text"></i><span>文本模型</span><small data-model-type-count="text">0</small></button><button type="button" data-model-type="image"><i data-lucide="image"></i><span>图像模型</span><small data-model-type-count="image">0</small></button><button type="button" data-model-type="video"><i data-lucide="video"></i><span>视频模型</span><small data-model-type-count="video">0</small></button><button type="button" data-model-type="audio"><i data-lucide="audio-lines"></i><span>语音模型</span><small data-model-type-count="audio">0</small></button></div></div><div class="table-actions"><button class="secondary-button" data-action="health-check-all"><i data-lucide="activity"></i><span>检测全部渠道</span></button><button class="secondary-button" data-action="import-models"><i data-lucide="list-plus"></i><span>批量接入</span></button><button class="primary-button" data-action="create-model"><i data-lucide="plus"></i><span>添加模型</span></button></div></div>
+          <section class="panel model-catalog-panel">
+            <div class="model-catalog-toolbar">
+              <div class="input-with-icon"><i data-lucide="search"></i><input id="model-search" type="search" placeholder="搜索模型、上游 ID 或服务商" aria-label="搜索模型"></div>
+              <select id="model-provider-filter" aria-label="服务商筛选"><option value="">全部服务商</option></select>
+              <select id="model-state-filter" aria-label="发布状态筛选"><option value="">全部状态</option><option value="published">已上架</option><option value="candidate">候选</option><option value="blocked">待完善</option></select>
+              <span id="model-result-count">共 0 个模型</span>
+            </div>
+            <div class="table-wrap"><table class="model-catalog-table"><thead><tr><th>公开模型</th><th>服务商</th><th>类型</th><th>平台输入 / 1M</th><th>平台输出 / 1M</th><th>渠道</th><th>健康</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div>
+          </section>
         </section>
 
         <section class="view" id="view-payments">

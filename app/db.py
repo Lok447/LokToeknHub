@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import datetime, timezone
+import json
 
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -29,6 +30,7 @@ def init_db() -> None:
     payment_order_columns = {column["name"] for column in inspector.get_columns("payment_orders")}
     usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
     transaction_columns = {column["name"] for column in inspector.get_columns("account_balance_transactions")}
+    channel_columns = {column["name"] for column in inspector.get_columns("model_channels")}
     model_columns = {column["name"] for column in inspector.get_columns("model_configs")}
     with engine.begin() as connection:
         if "login_id" not in account_columns:
@@ -93,13 +95,34 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE account_balance_transactions ADD COLUMN project_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_account_balance_transactions_workspace_id ON account_balance_transactions (workspace_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_account_balance_transactions_project_id ON account_balance_transactions (project_id)"))
+        if "health_source" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN health_source VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
+        if "encrypted_api_key" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN encrypted_api_key TEXT"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_channels_health_source ON model_channels (health_source)"))
         if "catalog_metadata_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN catalog_metadata_json TEXT"))
         if "official_pricing_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
         if not settings.mock_mode:
             connection.execute(text(
-                "UPDATE model_configs SET active = 0 WHERE public_name IN ('lok-chat', 'lok-reason', 'lok-vision')"
+                "DELETE FROM model_channels WHERE model_config_id IN ("
+                "SELECT id FROM model_configs WHERE public_name IN ("
+                "'lok-chat', 'lok-reason', 'lok-vision', 'smoke-model', "
+                "'deepseek/deepseek-chat', 'deepseek/deepseek-reasoner'))"
+            ))
+            connection.execute(text(
+                "DELETE FROM model_configs WHERE public_name IN ("
+                "'lok-chat', 'lok-reason', 'lok-vision', 'smoke-model', "
+                "'deepseek/deepseek-chat', 'deepseek/deepseek-reasoner')"
+            ))
+            # Older console versions labeled prices as /1K while operators entered
+            # the market-standard /1M values. Normalize the known DeepSeek trial
+            # route once; all new UI writes convert /1M back to the ledger's /1K unit.
+            connection.execute(text(
+                "UPDATE model_configs SET input_price_micros_per_1k = 3000, output_price_micros_per_1k = 9000 "
+                "WHERE public_name = 'deepseek-v4-flash' "
+                "AND input_price_micros_per_1k = 3000000 AND output_price_micros_per_1k = 9000000"
             ))
 
     inspector = inspect(engine)
@@ -178,9 +201,9 @@ def init_db() -> None:
         connection.execute(text(
             "INSERT INTO model_channels "
             "(model_config_id, name, provider_base_url, upstream_model, provider_api_key_env, priority, weight, "
-            "active, status, consecutive_failures, created_at) "
+            "active, status, health_source, consecutive_failures, created_at) "
             "SELECT model_configs.id, 'Primary', model_configs.provider_base_url, model_configs.upstream_model, "
-            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 0, :created_at "
+            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 'unknown', 0, :created_at "
             "FROM model_configs WHERE NOT EXISTS ("
             "SELECT 1 FROM model_channels WHERE model_channels.model_config_id = model_configs.id)"
         ), {"created_at": now})
@@ -217,6 +240,7 @@ def init_db() -> None:
                 })
 
     seed_builtin_models()
+    seed_provider_catalogue()
 
 
 def seed_builtin_models() -> None:
@@ -252,6 +276,52 @@ def seed_builtin_models() -> None:
             for channel in db.scalars(select(ModelChannel).where(ModelChannel.status == "unknown")).all():
                 channel.status = "healthy"
                 channel.last_checked_at = utcnow()
+        db.commit()
+
+
+def seed_provider_catalogue() -> None:
+    """Preload curated provider candidates so operators do not create models one by one."""
+    if not settings.seed_provider_catalogue:
+        return
+    from .models import ModelChannel, ModelConfig
+    from .provider_presets import PROVIDER_PRESETS
+
+    with SessionLocal() as db:
+        existing_models = {
+            model.public_name: model
+            for model in db.scalars(select(ModelConfig)).all()
+        }
+        for preset in PROVIDER_PRESETS:
+            for preset_model in preset.models:
+                existing = existing_models.get(preset_model.public_name)
+                if existing:
+                    if not existing.catalog_metadata_json:
+                        existing.catalog_metadata_json = json.dumps(preset_model.catalog_metadata, ensure_ascii=False)
+                    if not existing.official_pricing_json and preset_model.official_pricing:
+                        existing.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
+                    continue
+                record = ModelConfig(
+                    public_name=preset_model.public_name,
+                    upstream_model=preset_model.model_id,
+                    provider_base_url=preset.base_url,
+                    provider_api_key_env=preset.api_key_env,
+                    input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k,
+                    output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k,
+                    catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
+                    official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
+                    active=False,
+                )
+                db.add(record)
+                db.flush()
+                db.add(ModelChannel(
+                    model_config_id=record.id,
+                    name=f"{preset.name} 主渠道",
+                    provider_base_url=preset.base_url,
+                    upstream_model=preset_model.model_id,
+                    provider_api_key_env=preset.api_key_env,
+                    active=False,
+                ))
+                existing_models[preset_model.public_name] = record
         db.commit()
 
 

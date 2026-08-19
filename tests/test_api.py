@@ -40,6 +40,250 @@ def test_mock_mode_seeds_builtin_models() -> None:
     assert {"lok-chat", "lok-reason", "lok-vision"} <= {item[0] for item in names}
 
 
+def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
+    from app.db import init_db
+    from app.models import ModelChannel, ModelConfig
+
+    init_db()
+    init_db()
+    expected = {
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "qwen/qwen-plus",
+        "qwen/qwen-image-plus",
+        "qwen/wan2.1-t2v-turbo",
+        "glm/glm-4.5",
+        "glm/cogview-4",
+        "glm/cogvideox-flash",
+        "kimi/kimi-k2-0905-preview",
+        "minimax/MiniMax-M2.1",
+        "minimax/image-01",
+        "minimax/video-01",
+        "doubao/doubao-seed-1-6",
+        "doubao/doubao-seedream-4-0",
+        "doubao/doubao-seedance-1-0-pro",
+    }
+    with SessionLocal() as db:
+        seeded = db.query(ModelConfig).filter(ModelConfig.public_name.in_(expected)).all()
+        assert {model.public_name for model in seeded} == expected
+        assert len(seeded) == len(expected)
+        assert all(model.active is False for model in seeded)
+        channels = db.query(ModelChannel).filter(ModelChannel.model_config_id.in_([model.id for model in seeded])).all()
+        assert len(channels) == len(expected)
+        assert all(channel.active is False for channel in channels)
+        metadata = {model.public_name: json.loads(model.catalog_metadata_json or "{}") for model in seeded}
+        assert metadata["qwen/qwen-image-plus"]["api_type"] == "images_generations"
+        assert metadata["doubao/doubao-seedance-1-0-pro"]["api_type"] == "video_generations"
+
+
+def test_provider_catalogue_enriches_existing_model_without_overwriting_routing() -> None:
+    from app.db import init_db
+    from app.models import ModelConfig
+
+    with SessionLocal() as db:
+        db.add(ModelConfig(
+            public_name="deepseek-v4-flash",
+            upstream_model="existing-route",
+            provider_base_url="https://existing.invalid/v1",
+            input_price_micros_per_1k=123,
+            output_price_micros_per_1k=456,
+            active=True,
+        ))
+        db.commit()
+    init_db()
+    with SessionLocal() as db:
+        model = db.query(ModelConfig).filter(ModelConfig.public_name == "deepseek-v4-flash").one()
+        assert model.upstream_model == "existing-route"
+        assert model.provider_base_url == "https://existing.invalid/v1"
+        assert model.input_price_micros_per_1k == 123
+        assert model.output_price_micros_per_1k == 456
+        assert model.active is True
+        assert json.loads(model.catalog_metadata_json or "{}")["provider"] == "DeepSeek"
+        assert json.loads(model.official_pricing_json or "{}")["currency"] == "CNY"
+
+
+def test_real_mode_removes_legacy_mock_models(monkeypatch) -> None:
+    from app.db import init_db
+    from app.models import ModelConfig
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mock_mode", False)
+    legacy_names = {
+        "lok-chat",
+        "lok-reason",
+        "lok-vision",
+        "smoke-model",
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+    }
+    with SessionLocal() as db:
+        for name in legacy_names:
+            db.add(ModelConfig(
+                public_name=name,
+                upstream_model=name,
+                provider_base_url="https://mock.invalid/v1",
+                input_price_micros_per_1k=1,
+                output_price_micros_per_1k=1,
+            ))
+        db.add(ModelConfig(
+            public_name="deepseek-v4-flash",
+            upstream_model="deepseek-v4-flash",
+            provider_base_url="https://api.deepseek.com/v1",
+            input_price_micros_per_1k=3_000_000,
+            output_price_micros_per_1k=9_000_000,
+            active=True,
+        ))
+        db.commit()
+    init_db()
+    with SessionLocal() as db:
+        remaining = db.query(ModelConfig.public_name).filter(ModelConfig.public_name.in_(legacy_names)).all()
+        normalized = db.query(ModelConfig).filter(ModelConfig.public_name == "deepseek-v4-flash").one()
+    assert remaining == []
+    assert (normalized.input_price_micros_per_1k, normalized.output_price_micros_per_1k) == (3000, 9000)
+
+
+@pytest.mark.asyncio
+async def test_admin_runtime_and_model_publication_state_are_explicit() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        runtime = await client.get("/admin/runtime", headers={"X-Admin-Token": "test-admin"})
+        assert runtime.status_code == 200
+        assert runtime.json()["data_mode"] == "mock"
+        assert runtime.json()["mock_published_model_count"] >= 1
+        assert runtime.json()["release_ready"] is True
+        models = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
+        assert models.status_code == 200
+        assert any(item["publication_state"] == "mock_published" for item in models.json()["data"])
+
+
+@pytest.mark.asyncio
+async def test_provider_secret_cannot_be_stored_as_environment_variable_name() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/admin/models",
+            headers={"X-Admin-Token": "test-admin"},
+            json={
+                "public_name": "unsafe-secret-model",
+                "upstream_model": "unsafe",
+                "provider_base_url": "https://provider.invalid/v1",
+                "provider_api_key_env": "sk-raw-secret-must-not-be-stored",
+            },
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_channel_health_explains_missing_provider_environment_variable(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.delenv("MISSING_PROVIDER_API_KEY", raising=False)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        model = await client.post(
+            "/admin/models",
+            headers=headers,
+            json={
+                "public_name": "missing-credential-model",
+                "upstream_model": "missing",
+                "provider_base_url": "https://provider.invalid/v1",
+                "provider_api_key_env": "MISSING_PROVIDER_API_KEY",
+            },
+        )
+        channels = await client.get(f"/admin/models/{model.json()['id']}/channels", headers=headers)
+        checked = await client.post(f"/admin/channels/{channels.json()['data'][0]['id']}/check", headers=headers)
+    assert checked.status_code == 200
+    assert checked.json()["healthy"] is False
+    assert checked.json()["detail"] == "供应商密钥环境变量未配置: MISSING_PROVIDER_API_KEY"
+
+
+@pytest.mark.asyncio
+async def test_channel_health_rejects_unknown_upstream_model(monkeypatch) -> None:
+    import app.services as services
+    from app.models import ModelChannel, ModelConfig
+
+    class ModelListResponse:
+        is_error = False
+
+        def json(self) -> dict[str, object]:
+            return {"object": "list", "data": [{"id": "supported-model"}]}
+
+    class ModelListClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def get(self, *_args, **_kwargs) -> ModelListResponse:
+            return ModelListResponse()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.setattr(settings, "default_provider_api_key", "test-provider-key")
+    monkeypatch.setattr(services.httpx, "AsyncClient", ModelListClient)
+    with SessionLocal() as db:
+        model = ModelConfig(
+            public_name="catalogue-mismatch",
+            upstream_model="missing-model",
+            provider_base_url="https://provider.invalid/v1",
+            input_price_micros_per_1k=1000,
+            output_price_micros_per_1k=2000,
+        )
+        db.add(model)
+        db.flush()
+        channel = ModelChannel(
+            model_config_id=model.id,
+            name="Primary",
+            provider_base_url=model.provider_base_url,
+            upstream_model=model.upstream_model,
+        )
+        db.add(channel)
+        db.commit()
+        result = await services.check_channel_health(db, channel)
+
+    assert result["healthy"] is False
+    assert "供应商模型目录不包含上游模型: missing-model" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_console_managed_provider_key_is_encrypted_and_never_returned() -> None:
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        model = await client.post(
+            "/admin/models",
+            headers=headers,
+            json={"public_name": "console-secret-model", "upstream_model": "secret-model", "provider_base_url": "https://provider.invalid/v1"},
+        )
+        channel = await client.post(
+            f"/admin/models/{model.json()['id']}/channels",
+            headers=headers,
+            json={
+                "name": "Console credential",
+                "upstream_model": "secret-model",
+                "provider_base_url": "https://provider.invalid/v1",
+                "provider_api_key": "provider-secret-value",
+            },
+        )
+    assert channel.status_code == 200
+    assert channel.json()["credentials_configured"] is True
+    assert channel.json()["credential_source"] == "console"
+    assert "provider-secret-value" not in channel.text
+    from app.models import ModelChannel
+    with SessionLocal() as db:
+        stored = db.query(ModelChannel).filter(ModelChannel.id == channel.json()["id"]).one()
+        assert stored.encrypted_api_key
+        assert stored.encrypted_api_key != "provider-secret-value"
+
+
 @pytest.mark.asyncio
 async def test_seeded_builtin_model_is_directly_callable() -> None:
     from app.db import init_db
@@ -159,6 +403,61 @@ async def test_portal_registration_and_login() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        admin_page = (await client.get("/")).text
+        portal_page = (await client.get("/portal")).text
+        admin_script = (await client.get("/static/app.js")).text
+        portal_script = (await client.get("/static/portal.js")).text
+
+        admin_nav = ["管理概览", "模型管理", "账户管理", "API管理", "订单管理", "福利管理", "用量管理", "安全审计"]
+        portal_nav = ["用户概览", "模型广场", "额度管理", "API管理", "请求记录", "订单管理", "兑换福利"]
+        admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
+        portal_nav_markup = portal_page.split('<nav aria-label="用户导航">', 1)[1].split("</nav>", 1)[0]
+        assert [admin_nav_markup.index(label) for label in admin_nav] == sorted(admin_nav_markup.index(label) for label in admin_nav)
+        assert [portal_nav_markup.index(label) for label in portal_nav] == sorted(portal_nav_markup.index(label) for label in portal_nav)
+        assert all(f'{key}: "{label}"' in admin_script for key, label in {
+            "overview": "管理概览", "models": "模型管理", "accounts": "账户管理", "keys": "API管理",
+            "payments": "订单管理", "redemptions": "福利管理", "usage": "用量管理", "audit": "安全审计",
+        }.items())
+        assert all(f'{key}: "{label}"' in portal_script for key, label in {
+            "overview": "用户概览", "models": "模型广场", "quota": "额度管理", "keys": "API管理",
+            "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
+        }.items())
+
+        bootstrap = await client.post(
+            "/admin/auth/bootstrap",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"login_id": "navigation-admin", "password": "correct-horse"},
+        )
+        admin_headers = {"Authorization": f"Bearer {bootstrap.json()['access_token']}"}
+        for path in (
+            "/admin/overview", "/admin/models", "/admin/accounts", "/admin/api-keys",
+            "/admin/payment-orders", "/admin/redemption-codes", "/admin/usage",
+            "/admin/usage/records", "/admin/audit-events", "/admin/runtime",
+        ):
+            response = await client.get(path, headers=admin_headers)
+            assert response.status_code == 200, f"{path}: {response.text}"
+
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "navigation-user", "name": "Navigation User", "password": "correct-horse"},
+        )
+        portal_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+        for path in (
+            "/portal/profile", "/portal/workspaces", "/portal/models", "/portal/balance-summary",
+            "/portal/api-keys", "/portal/usage", "/portal/usage/records?page=1&page_size=20",
+            "/portal/payment-orders", "/portal/redemptions",
+        ):
+            response = await client.get(path, headers=portal_headers)
+            assert response.status_code == 200, f"{path}: {response.text}"
+
+
+@pytest.mark.asyncio
 async def test_trial_bound_api_key_expires_with_trial(monkeypatch) -> None:
     from app.models import BillingAccount
 
@@ -215,6 +514,10 @@ async def test_create_key_model_and_chat() -> None:
         assert response.headers["X-Request-ID"] == "req_test"
         assert response.json()["usage"]["total_tokens"] > 0
 
+        model_detail = await client.get("/v1/models/demo-model", headers={"Authorization": f"Bearer {api_key}"})
+        assert model_detail.status_code == 200
+        assert model_detail.json() == {"id": "demo-model", "object": "model", "owned_by": "token"}
+
         account = await client.get("/v1/account", headers={"Authorization": f"Bearer {api_key}"})
         assert account.status_code == 200
         assert 0 < account.json()["balance_micros"] < 10000
@@ -240,6 +543,8 @@ async def test_create_key_model_and_chat() -> None:
             json={"model": "demo-model", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert empty_call.status_code == 402
+        assert empty_call.json()["error"]["code"] == "insufficient_balance"
+        assert "账户余额不足" in empty_call.json()["error"]["message"]
 
         usage = await client.get("/admin/usage", headers={"X-Admin-Token": "test-admin"})
         assert usage.status_code == 200
@@ -453,7 +758,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         portal_page = await client.get("/portal")
         assert portal_page.status_code == 200
         assert "LokToken用户中心" in portal_page.text
-        assert '<span>密钥管理</span>' in portal_page.text
+        assert '<span>API管理</span>' in portal_page.text
         assert 'src="/static/portal.js?v=portal-20260818-6"' in portal_page.text
         assert portal_page.text.index('id="portal-integration-guide"') < portal_page.text.index('class="overview-quickbar panel"')
         assert '<strong>LokToken</strong>' in portal_page.text
@@ -474,8 +779,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "loksystem://add-provider?platform=LokToken" in portal_script.text
         assert "应用接入" in portal_script.text
         assert "在应用中完成配置" in portal_script.text
-        assert 'keys: "密钥管理"' in portal_script.text
-        assert "API管理" not in portal_page.text
+        assert 'keys: "API管理"' in portal_script.text
         assert "创建 API Key" not in portal_script.text
 
         account = await client.post(
@@ -789,6 +1093,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
             auto_create_schema=False,
             mock_mode=False,
             admin_token="a" * 32,
+            provider_secrets_key="p" * 32,
             payment_webhook_secret="b" * 32,
             trial_signing_secret="c" * 32,
             public_base_url="https://token.example.com",
@@ -801,6 +1106,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
         auto_create_schema=False,
         mock_mode=False,
         admin_token="a" * 32,
+        provider_secrets_key="p" * 32,
         payment_webhook_secret="b" * 32,
         trial_signing_secret="c" * 32,
         public_base_url="https://token.example.com",
@@ -1155,6 +1461,7 @@ async def test_channel_failover_opens_circuit_and_uses_backup(monkeypatch) -> No
 
     settings = get_settings()
     monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.setattr(settings, "default_provider_api_key", "test-provider")
     monkeypatch.setattr(settings, "channel_failure_threshold", 1)
     FakeProviderClient.calls = []
     admin_headers = {"X-Admin-Token": "test-admin"}
@@ -1170,7 +1477,7 @@ async def test_channel_failover_opens_circuit_and_uses_backup(monkeypatch) -> No
         model = await client.post(
             "/admin/models",
             headers=admin_headers,
-            json={"public_name": "failover-model", "upstream_model": "primary", "provider_base_url": "https://primary.invalid/v1"},
+            json={"public_name": "failover-model", "upstream_model": "primary", "provider_base_url": "https://primary.invalid/v1", "input_price_micros_per_1k": 1000, "output_price_micros_per_1k": 2000},
         )
         model_id = model.json()["id"]
         backup = await client.post(
@@ -1185,6 +1492,12 @@ async def test_channel_failover_opens_circuit_and_uses_backup(monkeypatch) -> No
             },
         )
         assert backup.status_code == 200
+        from app.models import ModelChannel
+        with SessionLocal() as db:
+            for channel in db.query(ModelChannel).filter(ModelChannel.model_config_id == model_id).all():
+                channel.status = "healthy"
+                channel.health_source = "provider"
+            db.commit()
 
         response = await client.post(
             "/v1/chat/completions",
@@ -1213,6 +1526,7 @@ async def test_streaming_failover_only_before_first_chunk(monkeypatch) -> None:
 
     settings = get_settings()
     monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.setattr(settings, "default_provider_api_key", "test-provider")
     FakeProviderClient.calls = []
     admin_headers = {"X-Admin-Token": "test-admin"}
     transport = httpx.ASGITransport(app=app)
@@ -1227,7 +1541,7 @@ async def test_streaming_failover_only_before_first_chunk(monkeypatch) -> None:
         model = await client.post(
             "/admin/models",
             headers=admin_headers,
-            json={"public_name": "stream-failover-model", "upstream_model": "primary", "provider_base_url": "https://primary.invalid/v1"},
+            json={"public_name": "stream-failover-model", "upstream_model": "primary", "provider_base_url": "https://primary.invalid/v1", "input_price_micros_per_1k": 1000, "output_price_micros_per_1k": 2000},
         )
         await client.post(
             f"/admin/models/{model.json()['id']}/channels",
@@ -1240,6 +1554,12 @@ async def test_streaming_failover_only_before_first_chunk(monkeypatch) -> None:
                 "weight": 100,
             },
         )
+        from app.models import ModelChannel
+        with SessionLocal() as db:
+            for channel in db.query(ModelChannel).filter(ModelChannel.model_config_id == model.json()["id"]).all():
+                channel.status = "healthy"
+                channel.health_source = "provider"
+            db.commit()
         response = await client.post(
             "/v1/chat/completions",
             headers={"Authorization": f"Bearer {key.json()['key']}"},

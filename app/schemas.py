@@ -139,14 +139,15 @@ class ModelCreate(BaseModel):
     public_name: str = Field(min_length=1, max_length=120)
     upstream_model: str = Field(min_length=1, max_length=120)
     provider_base_url: str | None = None
-    provider_api_key_env: str | None = None
+    provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
     input_price_micros_per_1k: int = Field(default=0, ge=0)
     output_price_micros_per_1k: int = Field(default=0, ge=0)
 
 
 class ModelBatchImport(BaseModel):
     provider_base_url: str = Field(min_length=1, max_length=500)
-    provider_api_key_env: str | None = Field(default=None, max_length=120)
+    provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
     models: list[ModelCreate] = Field(min_length=1, max_length=100)
 
 
@@ -164,7 +165,8 @@ class ModelChannelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     provider_base_url: str = Field(min_length=1, max_length=500)
     upstream_model: str = Field(min_length=1, max_length=120)
-    provider_api_key_env: str | None = Field(default=None, max_length=120)
+    provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
     priority: int = Field(default=100, ge=0, le=10000)
     weight: int = Field(default=100, ge=1, le=10000)
     active: bool = True
@@ -174,7 +176,9 @@ class ModelChannelUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     provider_base_url: str | None = Field(default=None, min_length=1, max_length=500)
     upstream_model: str | None = Field(default=None, min_length=1, max_length=120)
-    provider_api_key_env: str | None = Field(default=None, max_length=120)
+    provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    clear_provider_api_key: bool = False
     priority: int | None = Field(default=None, ge=0, le=10000)
     weight: int | None = Field(default=None, ge=1, le=10000)
     active: bool | None = None

@@ -16,7 +16,7 @@ const portalState = {
   marketplace: { query: "", modality: "all" },
 };
 
-const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "密钥管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
+const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "API管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
 
 function portalIcons() {
   if (window.lucide) window.lucide.createIcons();
@@ -42,6 +42,10 @@ function formatMoney(micros) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
   });
+}
+
+function formatTokenPricePerMillion(microsPerThousand) {
+  return formatMoney(Number(microsPerThousand || 0) * 1000);
 }
 
 function formatDate(value) {
@@ -154,6 +158,8 @@ async function portalApi(path, options = {}) {
       "invalid trial access token": "试用令牌格式无效，请重新生成试用链接。",
       "invalid or expired trial access token": "试用令牌无效或已过期，请重新生成试用链接。",
       "billing account is inactive": "当前账户已停用，请联系管理员。",
+      "insufficient balance": "账户余额不足，请先充值或兑换额度后再调用模型。",
+      "api key spending limit exceeded": "该 API Key 已达到消费上限，请更换 Key 或调整额度限制。",
       "invalid login credentials": "账号或密码错误。",
       "account is inactive": "当前账户已停用，请联系管理员。",
       "login id already exists": "该账号已存在，请更换账号或直接登录。",
@@ -189,6 +195,25 @@ function setAuthMode(mode) {
   document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.authMode === mode));
   document.getElementById("portal-auth-error").textContent = "";
   portalIcons();
+}
+
+function passwordResetDialog() {
+  openPortalDialog("重置密码", `<form id="portal-password-reset-form"><div class="dialog-body"><p class="dialog-copy">输入注册账号后，我们会发送一次性重置凭证。为保护账号，不论账号是否存在都会返回相同提示。</p><div class="field"><label for="reset-login-id">账号</label><input id="reset-login-id" name="login_id" autocomplete="username" required minlength="3"></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">发送重置凭证</button></div></div></form>`);
+  document.getElementById("portal-password-reset-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const result = await portalApi("/auth/password-reset/request", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
+      openPortalDialog("设置新密码", `<form id="portal-password-reset-confirm"><div class="dialog-body"><p class="dialog-copy">${result.development_reset_token ? "开发/预发布环境已填入测试凭证；生产环境会发送到安全联系方式。" : "如果账号存在，重置凭证已发送到安全联系方式。"}</p><div class="field"><label for="reset-token">重置凭证</label><input id="reset-token" name="reset_token" value="${escapeHtml(result.development_reset_token || "")}" autocomplete="one-time-code" required></div><div class="field"><label for="reset-password">新密码</label><input id="reset-password" name="password" type="password" autocomplete="new-password" minlength="8" required></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后处理</button><button class="primary-button" type="submit">更新密码</button></div></div></form>`);
+      document.getElementById("portal-password-reset-confirm").addEventListener("submit", async (confirmEvent) => {
+        confirmEvent.preventDefault();
+        try {
+          await establishPortalSession(await portalApi("/auth/password-reset/confirm", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(confirmEvent.currentTarget))) }));
+          closePortalDialog();
+          portalToast("密码已更新，其他登录会话已失效");
+        } catch (error) { portalToast(error.message, true); }
+      });
+    } catch (error) { portalToast(error.message, true); }
+  });
 }
 
 function showPortalAuth(message = "") {
@@ -448,7 +473,10 @@ function renderKeyMetrics(items) {
   const totalSpent = items.reduce((sum, item) => sum + Number(item.spent_micros || 0), 0);
   const limited = items.filter((item) => item.spending_limit_micros != null).length;
   const latest = items.map((item) => item.last_used_at).filter(Boolean).sort().at(-1);
+  const balance = Number(portalState.profile?.balance_micros || 0);
+  const hasCallableModel = portalState.models.some((item) => item.health_status !== "unavailable");
   renderMetrics("portal-keys-metrics", [
+    { label: "账户余额", value: formatMoney(balance), meta: balance > 0 && hasCallableModel ? "可用于模型调用" : "充值或兑换后可调用", icon: "wallet-cards", color: balance > 0 ? "green" : "orange" },
     { label: "Key 总数", value: formatNumber(items.length), meta: `${formatNumber(active)} 个当前有效`, icon: "key-round" },
     { label: "累计用量", value: formatMoney(totalSpent), meta: `${formatNumber(limited)} 个设置了额度`, icon: "receipt-text", color: "blue" },
     { label: "最近使用", value: latest ? formatDate(latest) : "暂无", meta: "最近一次 API 调用", icon: "clock-3", color: "orange" },
@@ -488,6 +516,7 @@ function renderKeyTable() {
 async function loadKeys() {
   const result = await portalApi("/portal/api-keys");
   portalState.keys = result.data;
+  if (!portalState.profile) await loadProfile();
   renderKeyMetrics(result.data);
   document.getElementById("key-base-url").textContent = `${window.location.origin}/v1`;
   renderKeyTable();
@@ -530,7 +559,7 @@ function renderModelMarketplace() {
       <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span class="model-provider">${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
       <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
       <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
-      <div class="model-price-grid"><div><span>输入 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
+      <div class="model-price-grid"><div><span>输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
       <div class="model-card-footer"><span><i data-lucide="activity"></i> ${modelHealth(item)}</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
     </article>
   `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
@@ -552,7 +581,7 @@ function modelDetailDialog(modelName) {
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
     <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1K</span><strong>${formatMoney(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1K</span><strong>${formatMoney(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
   </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
@@ -1002,6 +1031,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       await establishPortalSession(await portalApi("/auth/login", { method: "POST", body: JSON.stringify(data) }));
     } catch (error) { showPortalAuth(error.message); }
   });
+  document.getElementById("portal-forgot-password").addEventListener("click", passwordResetDialog);
   document.getElementById("portal-register-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {

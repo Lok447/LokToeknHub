@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -19,11 +20,13 @@ from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
 from .db import engine, get_db, init_db
 from .guardrails import rate_limiter
+from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .models import AccountBalanceTransaction, AdminSession, AdminUser, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
 from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
+from .provider_secrets import ProviderSecretError, encrypt_provider_secret
 from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
@@ -54,6 +57,49 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 app.include_router(portal_router)
 
 _request_id_pattern = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+
+def _openai_error_type(status_code: int, detail: str) -> tuple[str, str]:
+    """Return an OpenAI-compatible error type and stable machine code."""
+    if detail == "insufficient balance":
+        return "insufficient_balance", "insufficient_balance"
+    if detail == "api key spending limit exceeded":
+        return "quota_exceeded", "quota_exceeded"
+    if status_code == 401:
+        return "authentication_error", "invalid_api_key"
+    if status_code == 403:
+        return "permission_error", "permission_denied"
+    if status_code == 404 and detail.startswith("unknown model:"):
+        return "invalid_request_error", "model_not_found"
+    if status_code == 503 and detail.startswith("model unavailable:"):
+        return "server_error", "model_unavailable"
+    if status_code == 409:
+        return "invalid_request_error", "request_conflict"
+    if status_code == 429:
+        return "rate_limit_error", "rate_limit_exceeded"
+    if status_code >= 500:
+        return "server_error", "upstream_error"
+    return "invalid_request_error", "invalid_request"
+
+
+@app.exception_handler(HTTPException)
+async def api_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Expose gateway failures in the error shape expected by OpenAI clients."""
+    if not request.url.path.startswith("/v1/"):
+        content = {"detail": exc.detail}
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers or {})
+    detail = str(exc.detail)
+    error_type, error_code = _openai_error_type(exc.status_code, detail)
+    message = "账户余额不足，请先充值或兑换额度后再调用模型。" if error_code == "insufficient_balance" else detail
+    content = {
+        "error": {"message": message, "type": error_type, "param": None, "code": error_code},
+        # Keep the legacy field for existing integrations that read FastAPI's detail shape.
+        "detail": detail,
+    }
+    headers = dict(exc.headers or {})
+    if exc.status_code == 401:
+        headers.setdefault("WWW-Authenticate", "Bearer")
+    return JSONResponse(status_code=exc.status_code, content=content, headers=headers)
 
 
 @app.middleware("http")
@@ -244,12 +290,62 @@ def update_admin_user(admin_user_id: int, payload: AdminUserUpdate, context: Adm
     return admin_user_data(user)
 
 
+@app.get("/admin/runtime", dependencies=[Depends(require_admin)])
+def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    models = db.scalars(select(ModelConfig)).all()
+    published = 0
+    mock_published = 0
+    candidates = 0
+    blocked = 0
+    credential_envs = sorted({
+        channel.provider_api_key_env
+        for channel in db.scalars(select(ModelChannel)).all()
+        if channel.provider_api_key_env
+    })
+    provider_credentials = [
+        {"env": env_name, "configured": bool(os.getenv(env_name, "").strip())}
+        for env_name in credential_envs
+    ]
+    for model in models:
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        state, _ = _model_publication_state(model, channels, settings)
+        if state == "published":
+            published += 1
+        elif state == "mock_published":
+            mock_published += 1
+        elif state == "candidate":
+            candidates += 1
+        else:
+            blocked += 1
+    return {
+        "environment": settings.environment,
+        "mock_mode": settings.mock_mode,
+        "seed_builtin_models": settings.seed_builtin_models,
+        "data_mode": "mock" if settings.mock_mode else "real",
+        "published_model_count": published,
+        "mock_published_model_count": mock_published,
+        "candidate_model_count": candidates,
+        "blocked_model_count": blocked,
+        "provider_credentials": provider_credentials,
+        "release_ready": published > 0 if not settings.mock_mode else mock_published > 0,
+    }
+
+
 @app.get("/admin/overview", dependencies=[Depends(require_admin)])
-def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
+def admin_overview(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
     active_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True))) or 0
     healthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "healthy")) or 0
     unhealthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0
+    models = db.scalars(select(ModelConfig)).all()
+    model_states = []
+    for model in models:
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        model_states.append(_model_publication_state(model, channels, settings)[0])
     return {
+        "environment": settings.environment,
+        "mock_mode": settings.mock_mode,
         "account_count": db.scalar(select(func.count(BillingAccount.id))) or 0,
         "active_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.active.is_(True))) or 0,
         "active_model_count": db.scalar(select(func.count(ModelConfig.id)).where(ModelConfig.active.is_(True))) or 0,
@@ -261,6 +357,10 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "healthy_channel_count": healthy_channels,
         "unhealthy_channel_count": unhealthy_channels,
         "pending_payment_count": db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0,
+        "published_model_count": sum(state == "published" for state in model_states),
+        "mock_published_model_count": sum(state == "mock_published" for state in model_states),
+        "candidate_model_count": sum(state == "candidate" for state in model_states),
+        "blocked_model_count": sum(state == "blocked" for state in model_states),
     }
 
 
@@ -694,7 +794,7 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
     )
     db.add(record)
     db.flush()
-    db.add(ModelChannel(
+    channel = ModelChannel(
         model_config_id=record.id,
         name="Primary",
         upstream_model=record.upstream_model,
@@ -702,7 +802,13 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
         provider_api_key_env=record.provider_api_key_env,
         priority=100,
         weight=100,
-    ))
+    )
+    if payload.provider_api_key:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(payload.provider_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    db.add(channel)
     db.commit()
     db.refresh(record)
     return {"id": record.id, "public_name": record.public_name, "upstream_model": record.upstream_model}
@@ -811,6 +917,7 @@ def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> d
 
 @app.get("/admin/models", dependencies=[Depends(require_admin)])
 def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
     models = db.scalars(select(ModelConfig).order_by(ModelConfig.id.desc())).all()
     return {"data": [
         {
@@ -824,6 +931,9 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "catalog_metadata": parse_model_json(model.catalog_metadata_json),
             "official_pricing": parse_model_json(model.official_pricing_json),
             "active": model.active,
+            "publication_state": publication_state,
+            "publication_reasons": publication_reasons,
+            "mock_mode": settings.mock_mode,
             "channel_count": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.model_config_id == model.id)) or 0,
             "healthy_channel_count": db.scalar(select(func.count(ModelChannel.id)).where(
                 ModelChannel.model_config_id == model.id,
@@ -833,6 +943,8 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "created_at": model.created_at.isoformat(),
         }
         for model in models
+        for channels in [db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()]
+        for publication_state, publication_reasons in [_model_publication_state(model, channels, settings)]
     ]}
 
 
@@ -845,17 +957,22 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
     if not changes:
         raise HTTPException(status_code=422, detail="no model changes provided")
     if changes.get("active"):
+        settings = get_settings()
         input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
         output_price = changes.get("output_price_micros_per_1k", model.output_price_micros_per_1k)
-        if input_price <= 0 and output_price <= 0:
-            raise HTTPException(status_code=422, detail="configure a platform billing price before publishing a model")
-        healthy_channel = db.scalar(select(ModelChannel.id).where(
-            ModelChannel.model_config_id == model.id,
-            ModelChannel.active.is_(True),
-            ModelChannel.status == "healthy",
-        ))
-        if healthy_channel is None:
-            raise HTTPException(status_code=422, detail="run a successful channel health check before publishing a model")
+        if input_price <= 0 or output_price <= 0:
+            raise HTTPException(status_code=422, detail="configure positive platform input and output prices before publishing a model")
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        if settings.mock_mode:
+            healthy_channel = any(channel.active and channel.status == "healthy" for channel in channels)
+        else:
+            healthy_channel = any(
+                channel.active and channel.status == "healthy" and channel.health_source == "provider"
+                and _channel_credentials_configured(channel)
+                for channel in channels
+            )
+        if not healthy_channel:
+            raise HTTPException(status_code=422, detail="run a successful real provider health check with configured credentials before publishing a model")
     for field, value in changes.items():
         setattr(model, field, value)
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.updated", target_type="model", target_id=model.id, details=changes)
@@ -879,6 +996,7 @@ def parse_model_json(value: str | None) -> dict[str, object] | None:
 
 
 def channel_data(channel: ModelChannel) -> dict[str, object]:
+    credential_source = "console" if channel.encrypted_api_key else "environment" if channel.provider_api_key_env else "default"
     return {
         "id": channel.id,
         "model_config_id": channel.model_config_id,
@@ -886,6 +1004,9 @@ def channel_data(channel: ModelChannel) -> dict[str, object]:
         "provider_base_url": channel.provider_base_url,
         "upstream_model": channel.upstream_model,
         "provider_api_key_env": channel.provider_api_key_env,
+        "credentials_configured": _channel_credentials_configured(channel),
+        "credential_source": credential_source,
+        "health_source": channel.health_source,
         "priority": channel.priority,
         "weight": channel.weight,
         "active": channel.active,
@@ -919,7 +1040,13 @@ def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session
         ModelChannel.name == payload.name,
     )):
         raise HTTPException(status_code=409, detail="channel name already exists for model")
-    channel = ModelChannel(model_config_id=model_id, **payload.model_dump())
+    secret = payload.provider_api_key
+    channel = ModelChannel(model_config_id=model_id, **payload.model_dump(exclude={"provider_api_key"}))
+    if secret:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.add(channel)
     db.commit()
     db.refresh(channel)
@@ -931,7 +1058,9 @@ def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Sessi
     channel = db.get(ModelChannel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="channel not found")
-    changes = payload.model_dump(exclude_unset=True)
+    secret = payload.provider_api_key
+    clear_secret = payload.clear_provider_api_key
+    changes = payload.model_dump(exclude_unset=True, exclude={"provider_api_key", "clear_provider_api_key"})
     if "name" in changes and db.scalar(select(ModelChannel).where(
         ModelChannel.model_config_id == channel.model_config_id,
         ModelChannel.name == changes["name"],
@@ -940,6 +1069,13 @@ def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Sessi
         raise HTTPException(status_code=409, detail="channel name already exists for model")
     for field, value in changes.items():
         setattr(channel, field, value)
+    if clear_secret:
+        channel.encrypted_api_key = None
+    elif secret:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()
     db.refresh(channel)
     return channel_data(channel)
@@ -987,11 +1123,15 @@ async def preflight_model(
         health.append({"channel_id": channel.id, "name": channel.name, **result})
     report: dict[str, object] = {
         "model": model.public_name,
-        "price_configured": model.input_price_micros_per_1k > 0 or model.output_price_micros_per_1k > 0,
+        "price_configured": model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0,
         "channel_health": health,
         "chat_probe": None,
         "stream_probe": None,
     }
+    publication_state, publication_reasons = _model_publication_state(model, channels)
+    report["publication_state"] = publication_state
+    report["publication_reasons"] = publication_reasons
+    report["ready_to_publish"] = publication_state in {"published", "mock_published", "candidate"} and not publication_reasons
     probe = ChatCompletionRequest(model=model.public_name, messages=[{"role": "user", "content": payload.prompt}], max_tokens=32)
     if payload.chat_probe:
         try:
@@ -1039,8 +1179,19 @@ async def preflight_model(
 @app.get("/v1/models")
 def list_models(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
     require_api_key(authorization, db)
-    models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
+    models = [model for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all() if model_is_callable(db, model)]
     return {"object": "list", "data": [{"id": item.public_name, "object": "model", "owned_by": "token"} for item in models]}
+
+
+@app.get("/v1/models/{model_id:path}")
+def retrieve_model(model_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, str]:
+    require_api_key(authorization, db)
+    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_id, ModelConfig.active.is_(True)))
+    if not model:
+        raise HTTPException(status_code=404, detail=f"unknown model: {model_id}")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail=f"model unavailable: {model_id}")
+    return {"id": model.public_name, "object": "model", "owned_by": "token"}
 
 
 @app.get("/v1/account", response_model=AccountBalance)
@@ -1069,6 +1220,8 @@ async def chat_completions(
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
     if not model:
         raise HTTPException(status_code=404, detail=f"unknown model: {payload.model}")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail=f"model unavailable: {payload.model}")
     request_id = x_request_id or "req_" + uuid.uuid4().hex
     trace_id = x_trace_id or request_id
     if not _request_id_pattern.fullmatch(request_id) or not _request_id_pattern.fullmatch(trace_id):

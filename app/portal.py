@@ -13,7 +13,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import Date, cast, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,6 +22,7 @@ from .builtin_models import model_metadata
 from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
+from .model_release import model_is_callable
 from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
 from .schemas import ActiveUpdate, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactUpdate, TrialLinkCreate
@@ -714,7 +715,7 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccou
 def list_models(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
     del account
     settings = get_settings()
-    models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
+    models = [model for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all() if model_is_callable(db, model)]
     data = []
     for item in models:
         channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == item.id)).all()
@@ -799,8 +800,15 @@ def usage_analytics(
     record_ids = scoped_usage_query(
         account.id, model, api_key_id, from_at, to_at, status, request_id
     ).with_only_columns(UsageRecord.id)
-    bucket_format = "%Y-%m-%dT%H:00:00" if granularity == "hour" else "%Y-%m-%d"
-    bucket = func.strftime(bucket_format, UsageRecord.created_at).label("bucket")
+    if db.get_bind().dialect.name == "postgresql":
+        bucket = (
+            func.date_trunc("hour", UsageRecord.created_at)
+            if granularity == "hour"
+            else cast(UsageRecord.created_at, Date)
+        ).label("bucket")
+    else:
+        bucket_format = "%Y-%m-%dT%H:00:00" if granularity == "hour" else "%Y-%m-%d"
+        bucket = func.strftime(bucket_format, UsageRecord.created_at).label("bucket")
     trend_rows = db.execute(
         select(
             bucket,
@@ -884,7 +892,11 @@ def dashboard(
         base_filters.append(UsageRecord.api_key_id == api_key_id)
     period_filters = [*base_filters, UsageRecord.created_at >= datetime.combine(period_start, datetime.min.time(), timezone.utc)]
 
-    day_column = func.date(UsageRecord.created_at).label("day")
+    day_column = (
+        cast(UsageRecord.created_at, Date)
+        if db.get_bind().dialect.name == "postgresql"
+        else func.date(UsageRecord.created_at)
+    ).label("day")
     daily_rows = db.execute(
         select(
             day_column,

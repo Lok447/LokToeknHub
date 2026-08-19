@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from .audit import record_audit_event
 from .config import get_settings
 from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, UsageRecord, utcnow
+from .provider_secrets import ProviderSecretError, decrypt_provider_secret
 from .schemas import ChatCompletionRequest
 
 
@@ -180,11 +181,12 @@ def select_channels(db: Session, model: ModelConfig) -> list[ModelChannel]:
     return ordered[:settings.max_channel_attempts]
 
 
-def mark_channel_success(db: Session, channel: ModelChannel) -> None:
+def mark_channel_success(db: Session, channel: ModelChannel, source: str = "provider") -> None:
     tracked = db.get(ModelChannel, channel.id)
     if not tracked:
         return
     tracked.status = "healthy"
+    tracked.health_source = source
     tracked.consecutive_failures = 0
     tracked.circuit_open_until = None
     tracked.last_checked_at = utcnow()
@@ -208,7 +210,12 @@ def mark_channel_failure(db: Session, channel: ModelChannel, detail: str) -> Non
 
 def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     settings = get_settings()
-    api_key = os.getenv(channel.provider_api_key_env, "") if channel.provider_api_key_env else settings.default_provider_api_key
+    try:
+        api_key = decrypt_provider_secret(channel.encrypted_api_key) if channel.encrypted_api_key else None
+    except ProviderSecretError:
+        api_key = None
+    if not api_key:
+        api_key = os.getenv(channel.provider_api_key_env, "") if channel.provider_api_key_env else settings.default_provider_api_key
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -219,6 +226,8 @@ async def discover_upstream_models(provider_base_url: str, provider_api_key_env:
     """Read an OpenAI-compatible model catalogue without persisting provider secrets."""
     settings = get_settings()
     api_key = os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key
+    if provider_api_key_env and not api_key.strip():
+        raise ValueError(f"供应商密钥环境变量未配置: {provider_api_key_env}")
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -245,15 +254,38 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     settings = get_settings()
     started = time.perf_counter()
     if settings.mock_mode:
-        mark_channel_success(db, channel)
+        mark_channel_success(db, channel, "mock")
         return {"healthy": True, "latency_ms": 0, "detail": "Mock mode"}
     endpoint, headers = _provider_auth(channel)
+    if channel.provider_api_key_env and "Authorization" not in headers:
+        detail = f"供应商密钥环境变量未配置: {channel.provider_api_key_env}"
+        mark_channel_failure(db, channel, detail)
+        return {"healthy": False, "latency_ms": 0, "detail": detail}
     endpoint = endpoint.removesuffix("/chat/completions") + "/models"
     try:
         async with httpx.AsyncClient(timeout=settings.channel_health_timeout_seconds) as client:
             response = await client.get(endpoint, headers=headers)
         if response.is_error:
             detail = f"HTTP {response.status_code}: {response.text[:500]}"
+            mark_channel_failure(db, channel, detail)
+            return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+        try:
+            payload = response.json()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        items = payload.get("data") if isinstance(payload, dict) else None
+        provider_model_ids = {
+            str(item.get("id", "")).strip()
+            for item in items or []
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        if not provider_model_ids:
+            detail = "供应商模型目录响应无有效模型"
+            mark_channel_failure(db, channel, detail)
+            return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+        if channel.upstream_model not in provider_model_ids:
+            available = ", ".join(sorted(provider_model_ids)[:10])
+            detail = f"供应商模型目录不包含上游模型: {channel.upstream_model}; 可用模型: {available}"
             mark_channel_failure(db, channel, detail)
             return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
     except httpx.HTTPError as exc:

@@ -9,8 +9,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./token.db"
     auto_create_schema: bool = True
     admin_token: str = "change-me"
+    provider_secrets_key: str = ""
     mock_mode: bool = False
     seed_builtin_models: bool = False
+    seed_provider_catalogue: bool = True
     default_provider_base_url: str = "http://localhost:4000/v1"
     default_provider_api_key: str = ""
     usd_to_cny_rate: float = 7.2
@@ -90,6 +92,7 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_MOCK_MODE must be false in production")
     defaults = {
         "TOKEN_ADMIN_TOKEN": settings.admin_token == "change-me" or len(settings.admin_token) < 24,
+        "TOKEN_PROVIDER_SECRETS_KEY": not settings.provider_secrets_key or len(settings.provider_secrets_key) < 32,
         "TOKEN_PAYMENT_WEBHOOK_SECRET": settings.payment_webhook_secret == "change-webhook-secret" or len(settings.payment_webhook_secret) < 24,
         "TOKEN_TRIAL_SIGNING_SECRET": settings.trial_signing_secret == "change-trial-secret" or len(settings.trial_signing_secret) < 24,
     }

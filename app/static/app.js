@@ -1,11 +1,58 @@
 const state = {
   token: sessionStorage.getItem("token_admin_token") || "",
+  role: sessionStorage.getItem("token_admin_role") || "",
   view: "overview",
   accounts: [],
   models: [],
   channels: [],
+  modelFilters: { query: "", provider: "", type: "", publicationState: "" },
 };
 
+function isSuperadmin() {
+  return state.role === "superadmin";
+}
+
+function isAuditor() {
+  return state.role === "auditor";
+}
+
+function canOperate() {
+  return state.role === "superadmin" || state.role === "operator";
+}
+
+function setAdminIdentity(identity) {
+  state.role = identity?.role || "";
+  if (state.role) sessionStorage.setItem("token_admin_role", state.role);
+  applyRoleUi();
+}
+
+function applyRoleUi() {
+  const hiddenActions = new Set(isAuditor() ? [
+    "create-account", "create-key", "health-check-all", "import-models", "create-model",
+    "create-payment", "create-redemption", "trial-link", "topup", "confirm-payment",
+    "refund-payment", "toggle-redemption", "edit-model-pricing", "manage-channels",
+    "preflight-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
+  ] : [
+    "manage-admins", "refund-payment", "preflight-model",
+  ]);
+  document.querySelectorAll("[data-action]").forEach((element) => {
+    element.hidden = hiddenActions.has(element.dataset.action);
+  });
+  const roleOnlyControls = {
+    "manage-admins": isSuperadmin(),
+    "create-account": canOperate(),
+    "create-key": canOperate(),
+    "health-check-all": canOperate(),
+    "import-models": canOperate(),
+    "create-model": canOperate(),
+    "create-payment": canOperate(),
+    "create-redemption": canOperate(),
+    "reconcile-ledger": !isAuditor(),
+  };
+  Object.entries(roleOnlyControls).forEach(([action, visible]) => {
+    document.querySelectorAll(`[data-action="${action}"]`).forEach((element) => { element.hidden = !visible; });
+  });
+}
 const titles = {
   overview: "管理概览",
   models: "模型管理",
@@ -16,7 +63,6 @@ const titles = {
   usage: "用量管理",
   audit: "安全审计",
 };
-
 function icons() {
   if (window.lucide) window.lucide.createIcons();
 }
@@ -41,6 +87,18 @@ function formatMoney(micros) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 6,
   });
+}
+
+function formatTokenPricePerMillion(microsPerThousand) {
+  return formatMoney(Number(microsPerThousand || 0) * 1000);
+}
+
+function yuanPerMillionToMicrosPerThousand(value) {
+  return Math.round(Number(value || 0) * 1000);
+}
+
+function microsPerThousandToYuanPerMillion(value) {
+  return Number(value || 0) / 1000;
 }
 
 function officialPriceSummary(item) {
@@ -93,6 +151,50 @@ function channelStatusBadge(status) {
   };
   const [kind, label] = map[status] || ["neutral", status || "未知"];
   return `<span class="badge ${kind}">${escapeHtml(label)}</span>`;
+}
+
+function channelCredentialLabel(item) {
+  if (item.credential_source === "console") return "控制台托管密钥";
+  if (item.credential_source === "environment") return item.provider_api_key_env;
+  return "默认密钥";
+}
+
+function modelPublicationBadge(item) {
+  const map = {
+    published: ["success", "已上架"],
+    mock_published: ["warning", "Mock 已上架"],
+    candidate: ["neutral", "候选"],
+    blocked: ["error", "待完善"],
+  };
+  const [kind, label] = map[item.publication_state] || ["neutral", item.active ? "已启用" : "停用"];
+  const reasons = item.publication_reasons?.length ? ` title="${escapeHtml(item.publication_reasons.join("；"))}"` : "";
+  return `<span class="badge ${kind}"${reasons}>${escapeHtml(label)}</span>`;
+}
+
+function modelApiType(item) {
+  return item.catalog_metadata?.api_type || "chat_completions";
+}
+
+function modelCategory(item) {
+  const type = modelApiType(item);
+  const modalities = item.catalog_metadata?.modalities || [];
+  if (type === "images_generations") return "image";
+  if (type === "video_generations") return "video";
+  if (type.startsWith("audio_") || modalities.includes("audio")) return "audio";
+  return "text";
+}
+
+function modelTypeBadge(item) {
+  const type = modelApiType(item);
+  const modalities = item.catalog_metadata?.modalities || [];
+  const map = {
+    images_generations: ["warning", "图像生成"],
+    video_generations: ["neutral", "视频生成"],
+    audio_speech: ["neutral", "语音生成"],
+    audio_transcriptions: ["neutral", "语音识别"],
+  };
+  const [kind, label] = map[type] || (modalities.includes("image") ? ["success", "多模态对话"] : ["success", "文本对话"]);
+  return `<span class="badge ${kind}">${label}</span>`;
 }
 
 function emptyRow(columns, label = "暂无数据") {
@@ -150,7 +252,11 @@ function renderMetrics(targetId, metrics) {
 }
 
 async function loadOverview() {
-  const [overview, records] = await Promise.all([api("/admin/overview"), api("/admin/usage/records")]);
+  const [overview, records, runtime] = await Promise.all([api("/admin/overview"), api("/admin/usage/records"), api("/admin/runtime")]);
+  const environmentBadge = document.getElementById("environment-badge");
+  environmentBadge.classList.toggle("real-environment", runtime.data_mode === "real");
+  environmentBadge.classList.toggle("mock-environment", runtime.data_mode === "mock");
+  environmentBadge.innerHTML = `<span class="status-dot"></span>${runtime.data_mode === "mock" ? "Mock 环境" : `真实环境 · ${escapeHtml(runtime.environment)}`}`;
   renderMetrics("overview-metrics", [
     { label: "账户余额", value: formatMoney(overview.total_balance_micros), icon: "wallet-cards" },
     { label: "累计请求", value: formatNumber(overview.request_count), icon: "send", color: "blue" },
@@ -170,7 +276,10 @@ async function loadOverview() {
   `).join("") : emptyRow(6);
   document.getElementById("platform-status").innerHTML = [
     ["server", "API 服务", "正常"],
-    ["route", `模型网关 · ${overview.active_model_count}`, overview.active_model_count ? "正常" : "待配置"],
+    ["route", `正式上架模型 · ${overview.published_model_count}`, overview.published_model_count ? "正常" : "待上架"],
+    ["boxes", `候选模型 · ${overview.candidate_model_count}`, overview.candidate_model_count ? "待配置" : "暂无"],
+    ["flask-conical", `Mock 可调用模型 · ${overview.mock_published_model_count}`, overview.mock_published_model_count ? "仅开发" : "暂无"],
+    ["key-round", `供应商密钥 · ${(runtime.provider_credentials || []).filter((item) => item.configured).length}/${(runtime.provider_credentials || []).length}`, (runtime.provider_credentials || []).length === 0 || (runtime.provider_credentials || []).every((item) => item.configured) ? "正常" : "待配置"],
     ["key-round", `有效 Key · ${overview.active_key_count}`, overview.active_key_count ? "正常" : "待创建"],
     ["activity", `渠道健康 · ${overview.healthy_channel_count}/${overview.active_channel_count}`, overview.active_channel_count && overview.unhealthy_channel_count === 0 ? "正常" : "需检查"],
     ["database", "计费账本", "正常"],
@@ -189,9 +298,9 @@ async function loadAccounts() {
       <td><strong>${formatMoney(item.balance_micros)}</strong></td>
       <td>${activeBadge(item.active)}</td>
       <td class="align-right"><div class="table-actions">
-        <button class="table-button" data-action="trial-link" data-id="${item.id}" data-name="${escapeHtml(item.name)}">试用链接</button>
+        ${canOperate() ? `<button class="table-button" data-action="trial-link" data-id="${item.id}" data-name="${escapeHtml(item.name)}">试用链接</button>
         <button class="table-button" data-action="topup" data-id="${item.id}" data-name="${escapeHtml(item.name)}">充值</button>
-        <button class="table-button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>
+        <button class="table-button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}
       </div></td>
     </tr>
   `).join("") : emptyRow(6);
@@ -206,7 +315,7 @@ async function loadKeys() {
       <td>${escapeHtml(item.account_name)}</td>
       <td>${activeBadge(item.active)}</td>
       <td>${formatDate(item.created_at)}</td>
-      <td class="align-right"><button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></td>
+      <td class="align-right">${canOperate() ? `<button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}</td>
     </tr>
   `).join("") : emptyRow(6);
 }
@@ -214,18 +323,55 @@ async function loadKeys() {
 async function loadModels() {
   const result = await api("/admin/models");
   state.models = result.data;
-  document.getElementById("models-table").innerHTML = result.data.length ? result.data.map((item) => `
+  const providerSelect = document.getElementById("model-provider-filter");
+  const selectedProvider = providerSelect.value;
+  const providers = [...new Set(state.models.map((item) => item.catalog_metadata?.provider || "自定义").filter(Boolean))].sort();
+  providerSelect.innerHTML = '<option value="">全部服务商</option>' + providers.map((provider) => `<option value="${escapeHtml(provider)}">${escapeHtml(provider)}</option>`).join("");
+  providerSelect.value = selectedProvider;
+  renderModels();
+}
+
+function renderModels() {
+  const filters = state.modelFilters;
+  const query = filters.query.trim().toLocaleLowerCase();
+  document.querySelectorAll("[data-model-type]").forEach((button) => {
+    const active = button.dataset.modelType === filters.type;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll("[data-model-type-count]").forEach((counter) => {
+    const type = counter.dataset.modelTypeCount;
+    counter.textContent = type === "all" ? state.models.length : state.models.filter((item) => modelCategory(item) === type).length;
+  });
+  const models = state.models.filter((item) => {
+    const provider = item.catalog_metadata?.provider || "自定义";
+    const haystack = [item.public_name, item.upstream_model, item.catalog_metadata?.display_name, provider].join(" ").toLocaleLowerCase();
+    return (!query || haystack.includes(query))
+      && (!filters.provider || provider === filters.provider)
+      && (!filters.type || modelCategory(item) === filters.type)
+      && (!filters.publicationState || item.publication_state === filters.publicationState);
+  });
+  document.getElementById("model-result-count").textContent = `显示 ${models.length} / 共 ${state.models.length} 个模型`;
+  document.getElementById("models-table").innerHTML = models.length ? models.map((item) => {
+    const publishBlocked = item.publication_state === "blocked" && !item.active;
+    const publishLabel = item.active ? "下架" : publishBlocked ? "完善后上架" : "上架";
+    const publishTitle = publishBlocked ? ` title="${escapeHtml(item.publication_reasons.join("；"))}" disabled` : "";
+    const apiType = modelApiType(item);
+    const chatCompatible = apiType === "chat_completions";
+    const provider = item.catalog_metadata?.provider || "自定义";
+    return `
     <tr>
-      <td><div class="primary-cell"><strong>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</strong><span class="secondary mono">${escapeHtml(item.public_name)} · ${escapeHtml(item.catalog_metadata?.model_version || "OpenAI 兼容")}</span></div></td>
-      <td>${formatMoney(item.input_price_micros_per_1k)}</td>
-      <td>${formatMoney(item.output_price_micros_per_1k)}</td>
-      <td>${escapeHtml(officialPriceSummary(item))}<span class="secondary block-text">未命中缓存 · 低峰 / 输出</span></td>
+      <td><div class="primary-cell"><strong>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</strong><span class="secondary mono">${escapeHtml(item.public_name)}</span><span class="secondary mono">上游：${escapeHtml(item.upstream_model)}</span></div></td>
+      <td>${escapeHtml(provider)}</td>
+      <td>${modelTypeBadge(item)}</td>
+      <td>${chatCompatible ? formatTokenPricePerMillion(item.input_price_micros_per_1k) : "按任务计费"}</td>
+      <td>${chatCompatible ? formatTokenPricePerMillion(item.output_price_micros_per_1k) : "-"}</td>
       <td>${formatNumber(item.channel_count)}</td>
       <td><span class="channel-health"><strong>${formatNumber(item.healthy_channel_count)}</strong> / ${formatNumber(item.channel_count)}</span></td>
-      <td>${activeBadge(item.active)}</td>
-      <td class="align-right"><div class="table-actions"><button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="flask-conical"></i><span>预检</span></button><button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}"><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></div></td>
+      <td>${modelPublicationBadge(item)}</td>
+      <td class="align-right">${canOperate() ? `<div class="table-actions">${isSuperadmin() ? `<button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" ${chatCompatible ? "" : 'disabled title="等待统一调用适配器"'}><i data-lucide="flask-conical"></i><span>预检</span></button>` : ""}<button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}" ${chatCompatible ? "" : 'disabled title="非 Token 计费尚未启用"'}><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}"${publishTitle}>${publishLabel}</button></div>` : '<span class="secondary">只读</span>'}</td>
     </tr>
-  `).join("") : emptyRow(8);
+  `; }).join("") : emptyRow(9, "没有符合筛选条件的模型");
   icons();
 }
 
@@ -256,8 +402,8 @@ async function loadPayments() {
       <td>${paymentBadge(item.status)}</td>
       <td>${formatDate(item.created_at)}</td>
       <td class="align-right"><div class="table-actions">
-        ${item.status === "pending" ? `<button class="table-button" data-action="confirm-payment" data-id="${item.id}">确认支付</button>` : ""}
-        ${item.status === "paid" ? `<button class="table-button danger" data-action="refund-payment" data-id="${item.id}">退款</button>` : ""}
+        ${item.status === "pending" && canOperate() ? `<button class="table-button" data-action="confirm-payment" data-id="${item.id}">确认支付</button>` : ""}
+        ${item.status === "paid" && isSuperadmin() ? `<button class="table-button danger" data-action="refund-payment" data-id="${item.id}">退款</button>` : ""}
         ${item.status === "refunded" ? '<span class="secondary">已完成</span>' : ""}
       </div></td>
     </tr>
@@ -282,7 +428,7 @@ async function loadRedemptions() {
       <td>${item.expires_at ? formatDate(item.expires_at) : "长期有效"}</td>
       <td>${redemptionStatus(item)}</td>
       <td>${formatDate(item.created_at)}</td>
-      <td class="align-right"><button class="table-button" data-action="toggle-redemption" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button></td>
+      <td class="align-right">${canOperate() ? `<button class="table-button" data-action="toggle-redemption" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}</td>
     </tr>
   `).join("") : emptyRow(8, "尚未创建兑换福利");
 }
@@ -423,8 +569,8 @@ function modelDialog() {
       <div class="dialog-body">
         <div class="field-row"><div class="field"><label for="public-name">公开名称</label><input id="public-name" name="public_name" required></div><div class="field"><label for="upstream-model">上游模型</label><input id="upstream-model" name="upstream_model" required></div></div>
         <div class="field"><label for="provider-url">供应商地址</label><input id="provider-url" name="provider_base_url" placeholder="http://localhost:4000/v1"></div>
-        <div class="field"><label for="key-env">密钥环境变量</label><input id="key-env" name="provider_api_key_env" placeholder="OPENAI_API_KEY"></div>
-        <div class="field-row"><div class="field"><label for="input-price">输入价格 / 1K（元）</label><input id="input-price" name="input_price" type="number" min="0" step="0.000001" value="0"></div><div class="field"><label for="output-price">输出价格 / 1K（元）</label><input id="output-price" name="output_price" type="number" min="0" step="0.000001" value="0"></div></div>
+        <div class="field-row"><div class="field"><label for="key-env">密钥环境变量</label><input id="key-env" name="provider_api_key_env" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="OPENAI_API_KEY"></div><div class="field"><label for="provider-key">供应商 API Key</label><input id="provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div>
+        <div class="field-row"><div class="field"><label for="input-price">输入价格 / 1M Token（元）</label><input id="input-price" name="input_price" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="output-price">输出价格 / 1M Token（元）</label><input id="output-price" name="output_price" type="number" min="0" step="0.001" value="0"></div></div>
       </div>
       <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">添加模型</button></div>
     </form>`);
@@ -436,8 +582,9 @@ function modelDialog() {
       upstream_model: data.upstream_model,
       provider_base_url: data.provider_base_url || null,
       provider_api_key_env: data.provider_api_key_env || null,
-      input_price_micros_per_1k: Math.round(Number(data.input_price) * 1_000_000),
-      output_price_micros_per_1k: Math.round(Number(data.output_price) * 1_000_000),
+      provider_api_key: data.provider_api_key || null,
+      input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.input_price),
+      output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.output_price),
     };
     try { await api("/admin/models", { method: "POST", body: JSON.stringify(payload) }); closeDialog(); toast("模型已添加"); await loadModels(); } catch (error) { toast(error.message, true); }
   });
@@ -456,8 +603,8 @@ async function modelImportDialog() {
       </form>
       <form id="model-import-form" hidden>
         <div class="field"><label>选择要公开的模型</label><div id="model-import-options" class="model-import-options"></div></div>
-        <div class="field-row"><div class="field"><label for="import-name-prefix">公开名称前缀</label><input id="import-name-prefix" name="prefix" maxlength="30" placeholder="可选，例如 lok-"></div><div class="field"><label for="import-input-price">输入价格 / 1K（元）</label><input id="import-input-price" name="input_price" type="number" min="0" step="0.000001" value="0" required></div></div>
-        <div class="field"><label for="import-output-price">输出价格 / 1K（元）</label><input id="import-output-price" name="output_price" type="number" min="0" step="0.000001" value="0" required></div>
+        <div class="field-row"><div class="field"><label for="import-name-prefix">公开名称前缀</label><input id="import-name-prefix" name="prefix" maxlength="30" placeholder="可选，例如 lok-"></div><div class="field"><label for="import-input-price">输入价格 / 1M Token（元）</label><input id="import-input-price" name="input_price" type="number" min="0" step="0.001" value="0" required></div></div>
+        <div class="field"><label for="import-output-price">输出价格 / 1M Token（元）</label><input id="import-output-price" name="output_price" type="number" min="0" step="0.001" value="0" required></div>
         <p class="dialog-copy">导入后会为每个公开模型创建一个 Primary 渠道。可在渠道管理中继续添加备用上游和故障转移策略。</p>
         <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="list-plus"></i><span>接入所选模型</span></button></div>
       </form>
@@ -505,8 +652,8 @@ async function modelImportDialog() {
     const upstreamModels = data.getAll("upstream_model");
     if (!upstreamModels.length) { toast("请至少选择一个模型", true); return; }
     const prefix = String(data.get("prefix") || "").trim();
-    const inputPrice = Math.round(Number(data.get("input_price")) * 1_000_000);
-    const outputPrice = Math.round(Number(data.get("output_price")) * 1_000_000);
+    const inputPrice = yuanPerMillionToMicrosPerThousand(data.get("input_price"));
+    const outputPrice = yuanPerMillionToMicrosPerThousand(data.get("output_price"));
     const payload = {
       provider_base_url: source.provider_base_url,
       provider_api_key_env: source.provider_api_key_env || null,
@@ -530,7 +677,7 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
   openDialog(`模型定价 · ${modelName}`, `
     <form id="model-pricing-form">
       <div class="dialog-body">
-        <div class="field-row"><div class="field"><label for="model-input-price">输入价格 / 1K（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.000001" value="${Number(inputPriceMicros) / 1_000_000}" required></div><div class="field"><label for="model-output-price">输出价格 / 1K（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.000001" value="${Number(outputPriceMicros) / 1_000_000}" required></div></div>
+        <div class="field-row"><div class="field"><label for="model-input-price">输入价格 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">输出价格 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
         ${reference}
         <p class="dialog-copy">平台价格使用人民币；新价格会用于后续请求，已结算请求不会被修改。</p>
       </div>
@@ -539,7 +686,7 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
   document.getElementById("model-pricing-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = { input_price_micros_per_1k: Math.round(Number(data.input_price) * 1_000_000), output_price_micros_per_1k: Math.round(Number(data.output_price) * 1_000_000) };
+    const payload = { input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.input_price), output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.output_price) };
     try { await api(`/admin/models/${modelId}`, { method: "PATCH", body: JSON.stringify(payload) }); closeDialog(); toast("模型定价已更新"); await loadModels(); } catch (error) { toast(error.message, true); }
   });
 }
@@ -550,10 +697,10 @@ async function channelDialog(modelId, modelName) {
   const rows = result.data.length ? result.data.map((item) => `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary mono">${escapeHtml(item.upstream_model)}</span></div></td>
-      <td><div class="primary-cell"><span>${escapeHtml(item.provider_base_url)}</span><span class="secondary">${escapeHtml(item.provider_api_key_env || "默认密钥")}</span></div></td>
+      <td><div class="primary-cell"><span>${escapeHtml(item.provider_base_url)}</span><span class="secondary">${escapeHtml(channelCredentialLabel(item))} · ${item.credentials_configured ? "密钥已配置" : "密钥未配置"}</span></div></td>
       <td>${item.priority}</td>
       <td>${item.weight}</td>
-      <td>${channelStatusBadge(item.status)}${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
+      <td>${channelStatusBadge(item.status)}<span class="secondary block-text">${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : "尚未检测"}</span>${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
       <td>${item.consecutive_failures}</td>
       <td class="align-right"><div class="table-actions"><button class="table-button" data-action="edit-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="settings-2"></i><span>编辑</span></button><button class="table-button" data-action="check-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="activity"></i><span>检测</span></button><button class="table-button" data-action="toggle-channel" data-id="${item.id}" data-active="${!item.active}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}">${item.active ? "停用" : "启用"}</button></div></td>
     </tr>
@@ -566,7 +713,8 @@ async function channelDialog(modelId, modelName) {
         <div class="dialog-body">
           <div class="field-row"><div class="field"><label for="channel-name">渠道名称</label><input id="channel-name" name="name" required maxlength="120" placeholder="例如：华东主线路"></div><div class="field"><label for="channel-upstream">上游模型</label><input id="channel-upstream" name="upstream_model" required maxlength="120"></div></div>
           <div class="field"><label for="channel-url">供应商地址</label><input id="channel-url" name="provider_base_url" required maxlength="500" placeholder="https://api.example.com/v1"></div>
-          <div class="field-row"><div class="field"><label for="channel-key-env">密钥环境变量</label><input id="channel-key-env" name="provider_api_key_env" maxlength="120" placeholder="OPENAI_API_KEY"></div><div class="field"><label for="channel-priority">优先级</label><input id="channel-priority" name="priority" type="number" min="0" max="10000" value="100" required></div></div>
+          <div class="field-row"><div class="field"><label for="channel-key-env">密钥环境变量</label><input id="channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="DEEPSEEK_API_KEY"></div><div class="field"><label for="channel-provider-key">供应商 API Key</label><input id="channel-provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div><small class="field-hint">二选一：填写环境变量名，或直接录入供应商 Key。Key 只在提交时传输，服务端加密保存且不会再次显示。</small>
+          <div class="field"><label for="channel-priority">优先级</label><input id="channel-priority" name="priority" type="number" min="0" max="10000" value="100" required></div>
           <div class="field"><label for="channel-weight">同级权重</label><input id="channel-weight" name="weight" type="number" min="1" max="10000" value="100" required></div>
         </div>
         <div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="submit"><i data-lucide="plus"></i><span>新增渠道</span></button></div>
@@ -580,6 +728,7 @@ async function channelDialog(modelId, modelName) {
       upstream_model: data.upstream_model,
       provider_base_url: data.provider_base_url,
       provider_api_key_env: data.provider_api_key_env || null,
+      provider_api_key: data.provider_api_key || null,
       priority: Number(data.priority),
       weight: Number(data.weight),
       active: true,
@@ -601,7 +750,8 @@ function editChannelDialog(channelId, modelId, modelName) {
       <div class="dialog-body">
         <div class="field-row"><div class="field"><label for="edit-channel-name">渠道名称</label><input id="edit-channel-name" name="name" required maxlength="120" value="${escapeHtml(item.name)}"></div><div class="field"><label for="edit-channel-upstream">上游模型</label><input id="edit-channel-upstream" name="upstream_model" required maxlength="120" value="${escapeHtml(item.upstream_model)}"></div></div>
         <div class="field"><label for="edit-channel-url">供应商地址</label><input id="edit-channel-url" name="provider_base_url" required maxlength="500" value="${escapeHtml(item.provider_base_url)}"></div>
-        <div class="field-row"><div class="field"><label for="edit-channel-key-env">密钥环境变量</label><input id="edit-channel-key-env" name="provider_api_key_env" maxlength="120" value="${escapeHtml(item.provider_api_key_env || "")}"></div><div class="field"><label for="edit-channel-priority">优先级</label><input id="edit-channel-priority" name="priority" type="number" min="0" max="10000" value="${item.priority}" required></div></div>
+        <div class="field-row"><div class="field"><label for="edit-channel-key-env">密钥环境变量</label><input id="edit-channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" value="${escapeHtml(item.provider_api_key_env || "")}"></div><div class="field"><label for="edit-channel-provider-key">供应商 API Key</label><input id="edit-channel-provider-key" name="provider_api_key" type="password" placeholder="留空则保持当前密钥"></div></div><small class="field-hint">当前密钥不会回显；输入新 Key 会覆盖并加密保存。</small>
+        <div class="field"><label for="edit-channel-priority">优先级</label><input id="edit-channel-priority" name="priority" type="number" min="0" max="10000" value="${item.priority}" required></div><label class="check-field"><input name="clear_provider_api_key" type="checkbox"><span>清除控制台托管密钥</span></label>
         <div class="field-row"><div class="field"><label for="edit-channel-weight">同级权重</label><input id="edit-channel-weight" name="weight" type="number" min="1" max="10000" value="${item.weight}" required></div><label class="check-field"><input name="active" type="checkbox" ${item.active ? "checked" : ""}><span>启用此渠道</span></label></div>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-action="manage-channels" data-id="${modelId}" data-name="${escapeHtml(modelName)}"><i data-lucide="arrow-left"></i><span>返回</span></button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存</span></button></div>
@@ -614,9 +764,11 @@ function editChannelDialog(channelId, modelId, modelName) {
       upstream_model: data.upstream_model,
       provider_base_url: data.provider_base_url,
       provider_api_key_env: data.provider_api_key_env || null,
+      provider_api_key: data.provider_api_key || null,
       priority: Number(data.priority),
       weight: Number(data.weight),
       active: data.active === "on",
+      clear_provider_api_key: data.clear_provider_api_key === "on",
     };
     try {
       await api(`/admin/channels/${channelId}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -722,7 +874,8 @@ async function preflightModel(modelId, modelName) {
       const result = await api(`/admin/models/${modelId}/preflight`, { method: "POST", body: JSON.stringify({ chat_probe: form.get("chat_probe") === "on", stream_probe: form.get("stream_probe") === "on" }) });
       const health = result.channel_health.map((item) => `${escapeHtml(item.name)}：${item.healthy ? "健康" : "异常"}`).join("<br>") || "没有启用的渠道";
       const streamUsage = result.stream_probe ? (result.stream_probe.token_usage_reported ? `流式 Token：${result.stream_probe.input_tokens} / ${result.stream_probe.output_tokens}` : "流式 Token：上游未返回 usage，不能作为计费发布依据") : "流式 Token：未执行";
-      openDialog(`预检结果 · ${modelName}`, `<div class="dialog-body"><div class="key-detail-grid"><div><span>定价</span><strong>${result.price_configured ? "已配置" : "未配置"}</strong></div><div><span>非流式</span><strong>${result.chat_probe ? (result.chat_probe.ok ? "通过" : "失败") : "未执行"}</strong></div><div><span>流式</span><strong>${result.stream_probe ? (result.stream_probe.ok ? "通过" : "失败") : "未执行"}</strong></div></div><p class="dialog-copy">${escapeHtml(streamUsage)}<br>渠道检查<br>${health}</p></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+      const blockers = result.publication_reasons?.length ? `<div class="callout warning"><strong>暂不可上架</strong><span>${escapeHtml(result.publication_reasons.join("；"))}</span></div>` : `<div class="callout success"><strong>已满足上架前置条件</strong><span>可以执行上架操作。</span></div>`;
+      openDialog(`预检结果 · ${modelName}`, `<div class="dialog-body">${blockers}<div class="key-detail-grid"><div><span>发布状态</span><strong>${escapeHtml(result.publication_state || "未知")}</strong></div><div><span>定价</span><strong>${result.price_configured ? "已配置" : "未配置"}</strong></div><div><span>非流式</span><strong>${result.chat_probe ? (result.chat_probe.ok ? "通过" : "失败") : "未执行"}</strong></div><div><span>流式</span><strong>${result.stream_probe ? (result.stream_probe.ok ? "通过" : "失败") : "未执行"}</strong></div></div><p class="dialog-copy">${escapeHtml(streamUsage)}<br>渠道检查<br>${health}</p></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
     } catch (error) { toast(error.message, true); }
   });
 }
@@ -768,6 +921,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const data = await result.json();
       if (!result.ok) throw new Error(data.detail || "管理员登录失败");
       state.token = data.access_token;
+      setAdminIdentity(data.admin);
       sessionStorage.setItem("token_admin_token", state.token);
       showApp();
       await switchView("overview");
@@ -799,9 +953,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("logout-button").addEventListener("click", () => {
     api("/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
-    sessionStorage.removeItem("token_admin_token"); state.token = ""; document.getElementById("admin-password").value = ""; showAuth();
+    sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; document.getElementById("admin-password").value = ""; showAuth();
   });
   document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view));
+  document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
+  document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; renderModels(); });
+  document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
+  document.getElementById("model-state-filter").addEventListener("change", (event) => { state.modelFilters.publicationState = event.target.value; renderModels(); });
   document.getElementById("close-dialog").addEventListener("click", closeDialog);
   document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => switchView(item.dataset.view)));
   document.body.addEventListener("click", (event) => {
@@ -832,7 +990,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");
   });
   if (state.token) {
-    try { await api("/admin/auth/me"); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
+    try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
   } else {
     showAuth();
   }

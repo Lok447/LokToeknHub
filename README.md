@@ -100,7 +100,11 @@ POST /admin/models/health-check
 - 单模型：为公开模型指定上游模型、统一输入/输出价格和 Primary 渠道。
 - 批量接入：填写上游 OpenAI 兼容 API 地址与已部署的密钥环境变量名，读取 `/models` 目录后选择多个模型统一导入。
 
-管理控制台还提供 DeepSeek、Qwen / DashScope、Kimi / Moonshot、MiniMax 渠道模板。DeepSeek V4 模板会保存官网美元价格按 `TOKEN_USD_TO_CNY_RATE`（默认 7.2）换算后的人民币参考价，并以未命中缓存、低峰价格作为平台默认计费价；运营仍可在定价操作中调整人民币售价。模板不包含供应商密钥，管理员需要注入 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`，完成渠道检测与模型预检后再启用。
+初始化时会自动写入 DeepSeek、Qwen / DashScope、GLM / 智谱、Kimi / Moonshot、MiniMax 和 Doubao / 火山方舟的常用文本、多模态、图像与视频模型目录，并为每个模型生成停用的主渠道。该过程可重复执行且不会覆盖已有同名模型；可通过 `TOKEN_SEED_PROVIDER_CATALOGUE=false` 关闭。除已经核验价格的 DeepSeek 外，候选模型不会预填计费价格，也不会自动发布。管理员只需在模型管理中补充密钥与价格、启用渠道、执行健康检测和预检，不必逐个创建模型。
+
+管理控制台和用户中心按市场习惯展示文本模型的“元 / 1M Token”价格。后端账本继续使用 `*_micros_per_1k` 字段保存微元/1K Token，以兼容已有 API 和结算记录；控制台会自动完成两种单位之间的换算。
+
+DeepSeek V4 模板会保存官网美元价格按 `TOKEN_USD_TO_CNY_RATE`（默认 7.2）换算后的人民币参考价，并以未命中缓存、低峰价格作为平台默认计费价；运营仍可在定价操作中调整人民币售价。供应商密钥可在管理控制台加密录入，或通过 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`、`ARK_API_KEY` 注入。图像和视频模型当前先进入候选目录，在 `/v1/images/generations` 与视频任务适配器、独立计费规则上线前会保持“待完善”，不会被错误地暴露为聊天模型。
 
 批量导入仅在服务端读取环境变量中的上游密钥；浏览器、数据库和用户中心均不会接触密钥明文。每个公开模型的默认 Primary 渠道可在“渠道”中继续扩展备用上游、优先级、权重和独立健康检查。用户中心只展示 TOKEN 的公开模型名称和价格。
 
@@ -157,6 +161,8 @@ docker compose --env-file .env.docker run --rm token alembic upgrade head
 
 首次部署仅使用一次 `TOKEN_ADMIN_TOKEN` 创建超级管理员；创建成功后该密钥不能再访问管理接口。后续管理接口使用管理员账号登录后取得的 Bearer 会话令牌。管理员角色包括：`superadmin`（全量）、`operator`（运营）和 `auditor`（只读）。
 
+模型供应商密钥可以通过管理控制台录入，服务端使用 `TOKEN_PROVIDER_SECRETS_KEY` 加密保存，只返回配置状态，不会回显明文；也可以继续使用部署环境变量 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY` 和 `ARK_API_KEY`。生产环境必须设置独立且至少 32 位的 `TOKEN_PROVIDER_SECRETS_KEY`，不要把它提交到 Git。预置候选仍需启用渠道、执行真实健康检测、确认平台价格并通过预检，才能正式上架。
+
 ```powershell
 $bootstrap = Invoke-RestMethod http://127.0.0.1:8000/admin/auth/bootstrap -Method Post -Headers @{ "X-Admin-Token" = "change-me" } -ContentType "application/json" -Body '{"login_id":"admin","password":"replace-with-a-strong-password"}'
 $headers = @{ "Authorization" = "Bearer $($bootstrap.access_token)" }
@@ -169,7 +175,7 @@ Invoke-RestMethod http://127.0.0.1:8000/admin/models -Method Post -Headers $head
 Invoke-RestMethod "http://127.0.0.1:8000/admin/accounts/$($account.id)/balance" -Method Post -Headers $headers -ContentType "application/json" -Body '{"amount_micros":1000000,"idempotency_key":"demo-topup-001"}'
 ```
 
-预发布执行步骤与发布门槛见 [docs/UAT_PREPROD.md](docs/UAT_PREPROD.md)。
+在现有 LokSystem 服务器上的同机部署步骤见 [docs/DEPLOY_LOKSYSTEM_HOST.md](docs/DEPLOY_LOKSYSTEM_HOST.md)，预发布执行步骤与发布门槛见 [docs/UAT_PREPROD.md](docs/UAT_PREPROD.md)。
 
 ## LokSystem 统一账号
 
