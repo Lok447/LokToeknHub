@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken用户中心</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=portal-20260819-8">
-  <link rel="stylesheet" href="/static/portal.css?v=portal-20260819-8">
+  <link rel="stylesheet" href="/static/styles.css?v=portal-20260819-11">
+  <link rel="stylesheet" href="/static/portal.css?v=portal-20260819-11">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/portal.js?v=portal-20260819-8" defer></script>
+  <script src="/static/portal.js?v=portal-20260819-11" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
@@ -75,16 +75,20 @@
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
       </nav>
-      <section class="sidebar-workspace" aria-label="工作台">
-        <p class="sidebar-section-label">工作台</p>
-        <div class="workspace-switcher"><label for="portal-workspace">新建资源归属空间</label><select id="portal-workspace" aria-label="选择新建资源归属空间"></select></div>
-        <button class="sidebar-action" id="portal-workspace-manager" type="button"><i data-lucide="building-2"></i><span>空间与项目</span></button>
-        <button class="sidebar-action" id="portal-security" type="button"><i data-lucide="shield-check"></i><span>账号安全</span></button>
-      </section>
       <div class="sidebar-footer">
-        <div class="sidebar-account"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></div>
-        <a href="/guide/user" target="_blank"><i data-lucide="book-open"></i><span>用户文档</span></a>
-        <button id="portal-logout"><i data-lucide="log-out"></i><span>退出</span></button>
+        <div class="account-menu">
+          <button class="account-menu-trigger" id="portal-account-trigger" type="button" aria-expanded="false" aria-controls="portal-account-menu">
+            <span class="account-avatar" id="portal-user-avatar">用</span>
+            <span class="account-summary"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>
+            <i data-lucide="chevron-up"></i>
+          </button>
+          <div class="account-menu-panel account-menu-panel-wide" id="portal-account-menu" hidden>
+            <button id="portal-workspace-manager" type="button"><i data-lucide="building-2"></i><span>空间与项目</span></button>
+            <button id="portal-security" type="button"><i data-lucide="shield-check"></i><span>账号安全</span></button>
+            <div class="account-menu-divider"></div>
+            <button id="portal-logout" type="button"><i data-lucide="log-out"></i><span>退出</span></button>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -94,7 +98,7 @@
           <p class="eyebrow">LOKTOKEN / USER</p>
           <h1 id="portal-page-title">用户概览</h1>
         </div>
-        <div class="topbar-actions"><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
+        <div class="topbar-actions"><a class="secondary-button topbar-doc-link" id="portal-guide-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
       </header>
 
       <div class="content">

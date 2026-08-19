@@ -414,6 +414,30 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         admin_script = (await client.get("/static/app.js")).text
         portal_script = (await client.get("/static/portal.js")).text
 
+        assert "查看管理文档" not in admin_page
+        assert "首次初始化管理员" not in admin_page
+        assert 'id="show-bootstrap"' not in admin_page
+        assert 'id="bootstrap-form"' not in admin_page
+        assert "show-bootstrap" not in admin_script
+        assert "bootstrap-form" not in admin_script
+        admin_sidebar = admin_page.split('<aside class="sidebar">', 1)[1].split("</aside>", 1)[0]
+        portal_sidebar = portal_page.split('<aside class="sidebar">', 1)[1].split("</aside>", 1)[0]
+        assert "管理文档" not in admin_sidebar and "用户文档" not in portal_sidebar
+        assert 'id="admin-account-trigger"' in admin_sidebar and 'id="admin-account-menu"' in admin_sidebar
+        assert 'id="portal-account-trigger"' in portal_sidebar and 'id="portal-account-menu"' in portal_sidebar
+        assert "个人空间" in admin_sidebar and "个人空间" not in portal_sidebar
+        assert '<section class="sidebar-workspace"' not in portal_sidebar
+        portal_account_menu = portal_sidebar.split('id="portal-account-menu"', 1)[1]
+        assert 'class="account-menu-title"' not in portal_account_menu
+        assert 'id="portal-workspace"' not in portal_account_menu
+        assert 'id="portal-workspace-manager"' in portal_account_menu
+        assert 'id="portal-security"' in portal_account_menu
+        assert 'id="workspace-manager-select"' in portal_script
+        assert 'id="admin-guide-link"' in admin_page and 'id="portal-guide-link"' in portal_page
+        assert 'href="/guide/admin"' in admin_page and 'href="/guide/user"' in portal_page
+        assert 'document.getElementById("admin-guide-link").hidden = view !== "overview";' in admin_script
+        assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script
+
         admin_nav = ["管理概览", "模型管理", "账户管理", "API管理", "订单管理", "福利管理", "用量管理", "安全审计"]
         portal_nav = ["用户概览", "模型广场", "额度管理", "API管理", "请求记录", "订单管理", "兑换福利"]
         admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
@@ -759,14 +783,14 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert portal_page.status_code == 200
         assert "LokToken用户中心" in portal_page.text
         assert '<span>API管理</span>' in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260819-8"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260819-11"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
         assert 'data-auth-mode="trial">试用入口</button>' in portal_page.text
         assert portal_page.text.index('id="portal-integration-guide"') < portal_page.text.index('class="overview-quickbar panel"')
         assert '<strong>LokToken</strong>' in portal_page.text
-        assert '<p class="sidebar-section-label">工作台</p>' in portal_page.text
+        assert '<p class="sidebar-section-label">工作台</p>' not in portal_page.text
         assert 'class="topbar-actions"' in portal_page.text
         assert 'id="portal-workspace-manager"' in portal_page.text
         assert 'id="portal-security"' in portal_page.text
@@ -778,7 +802,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "重置密码" not in portal_page.text
         assert "查看用户文档" not in portal_page.text
         assert "试用令牌（trl_ 开头）" in portal_page.text
-        portal_script = await client.get("/static/portal.js?v=portal-20260819-8")
+        portal_script = await client.get("/static/portal.js?v=portal-20260819-11")
         assert portal_script.headers["cache-control"] == "no-store"
         assert "复制并前往 LokSystem" in portal_script.text
         assert "loksystem://add-provider?platform=LokToken" in portal_script.text

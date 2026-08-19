@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260819-2">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=console-20260819-2" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -29,18 +29,7 @@
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入管理控制台</span></button>
         </form>
-        <button class="text-button auth-bootstrap-link" id="show-bootstrap" type="button">首次初始化管理员</button>
-        <form id="bootstrap-form" hidden>
-          <label for="bootstrap-token">初始化密钥</label>
-          <input id="bootstrap-token" name="token" type="password" autocomplete="off" placeholder="仅首次部署时使用" required>
-          <label for="bootstrap-login-id">管理员账号</label>
-          <input id="bootstrap-login-id" name="login_id" autocomplete="username" required minlength="3">
-          <label for="bootstrap-password">设置密码</label>
-          <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" required minlength="8">
-          <button class="primary-button full-button" type="submit"><i data-lucide="shield-check"></i><span>创建超级管理员</span></button>
-        </form>
         <p class="auth-error" id="auth-error" role="alert"></p>
-        <a class="auth-doc-link" href="/guide/admin"><i data-lucide="book-open"></i><span>查看管理文档</span></a>
       </div>
     </div>
   </section>
@@ -63,8 +52,17 @@
         <button class="nav-item" data-view="audit"><i data-lucide="shield-check"></i><span>安全审计</span></button>
       </nav>
       <div class="sidebar-footer">
-        <a href="/guide/admin" target="_blank"><i data-lucide="book-open"></i><span>管理文档</span></a>
-        <button id="logout-button"><i data-lucide="log-out"></i><span>退出</span></button>
+        <div class="account-menu">
+          <button class="account-menu-trigger" id="admin-account-trigger" type="button" aria-expanded="false" aria-controls="admin-account-menu">
+            <span class="account-avatar" id="admin-user-avatar">管</span>
+            <span class="account-summary"><strong id="admin-user-name">管理员</strong><small id="admin-user-role">管理账号</small></span>
+            <i data-lucide="chevron-up"></i>
+          </button>
+          <div class="account-menu-panel" id="admin-account-menu" hidden>
+            <button id="admin-personal-space" type="button"><i data-lucide="user-round"></i><span>个人空间</span></button>
+            <button id="logout-button" type="button"><i data-lucide="log-out"></i><span>退出</span></button>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -75,6 +73,7 @@
           <h1 id="page-title">管理概览</h1>
         </div>
         <div class="topbar-actions">
+          <a class="secondary-button topbar-doc-link" id="admin-guide-link" href="/guide/admin" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>管理文档</span></a>
           <span class="environment" id="environment-badge"><span class="status-dot"></span>读取环境</span>
           <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
         </div>

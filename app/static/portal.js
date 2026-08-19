@@ -258,17 +258,12 @@ async function loadProfile() {
   portalState.profile = await portalApi("/portal/profile");
   document.getElementById("portal-user-name").textContent = portalState.profile.name;
   document.getElementById("portal-user-id").textContent = portalState.profile.external_user_id;
+  document.getElementById("portal-user-avatar").textContent = (portalState.profile.name || portalState.profile.external_user_id || "用").slice(0, 1).toUpperCase();
   return portalState.profile;
 }
 
 function activeProjectId() {
   return portalState.projects.find((project) => project.slug === "default")?.id || portalState.projects[0]?.id || null;
-}
-
-function renderWorkspaceSelector() {
-  const select = document.getElementById("portal-workspace");
-  select.innerHTML = portalState.workspaces.map((workspace) => `<option value="${workspace.id}">${workspace.type === "personal" ? "个人" : "组织"} · ${escapeHtml(workspace.name)}</option>`).join("");
-  select.value = String(portalState.activeWorkspaceId || "");
 }
 
 async function loadWorkspaces() {
@@ -282,7 +277,6 @@ async function loadWorkspaces() {
     portalState.projects = projects.data;
     sessionStorage.setItem("loktoken_workspace_id", String(portalState.activeWorkspaceId));
   }
-  renderWorkspaceSelector();
 }
 
 async function workspaceManagerDialog() {
@@ -292,6 +286,12 @@ async function workspaceManagerDialog() {
   const canManage = ["owner", "admin"].includes(current.role);
   const projectRows = portalState.projects.map((project) => `<div class="status-row"><span class="status-name"><i data-lucide="folder-kanban"></i>${escapeHtml(project.name)}<small>${escapeHtml(project.slug)}</small></span><span class="secondary">${project.active ? "有效" : "已停用"}</span></div>`).join("") || '<p class="dialog-copy">暂无项目。</p>';
   openPortalDialog("空间与项目", `<div class="dialog-body"><div class="key-detail-grid"><div><span>新建资源归属空间</span><strong>${escapeHtml(current.name)}</strong></div><div><span>访问角色</span><strong>${escapeHtml(current.role)}</strong></div></div><div class="section-header"><div><h2>项目</h2><p>新建 API Key 和充值申请会归属当前空间的默认项目。</p></div></div><div class="status-list">${projectRows}</div>${canManage ? `<form id="workspace-project-form"><div class="field"><label for="workspace-project-name">新增项目</label><input id="workspace-project-name" name="name" maxlength="120" required placeholder="例如：生产环境"></div><button class="secondary-button" type="submit"><i data-lucide="plus"></i><span>创建项目</span></button></form>` : ""}<div class="section-header"><div><h2>组织空间</h2><p>创建组织后可邀请已注册的 LokToken 用户协作。</p></div></div><form id="workspace-org-form"><div class="field"><label for="workspace-org-name">组织名称</label><input id="workspace-org-name" name="name" maxlength="120" required placeholder="例如：LokSystem 团队"></div><button class="primary-button" type="submit"><i data-lucide="building-2"></i><span>创建组织</span></button></form></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button></div>`);
+  const workspaceDialogBody = document.querySelector("#portal-dialog-content .dialog-body");
+  workspaceDialogBody.insertAdjacentHTML("afterbegin", `<div class="field"><label for="workspace-manager-select">当前空间</label><select id="workspace-manager-select">${portalState.workspaces.map((workspace) => `<option value="${workspace.id}" ${workspace.id === portalState.activeWorkspaceId ? "selected" : ""}>${workspace.type === "personal" ? "个人" : "组织"} · ${escapeHtml(workspace.name)}</option>`).join("")}</select><small class="field-hint">新建 API Key 和充值申请将归属所选空间的默认项目。</small></div>`);
+  document.getElementById("workspace-manager-select").addEventListener("change", async (event) => {
+    portalState.activeWorkspaceId = Number(event.target.value);
+    try { await loadWorkspaces(); await workspaceManagerDialog(); portalToast("已切换资源归属空间"); } catch (error) { portalToast(error.message, true); }
+  });
   const projectForm = document.getElementById("workspace-project-form");
   if (projectForm) projectForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -869,13 +869,20 @@ async function switchPortalView(view) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `portal-view-${view}`));
   document.getElementById("portal-page-title").textContent = portalTitles[view];
+  document.getElementById("portal-guide-link").hidden = view !== "overview";
   try { await portalLoaders[view](); } catch (error) { portalToast(error.message, true); }
+}
+
+function closePortalAccountMenu() {
+  document.getElementById("portal-account-menu").hidden = true;
+  document.getElementById("portal-account-trigger").setAttribute("aria-expanded", "false");
 }
 
 function openPortalDialog(title, content) {
   document.getElementById("portal-dialog-title").textContent = title;
   document.getElementById("portal-dialog-content").innerHTML = content;
-  document.getElementById("portal-dialog").showModal();
+  const dialog = document.getElementById("portal-dialog");
+  if (!dialog.open) dialog.showModal();
   portalIcons();
 }
 
@@ -1066,16 +1073,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     const input = document.getElementById("portal-token");
     input.type = input.type === "password" ? "text" : "password";
   });
+  document.getElementById("portal-account-trigger").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = document.getElementById("portal-account-menu");
+    menu.hidden = !menu.hidden;
+    event.currentTarget.setAttribute("aria-expanded", String(!menu.hidden));
+  });
   document.getElementById("portal-logout").addEventListener("click", () => {
-    sessionStorage.removeItem("token_portal_access"); portalState.token = ""; document.getElementById("portal-token").value = ""; showPortalAuth();
+    sessionStorage.removeItem("token_portal_access"); portalState.token = ""; closePortalAccountMenu(); document.getElementById("portal-token").value = ""; showPortalAuth();
   });
   document.getElementById("portal-refresh").addEventListener("click", () => switchPortalView(portalState.view));
-  document.getElementById("portal-security").addEventListener("click", () => portalSecurityDialog());
-  document.getElementById("portal-workspace-manager").addEventListener("click", () => workspaceManagerDialog().catch((error) => portalToast(error.message, true)));
-  document.getElementById("portal-workspace").addEventListener("change", async (event) => {
-    portalState.activeWorkspaceId = Number(event.target.value);
-    try { await loadWorkspaces(); portalToast("已切换新建资源归属空间"); } catch (error) { portalToast(error.message, true); }
-  });
+  document.getElementById("portal-security").addEventListener("click", () => { closePortalAccountMenu(); portalSecurityDialog(); });
+  document.getElementById("portal-workspace-manager").addEventListener("click", () => { closePortalAccountMenu(); workspaceManagerDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
   document.getElementById("keys-refresh").addEventListener("click", () => loadKeys().catch((error) => portalToast(error.message, true)));
   document.getElementById("key-search").addEventListener("input", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
@@ -1109,6 +1118,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }));
   document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => switchPortalView(item.dataset.view)));
   document.body.addEventListener("click", async (event) => {
+    if (!event.target.closest(".account-menu")) closePortalAccountMenu();
     const target = event.target.closest("button, [data-go]");
     if (!target) return;
     if (target.dataset.close !== undefined) closePortalDialog();
@@ -1137,6 +1147,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.keyDetail) keyDetailDialog(target.dataset.keyDetail);
     if (target.dataset.requestId) loadUsageDetail(target.dataset.requestId).catch((error) => portalToast(error.message, true));
   });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closePortalAccountMenu(); });
   if (portalState.token) {
     document.getElementById("portal-token").value = portalState.token;
     try { await loadProfile(); await loadWorkspaces(); showPortalShell(); await switchPortalView("overview"); } catch (error) { showPortalAuth(error.message); }

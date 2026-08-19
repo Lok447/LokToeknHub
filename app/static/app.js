@@ -5,6 +5,7 @@ const state = {
   accounts: [],
   models: [],
   channels: [],
+  identity: null,
   modelFilters: { query: "", provider: "", type: "", publicationState: "" },
 };
 
@@ -21,8 +22,14 @@ function canOperate() {
 }
 
 function setAdminIdentity(identity) {
+  state.identity = identity || null;
   state.role = identity?.role || "";
   if (state.role) sessionStorage.setItem("token_admin_role", state.role);
+  const roleLabels = { superadmin: "超级管理员", operator: "运营人员", auditor: "审计员" };
+  const loginId = identity?.login_id || "管理员";
+  document.getElementById("admin-user-name").textContent = loginId;
+  document.getElementById("admin-user-role").textContent = roleLabels[state.role] || "管理账号";
+  document.getElementById("admin-user-avatar").textContent = loginId.slice(0, 1).toUpperCase();
   applyRoleUi();
 }
 
@@ -469,7 +476,19 @@ async function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `view-${view}`));
   document.getElementById("page-title").textContent = titles[view];
+  document.getElementById("admin-guide-link").hidden = view !== "overview";
   try { await loaders[view](); } catch (error) { toast(error.message, true); }
+}
+
+function closeAdminAccountMenu() {
+  document.getElementById("admin-account-menu").hidden = true;
+  document.getElementById("admin-account-trigger").setAttribute("aria-expanded", "false");
+}
+
+function adminPersonalSpaceDialog() {
+  const roleLabels = { superadmin: "超级管理员", operator: "运营人员", auditor: "审计员" };
+  const identity = state.identity || {};
+  openDialog("个人空间", `<div class="dialog-body"><div class="account-profile-grid"><div><span>管理员账号</span><strong>${escapeHtml(identity.login_id || "-")}</strong></div><div><span>当前角色</span><strong>${escapeHtml(roleLabels[identity.role] || identity.role || "-")}</strong></div><div><span>最近登录</span><strong>${formatDate(identity.last_login_at)}</strong></div><div><span>账号状态</span><strong>${identity.active === false ? "已停用" : "正常"}</strong></div></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
 }
 
 function openDialog(title, content) {
@@ -927,33 +946,20 @@ document.addEventListener("DOMContentLoaded", async () => {
       await switchView("overview");
     } catch (error) { showAuth(error.message); }
   });
-  document.getElementById("show-bootstrap").addEventListener("click", () => {
-    const form = document.getElementById("bootstrap-form");
-    form.hidden = !form.hidden;
-    document.getElementById("show-bootstrap").hidden = !form.hidden;
-  });
-  document.getElementById("bootstrap-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.currentTarget));
-    const bootstrapToken = data.token;
-    delete data.token;
-    try {
-      const result = await fetch("/admin/auth/bootstrap", { method: "POST", headers: { "Content-Type": "application/json", "X-Admin-Token": bootstrapToken }, body: JSON.stringify(data) });
-      const response = await result.json();
-      if (!result.ok) throw new Error(response.detail || "管理员初始化失败");
-      state.token = response.access_token;
-      sessionStorage.setItem("token_admin_token", state.token);
-      showApp();
-      await switchView("overview");
-    } catch (error) { showAuth(error.message); }
-  });
   document.getElementById("toggle-token").addEventListener("click", () => {
     const input = document.getElementById("admin-password");
     input.type = input.type === "password" ? "text" : "password";
   });
+  document.getElementById("admin-account-trigger").addEventListener("click", (event) => {
+    event.stopPropagation();
+    const menu = document.getElementById("admin-account-menu");
+    menu.hidden = !menu.hidden;
+    event.currentTarget.setAttribute("aria-expanded", String(!menu.hidden));
+  });
+  document.getElementById("admin-personal-space").addEventListener("click", () => { closeAdminAccountMenu(); adminPersonalSpaceDialog(); });
   document.getElementById("logout-button").addEventListener("click", () => {
     api("/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
-    sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; document.getElementById("admin-password").value = ""; showAuth();
+    sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; state.identity = null; closeAdminAccountMenu(); document.getElementById("admin-password").value = ""; showAuth();
   });
   document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view));
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
@@ -963,6 +969,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("close-dialog").addEventListener("click", closeDialog);
   document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => switchView(item.dataset.view)));
   document.body.addEventListener("click", (event) => {
+    if (!event.target.closest(".account-menu")) closeAdminAccountMenu();
     const target = event.target.closest("button, [data-go]");
     if (!target) return;
     if (target.dataset.close !== undefined) closeDialog();
@@ -989,6 +996,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");
   });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeAdminAccountMenu(); });
   if (state.token) {
     try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
   } else {
