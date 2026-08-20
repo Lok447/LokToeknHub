@@ -141,6 +141,13 @@ function activeBadge(active) {
   return `<span class="badge ${active ? "success" : "neutral"}">${active ? "启用" : "停用"}</span>`;
 }
 
+function accountSourceBadge(item) {
+  const source = item.account_source || "admin";
+  const kind = source === "self_registered" ? "success" : source === "loksystem" || source === "oidc" ? "warning" : "neutral";
+  const label = item.account_source_label || ({ self_registered: "用户注册", loksystem: "LokSystem 接入", oidc: "统一身份接入", admin: "管理员发放" }[source] || "管理员发放");
+  return `<span class="badge ${kind}" title="${escapeHtml(source)}">${escapeHtml(label)}</span>`;
+}
+
 function paymentBadge(status) {
   const map = {
     pending: ["warning", "待支付"],
@@ -312,6 +319,7 @@ async function loadAccounts() {
   document.getElementById("accounts-table").innerHTML = result.data.length ? result.data.map((item) => `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
+      <td>${accountSourceBadge(item)}</td>
       <td class="mono">${escapeHtml(item.external_user_id)}</td>
       <td>${formatNumber(item.api_key_count)}</td>
       <td><strong>${formatMoney(item.balance_micros)}</strong></td>
@@ -322,7 +330,7 @@ async function loadAccounts() {
         <button class="table-button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}
       </div></td>
     </tr>
-  `).join("") : emptyRow(6);
+  `).join("") : emptyRow(7);
 }
 
 async function loadKeys() {

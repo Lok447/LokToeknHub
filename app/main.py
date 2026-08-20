@@ -986,11 +986,14 @@ async def payment_webhook(
 @app.get("/admin/accounts", dependencies=[Depends(require_admin)])
 def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
+    source_labels = {"admin": "管理员发放", "self_registered": "用户注册", "loksystem": "LokSystem 接入", "oidc": "统一身份接入"}
     return {"data": [
         {
             "id": account.id,
             "external_user_id": account.external_user_id,
             "login_id": account.login_id,
+            "account_source": account.account_source or "admin",
+            "account_source_label": source_labels.get(account.account_source, "管理员发放"),
             "name": account.name,
             "balance_micros": account.balance_micros,
             "active": account.active,
@@ -1055,7 +1058,7 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
     if payload.account_id and (not account or not account.active):
         raise HTTPException(status_code=404, detail="active account not found")
     if account is None:
-        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name)
+        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name, account_source="admin")
         db.add(account)
         db.flush()
     project = ensure_default_project(db, ensure_personal_workspace(db, account))
@@ -1081,7 +1084,7 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
 def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == payload.external_user_id)):
         raise HTTPException(status_code=409, detail="external user already has an account")
-    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name)
+    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name, account_source="admin")
     db.add(account)
     db.flush()
     ensure_personal_workspace(db, account)

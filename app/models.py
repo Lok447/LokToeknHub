@@ -20,6 +20,7 @@ class BillingAccount(Base):
     security_contact: Mapped[str | None] = mapped_column(String(160), nullable=True)
     security_contact_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     session_version: Mapped[int] = mapped_column(Integer, default=0)
+    account_source: Mapped[str] = mapped_column(String(24), default="admin", index=True)
     name: Mapped[str] = mapped_column(String(120))
     balance_micros: Mapped[int] = mapped_column(BigInteger, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

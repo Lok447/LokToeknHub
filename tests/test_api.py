@@ -391,6 +391,9 @@ async def test_portal_registration_and_login() -> None:
         )
         assert profile.status_code == 200
         assert profile.json()["name"] == "New User"
+        registered_account = next(item for item in (await client.get("/admin/accounts", headers={"X-Admin-Token": "test-admin"})).json()["data"] if item["login_id"] == "new-user")
+        assert registered_account["account_source"] == "self_registered"
+        assert registered_account["account_source_label"] == "用户注册"
         duplicate = await client.post(
             "/auth/register",
             json={"login_id": "new-user", "name": "Duplicate", "password": "correct-horse"},
@@ -674,6 +677,9 @@ async def test_admin_console_queries_and_toggles() -> None:
         for path in ("/admin/overview", "/admin/accounts", "/admin/api-keys", "/admin/models", "/admin/usage/records"):
             response = await client.get(path, headers=admin_headers)
             assert response.status_code == 200
+        listed_account = next(item for item in (await client.get("/admin/accounts", headers=admin_headers)).json()["data"] if item["id"] == account_id)
+        assert listed_account["account_source"] == "admin"
+        assert listed_account["account_source_label"] == "管理员发放"
 
         providers = await client.get("/admin/payment-providers", headers=admin_headers)
         assert providers.status_code == 200

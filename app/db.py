@@ -43,6 +43,9 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN security_contact_verified_at DATETIME"))
         if "session_version" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0"))
+        if "account_source" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN account_source VARCHAR(24) NOT NULL DEFAULT 'admin'"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_billing_accounts_account_source ON billing_accounts (account_source)"))
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_billing_accounts_login_id ON billing_accounts (login_id)"))
         if "account_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN account_id INTEGER"))

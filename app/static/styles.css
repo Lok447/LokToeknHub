@@ -242,27 +242,29 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .channel-form .section-header { background: var(--surface-soft); }
 
 .model-catalog-panel { overflow: hidden; }
-.model-page-heading { min-width: 0; display: flex; align-items: center; gap: 22px; }
+.model-page-heading { min-width: 0; display: flex; align-items: center; }
 .model-type-tabs { min-width: 0; display: flex; flex-wrap: wrap; gap: 4px; }
-.model-type-tabs button { min-height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
+.model-type-tabs button { min-height: 28px; display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 9px; font-weight: 700; cursor: pointer; }
 .model-type-tabs button:hover { color: var(--ink); background: var(--surface-soft); }
 .model-type-tabs button.active { color: #2856d8; background: var(--signal-soft); }
-.model-type-tabs button svg { width: 14px; height: 14px; stroke-width: 1.9; }
+.model-type-tabs button svg { width: 13px; height: 13px; stroke-width: 1.9; }
 .model-type-tabs button small { min-width: 14px; color: var(--faint); font-size: 9px; font-weight: 600; }
 .model-catalog-toolbar .input-with-icon { position: relative; min-width: 0; }
 .model-catalog-toolbar .input-with-icon svg { position: absolute; left: 11px; top: 10px; width: 15px; height: 15px; color: var(--faint); pointer-events: none; }
 .model-catalog-toolbar .input-with-icon input { padding-left: 34px; }
 .model-catalog-toolbar {
   display: grid;
-  grid-template-columns: minmax(240px, 1.7fr) repeat(2, minmax(150px, .8fr)) auto;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(300px, 1.6fr) 132px 112px auto auto;
   align-items: center;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 8px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-soft);
 }
 .model-catalog-toolbar input,
-.model-catalog-toolbar select { height: 35px; font-size: 11px; }
+.model-catalog-toolbar select { height: 32px; font-size: 10px; }
+.model-catalog-toolbar .model-type-tabs { min-width: 0; justify-content: center; }
+.model-catalog-toolbar .model-type-tabs button { white-space: nowrap; }
 .model-catalog-toolbar > span { color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .model-catalog-table { min-width: 1180px; }
 .admin-provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 18px; }
@@ -303,7 +305,7 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split-layout { grid-template-columns: 1fr; }
   .model-page-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
-  .model-catalog-toolbar { grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(130px, 1fr)); }
+  .model-catalog-toolbar { grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.4fr) 120px 105px auto; }
   .model-catalog-toolbar > span { grid-column: 1 / -1; }
   .admin-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

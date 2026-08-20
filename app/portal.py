@@ -287,6 +287,7 @@ def _loksystem_account(db: Session, claims: dict[str, object]) -> BillingAccount
             login_id=None,
             password_hash=None,
             name=str(claims.get("username") or claims.get("email") or subject)[:120],
+            account_source="loksystem",
         )
         db.add(account)
         db.flush()
@@ -385,6 +386,7 @@ def _oidc_account(db: Session, issuer: str, subject: str, claims: dict[str, obje
         account = BillingAccount(
             external_user_id=stable_id[:120],
             name=str(claims.get("name") or claims.get("preferred_username") or email or subject)[:120],
+            account_source="oidc",
             login_id=None,
             password_hash=None,
             security_contact=email if email and claims.get("email_verified") is True else None,
@@ -460,6 +462,7 @@ def register(payload: PortalRegister, request: Request, db: Session = Depends(ge
         login_id=login_id,
         password_hash=hash_password(payload.password),
         name=payload.name,
+        account_source="self_registered",
         security_contact=payload.security_contact.strip() if payload.security_contact else None,
     )
     try:
