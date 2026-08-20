@@ -1060,6 +1060,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     } catch (error) { showPortalAuth(error.message); }
   });
   document.getElementById("portal-forgot-password").addEventListener("click", passwordResetDialog);
+  document.getElementById("portal-register-link").addEventListener("click", () => setAuthMode("register"));
   document.getElementById("portal-register-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {

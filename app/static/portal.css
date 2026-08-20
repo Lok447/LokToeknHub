@@ -444,3 +444,6 @@
   .model-detail-grid > div { border-right: 0 !important; border-bottom: 1px solid var(--line) !important; }
   .model-detail-grid > div:last-child { border-bottom: 0 !important; }
 }
+#portal-login-form .auth-login-support { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; }
+#portal-login-form .auth-login-support .text-button { display: inline-flex; align-items: center; gap: 5px; }
+#portal-login-form .auth-login-support .text-button svg { width: 14px; height: 14px; }
