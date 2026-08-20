@@ -271,10 +271,14 @@ def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     return channel.provider_base_url.rstrip("/") + "/chat/completions", headers
 
 
-async def discover_upstream_models(provider_base_url: str, provider_api_key_env: str | None) -> list[str]:
+async def discover_upstream_models(
+    provider_base_url: str,
+    provider_api_key_env: str | None,
+    provider_api_key: str | None = None,
+) -> list[str]:
     """Read an OpenAI-compatible model catalogue without persisting provider secrets."""
     settings = get_settings()
-    api_key = os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key
+    api_key = provider_api_key or (os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key)
     if provider_api_key_env and not api_key.strip():
         raise ValueError(f"供应商密钥环境变量未配置: {provider_api_key_env}")
     headers = {"Accept": "application/json"}
@@ -293,6 +297,44 @@ async def discover_upstream_models(provider_base_url: str, provider_api_key_env:
         raise ValueError("upstream model discovery returned an invalid response")
     model_ids = sorted({str(item.get("id", "")).strip() for item in items if isinstance(item, dict) and str(item.get("id", "")).strip()})
     return model_ids[:500]
+
+
+async def fetch_provider_balance(
+    preset_id: str,
+    provider_base_url: str,
+    provider_api_key_env: str | None,
+    provider_api_key: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a provider account balance when the provider exposes a documented endpoint.
+
+    Most providers expose billing only in their console, so unsupported providers
+    deliberately return a structured result instead of guessing from model health.
+    """
+    settings = get_settings()
+    if preset_id != "deepseek":
+        return {"status": "unsupported", "source": "console", "detail": "该供应商未提供可验证的余额 API，请在供应商控制台查看或手工录入。"}
+    api_key = provider_api_key or (os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key)
+    if not api_key.strip():
+        raise ValueError("供应商密钥未配置，无法查询余额")
+    base = provider_base_url.rstrip("/")
+    endpoint = base.removesuffix("/v1") + "/user/balance"
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=settings.channel_health_timeout_seconds) as client:
+            response = await client.get(endpoint, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"供应商余额查询失败: {exc}") from exc
+    infos = payload.get("balance_infos") if isinstance(payload, dict) else None
+    if not isinstance(infos, list) or not infos:
+        raise ValueError("供应商余额响应缺少 balance_infos")
+    item = next((entry for entry in infos if isinstance(entry, dict) and str(entry.get("currency", "")).upper() == "CNY"), infos[0])
+    try:
+        amount_micros = round(float(item.get("total_balance", 0)) * 1_000_000)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("供应商余额不是有效数字") from exc
+    return {"status": "available", "source": "api", "amount_micros": amount_micros, "currency": str(item.get("currency") or "CNY").upper(), "raw": payload}
 
 
 def _retryable_status(status_code: int) -> bool:

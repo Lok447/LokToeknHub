@@ -109,12 +109,56 @@ class ModelConfig(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ProviderConnection(Base):
+    __tablename__ = "provider_connections"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    preset_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    provider_base_url: Mapped[str] = mapped_column(String(500))
+    provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_input_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
+    default_output_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="unknown", index=True)
+    discovered_model_count: Mapped[int] = mapped_column(Integer, default=0)
+    synced_model_count: Mapped[int] = mapped_column(Integer, default=0)
+    callable_model_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    balance_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    balance_currency: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    balance_status: Mapped[str] = mapped_column(String(24), default="unknown", index=True)
+    balance_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    balance_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    balance_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    balance_alert_threshold_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ProviderBalanceSnapshot(Base):
+    __tablename__ = "provider_balance_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider_connection_id: Mapped[int] = mapped_column(ForeignKey("provider_connections.id", ondelete="CASCADE"), index=True)
+    amount_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    source: Mapped[str] = mapped_column(String(32))
+    raw_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ModelChannel(Base):
     __tablename__ = "model_channels"
     __table_args__ = (UniqueConstraint("model_config_id", "name", name="uq_model_channels_model_name"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     model_config_id: Mapped[int] = mapped_column(ForeignKey("model_configs.id", ondelete="CASCADE"), index=True)
+    provider_connection_id: Mapped[int | None] = mapped_column(ForeignKey("provider_connections.id", ondelete="SET NULL"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(120))
     provider_base_url: Mapped[str] = mapped_column(String(500))
     upstream_model: Mapped[str] = mapped_column(String(120))

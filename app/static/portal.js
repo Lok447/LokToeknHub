@@ -571,9 +571,18 @@ function portalProviderDescription(provider) {
 
 function portalProviderLogo(provider) {
   const name = String(provider || "").toLocaleLowerCase();
-  const slug = name.includes("deepseek") ? "deepseek" : name.includes("qwen") || name.includes("通义") ? "qwen" : name.includes("智谱") || name.includes("zhipu") || name.includes("glm") ? "" : name.includes("kimi") ? "kimi" : name.includes("moonshot") ? "moonshotai" : name.includes("minimax") ? "minimax" : name.includes("doubao") || name.includes("豆包") || name.includes("字节") ? "bytedance" : "";
+  const slug = name.includes("deepseek") ? "deepseek" : name.includes("qwen") || name.includes("通义") ? "qwen" : name.includes("智谱") || name.includes("zhipu") || name.includes("glm") ? "glm-local" : name.includes("kimi") ? "kimi-local" : name.includes("moonshot") ? "moonshotai" : name.includes("minimax") ? "minimax" : name.includes("doubao") || name.includes("豆包") ? "doubao-local" : name.includes("字节") ? "bytedance" : "";
+  const color = { deepseek: "4D6BFE", qwen: "6155F5", moonshotai: "4C8BF5", minimax: "FF5B7F", bytedance: "2A5CAA" }[slug] || "59636D";
+  const source = { "glm-local": "/static/provider-logos/glm.png", "kimi-local": "/static/provider-logos/kimi.ico", "doubao-local": "/static/provider-logos/doubao.png" }[slug] || `https://cdn.simpleicons.org/${slug}/${color}`;
   const initial = escapeHtml(String(provider || "自定义").slice(0, 1).toUpperCase());
-  return slug ? `<img class="provider-logo-image" src="https://cdn.simpleicons.org/${slug}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${initial}</span>` : initial;
+  return slug ? `<img class="provider-logo-image" src="${source}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${initial}</span>` : initial;
+}
+
+const marketplaceProviderOrder = ["deepseek", "qwen", "glm", "zhipu", "智谱", "kimi", "minimax", "doubao", "字节"];
+function marketplaceProviderRank(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  const index = marketplaceProviderOrder.findIndex((item) => name.includes(item));
+  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
 }
 
 function matchesMarketplaceModel(item) {
@@ -607,7 +616,7 @@ function renderModelMarketplace() {
   `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
   } else {
     const providers = [...new Map(visibleModels.map((item) => [item.provider || "LokSystem", visibleModels.filter((candidate) => (candidate.provider || "LokSystem") === (item.provider || "LokSystem"))])).values()];
-    const featured = providers.filter((items) => ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name)));
+    const featured = providers.filter((items) => ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name))).sort((a, b) => marketplaceProviderRank(a[0].provider) - marketplaceProviderRank(b[0].provider));
     const otherModels = providers.filter((items) => !["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name))).flat();
     document.getElementById("model-marketplace-count").textContent = `${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
     providerBack.hidden = true;
@@ -747,7 +756,8 @@ function renderDistribution(targetId, items, emptyText) {
     return;
   }
   const total = items.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0) || 1;
-  const colors = ["#3f6ff5", "#1e7653", "#bd6d18", "#8b5cf6", "#bd3b65", "#16839c"];
+  // Keep analytical charts in the LokSystem palette: brand blue plus quiet neutrals.
+  const colors = ["#3f6ff5", "#7b91c9", "#59636d", "#9aa5b1", "#b0b8c0", "#c2c9d0"];
   let offset = 0;
   const stops = items.map((item, index) => {
     const share = Number(item.total_tokens || 0) / total * 100;
@@ -770,10 +780,10 @@ function renderUsageAnalytics(analytics) {
 
 function usageTrendConfig(mode) {
   if (mode === "requests") return [{ key: "request_count", label: "请求数", color: "#3f6ff5", format: formatNumber }];
-  if (mode === "cost") return [{ key: "amount_micros", label: "消费", color: "#1e7653", format: (value) => formatMoney(value) }];
+  if (mode === "cost") return [{ key: "amount_micros", label: "消费", color: "#59636d", format: (value) => formatMoney(value) }];
   return [
     { key: "input_tokens", label: "输入 Token", color: "#3f6ff5", format: formatNumber },
-    { key: "output_tokens", label: "输出 Token", color: "#1e7653", format: formatNumber },
+    { key: "output_tokens", label: "输出 Token", color: "#7b91c9", format: formatNumber },
   ];
 }
 

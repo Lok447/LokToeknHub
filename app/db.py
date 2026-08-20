@@ -32,6 +32,7 @@ def init_db() -> None:
     transaction_columns = {column["name"] for column in inspector.get_columns("account_balance_transactions")}
     channel_columns = {column["name"] for column in inspector.get_columns("model_channels")}
     model_columns = {column["name"] for column in inspector.get_columns("model_configs")}
+    provider_connection_columns = {column["name"] for column in inspector.get_columns("provider_connections")}
     with engine.begin() as connection:
         if "login_id" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN login_id VARCHAR(160)"))
@@ -106,15 +107,29 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN health_source VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
         if "encrypted_api_key" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN encrypted_api_key TEXT"))
+        if "provider_connection_id" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_connection_id INTEGER"))
         if "provider_input_cost_micros_per_1k" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_input_cost_micros_per_1k INTEGER"))
         if "provider_output_cost_micros_per_1k" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_output_cost_micros_per_1k INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_channels_health_source ON model_channels (health_source)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_channels_provider_connection_id ON model_channels (provider_connection_id)"))
         if "catalog_metadata_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN catalog_metadata_json TEXT"))
         if "official_pricing_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
+        for name, definition in {
+            "balance_micros": "BIGINT",
+            "balance_currency": "VARCHAR(12)",
+            "balance_status": "VARCHAR(24) NOT NULL DEFAULT 'unknown'",
+            "balance_source": "VARCHAR(32)",
+            "balance_checked_at": "DATETIME",
+            "balance_error": "TEXT",
+            "balance_alert_threshold_micros": "BIGINT NOT NULL DEFAULT 0",
+        }.items():
+            if name not in provider_connection_columns:
+                connection.execute(text(f"ALTER TABLE provider_connections ADD COLUMN {name} {definition}"))
         usage_additions = {
             "provider_cost_micros": "INTEGER NOT NULL DEFAULT 0",
             "provider_channel_id": "INTEGER",

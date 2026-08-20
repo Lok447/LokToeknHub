@@ -25,15 +25,15 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, ProviderBillImport, ProviderBillLine, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
 from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
-from .provider_secrets import ProviderSecretError, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBillImportRequest, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
+from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -1221,6 +1221,291 @@ def list_provider_presets() -> dict[str, object]:
     return {"data": [provider_preset_data(item) for item in PROVIDER_PRESETS]}
 
 
+def provider_connection_data(connection: ProviderConnection | None, preset) -> dict[str, object]:
+    env_name = connection.provider_api_key_env if connection else preset.api_key_env
+    env_configured = bool(env_name and os.getenv(env_name, "").strip())
+    stored_secret = bool(connection and connection.encrypted_api_key)
+    return {
+        "id": connection.id if connection else None,
+        "preset_id": preset.id,
+        "name": preset.name,
+        "provider_base_url": connection.provider_base_url if connection else preset.base_url,
+        "provider_api_key_env": env_name,
+        "credentials_configured": stored_secret or env_configured,
+        "credential_source": "stored" if stored_secret else "environment" if env_configured else "none",
+        "active": connection.active if connection else False,
+        "status": connection.status if connection else "unconfigured",
+        "discovered_model_count": connection.discovered_model_count if connection else 0,
+        "synced_model_count": connection.synced_model_count if connection else 0,
+        "callable_model_count": connection.callable_model_count if connection else 0,
+        "default_input_price_micros_per_1k": connection.default_input_price_micros_per_1k if connection else 0,
+        "default_output_price_micros_per_1k": connection.default_output_price_micros_per_1k if connection else 0,
+        "last_checked_at": connection.last_checked_at.isoformat() if connection and connection.last_checked_at else None,
+        "last_error": connection.last_error if connection else None,
+        "balance_micros": connection.balance_micros if connection else None,
+        "balance_currency": connection.balance_currency if connection else None,
+        "balance_status": connection.balance_status if connection else "unknown",
+        "balance_source": connection.balance_source if connection else None,
+        "balance_checked_at": connection.balance_checked_at.isoformat() if connection and connection.balance_checked_at else None,
+        "balance_error": connection.balance_error if connection else None,
+        "balance_alert_threshold_micros": connection.balance_alert_threshold_micros if connection else 0,
+        "model_count": len(preset.models),
+        "note": preset.note,
+    }
+
+
+@app.get("/admin/provider-connections", dependencies=[Depends(require_admin)])
+def list_provider_connections(db: Session = Depends(get_db)) -> dict[str, object]:
+    connections = {item.preset_id: item for item in db.scalars(select(ProviderConnection)).all()}
+    return {"data": [provider_connection_data(connections.get(preset.id), preset) for preset in PROVIDER_PRESETS]}
+
+
+@app.post("/admin/provider-connections/{preset_id}/test", dependencies=[Depends(require_operator)])
+async def test_provider_connection(preset_id: str, payload: ProviderConnectionConfigure, db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
+    raw_secret = payload.provider_api_key
+    if not raw_secret and connection and connection.encrypted_api_key:
+        try:
+            raw_secret = decrypt_provider_secret(connection.encrypted_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    started = time.perf_counter()
+    try:
+        model_ids = await discover_upstream_models(base_url, env_name, raw_secret)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "provider": preset.name, "discovered_model_count": len(model_ids), "latency_ms": int((time.perf_counter() - started) * 1000), "sample_models": model_ids[:8]}
+
+
+def _record_provider_balance(db: Session, connection: ProviderConnection, result: dict[str, object], note: str | None = None) -> None:
+    status = str(result.get("status") or "error")
+    connection.balance_status = status
+    connection.balance_source = str(result.get("source") or "manual")
+    connection.balance_checked_at = utcnow()
+    connection.balance_error = str(result.get("detail") or "") or None
+    if result.get("amount_micros") is not None:
+        connection.balance_micros = int(result["amount_micros"])
+        connection.balance_currency = str(result.get("currency") or "CNY").upper()
+    db.add(ProviderBalanceSnapshot(
+        provider_connection_id=connection.id,
+        amount_micros=connection.balance_micros,
+        currency=connection.balance_currency,
+        status=status,
+        source=connection.balance_source,
+        raw_json=json.dumps(result.get("raw") or {"note": note} if isinstance(result.get("raw") or {"note": note}, dict) else {}, ensure_ascii=False, separators=(",", ":")),
+        error_message=connection.balance_error,
+        checked_at=connection.balance_checked_at,
+    ))
+
+
+@app.post("/admin/provider-connections/{preset_id}/balance/refresh", dependencies=[Depends(require_operator)])
+async def refresh_provider_balance(preset_id: str, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset or not connection:
+        raise HTTPException(status_code=404, detail="provider connection not found")
+    raw_secret = None
+    if connection.encrypted_api_key:
+        try:
+            raw_secret = decrypt_provider_secret(connection.encrypted_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        result = await fetch_provider_balance(preset_id, connection.provider_base_url, connection.provider_api_key_env, raw_secret)
+    except ValueError as exc:
+        result = {"status": "error", "source": "api", "detail": str(exc)}
+    _record_provider_balance(db, connection, result)
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_refreshed", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "status": result.get("status"), "source": result.get("source")})
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset)}
+
+
+@app.post("/admin/provider-connections/{preset_id}/balance/manual", dependencies=[Depends(require_operator)])
+def record_manual_provider_balance(preset_id: str, payload: ProviderBalanceManual, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset or not connection:
+        raise HTTPException(status_code=404, detail="provider connection not found")
+    result = {"status": "available", "source": "manual", "amount_micros": round(payload.amount * 1_000_000), "currency": payload.currency.upper(), "raw": {"note": payload.note} if payload.note else {}}
+    _record_provider_balance(db, connection, result, payload.note)
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_recorded", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "currency": payload.currency.upper()})
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset)}
+
+
+@app.put("/admin/provider-connections/{preset_id}", dependencies=[Depends(require_operator)])
+async def configure_provider_connection(
+    preset_id: str,
+    payload: ProviderConnectionConfigure,
+    context: AdminContext = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    selected_ids = list(payload.model_ids or preset.model_ids)
+    invalid = sorted(set(selected_ids) - set(preset.model_ids))
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"model is not included in provider preset: {invalid[0]}")
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id))
+    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
+    encrypted_secret = None if payload.clear_provider_api_key else (connection.encrypted_api_key if connection else None)
+    if not encrypted_secret and not payload.clear_provider_api_key:
+        # Migrate the first existing model-scoped secret into the provider-level
+        # connection so current single-model deployments upgrade seamlessly.
+        legacy_channel = db.scalar(select(ModelChannel).where(
+            ModelChannel.provider_api_key_env == env_name,
+            ModelChannel.encrypted_api_key.is_not(None),
+        ).order_by(ModelChannel.id))
+        if legacy_channel:
+            encrypted_secret = legacy_channel.encrypted_api_key
+    if payload.provider_api_key:
+        try:
+            encrypted_secret = encrypt_provider_secret(payload.provider_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    raw_secret = payload.provider_api_key
+    if not raw_secret and encrypted_secret:
+        try:
+            raw_secret = decrypt_provider_secret(encrypted_secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not raw_secret and not (env_name and os.getenv(env_name, "").strip()):
+        raise HTTPException(status_code=422, detail="请填写供应商 API Key，或先在服务环境中配置对应密钥变量")
+    try:
+        discovered_ids = set(await discover_upstream_models(base_url, env_name, raw_secret))
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if connection is None:
+        connection = ProviderConnection(
+            preset_id=preset.id,
+            name=preset.name,
+            provider_base_url=base_url,
+        )
+        db.add(connection)
+        db.flush()
+    connection.name = preset.name
+    connection.provider_base_url = base_url
+    connection.provider_api_key_env = env_name
+    connection.encrypted_api_key = encrypted_secret
+    connection.default_input_price_micros_per_1k = payload.default_input_price_micros_per_1k
+    connection.default_output_price_micros_per_1k = payload.default_output_price_micros_per_1k
+    connection.balance_alert_threshold_micros = payload.balance_alert_threshold_micros
+    connection.active = True
+    connection.discovered_model_count = len(discovered_ids)
+    connection.last_checked_at = utcnow()
+    connection.updated_at = utcnow()
+    connection.last_error = None
+    synced: list[dict[str, object]] = []
+    for model_id in selected_ids:
+        preset_model = preset.get_model(model_id)
+        if preset_model is None:
+            continue
+        model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == preset_model.public_name))
+        if model is None:
+            model = ModelConfig(
+                public_name=preset_model.public_name,
+                upstream_model=preset_model.model_id,
+                provider_base_url=base_url,
+                provider_api_key_env=env_name,
+                input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k or payload.default_input_price_micros_per_1k,
+                output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k or payload.default_output_price_micros_per_1k,
+                catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
+                official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
+                active=False,
+            )
+            db.add(model)
+            db.flush()
+        else:
+            model.upstream_model = preset_model.model_id
+            model.provider_base_url = base_url
+            model.provider_api_key_env = env_name
+            model.catalog_metadata_json = json.dumps(preset_model.catalog_metadata, ensure_ascii=False)
+            if preset_model.official_pricing:
+                model.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
+            if model.input_price_micros_per_1k <= 0:
+                model.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k or payload.default_input_price_micros_per_1k
+            if model.output_price_micros_per_1k <= 0:
+                model.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k or payload.default_output_price_micros_per_1k
+        channel = db.scalar(select(ModelChannel).where(
+            ModelChannel.model_config_id == model.id,
+            ModelChannel.provider_connection_id == connection.id,
+        ))
+        if channel is None:
+            channel = db.scalar(select(ModelChannel).where(
+                ModelChannel.model_config_id == model.id,
+                ModelChannel.upstream_model == preset_model.model_id,
+            ).order_by(ModelChannel.id))
+        if channel is None:
+            channel = ModelChannel(
+                model_config_id=model.id,
+                name=f"{preset.name} 主渠道",
+                provider_base_url=base_url,
+                upstream_model=preset_model.model_id,
+            )
+            db.add(channel)
+        channel.provider_connection_id = connection.id
+        channel.name = f"{preset.name} 主渠道"
+        channel.provider_base_url = base_url
+        channel.upstream_model = preset_model.model_id
+        channel.provider_api_key_env = env_name
+        channel.encrypted_api_key = encrypted_secret
+        available = preset_model.model_id in discovered_ids
+        metadata_api_type = preset_model.catalog_metadata.get("api_type", "chat_completions")
+        channel.active = available and metadata_api_type == "chat_completions"
+        channel.status = "healthy" if channel.active else "unhealthy" if metadata_api_type == "chat_completions" else "unknown"
+        channel.health_source = "provider" if available else "unknown"
+        channel.consecutive_failures = 0 if available else channel.consecutive_failures
+        channel.last_checked_at = connection.last_checked_at
+        channel.last_error = None if available else f"供应商模型目录不包含上游模型: {preset_model.model_id}"
+        price_ready = model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0
+        callable_now = channel.active and price_ready
+        if not available:
+            model.active = False
+        elif payload.auto_publish and callable_now:
+            model.active = True
+        synced.append({
+            "id": model.id,
+            "public_name": model.public_name,
+            "upstream_model": model.upstream_model,
+            "input_price_micros_per_1k": model.input_price_micros_per_1k,
+            "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "available": available,
+            "callable": bool(model.active and callable_now),
+            "reason": None if callable_now else "等待统一调用适配器" if metadata_api_type != "chat_completions" else "请配置平台价格" if not price_ready else "尚未发布",
+        })
+    connection.synced_model_count = len(synced)
+    connection.callable_model_count = sum(1 for item in synced if item["callable"])
+    connection.status = "healthy" if connection.callable_model_count else "degraded"
+    if connection.callable_model_count < len(synced):
+        connection.last_error = f"{len(synced) - connection.callable_model_count} 个模型尚未达到可调用条件"
+    record_audit_event(
+        db,
+        actor_type="admin",
+        actor_id=context.actor_id,
+        action="provider.connection_synced",
+        target_type="provider_connection",
+        target_id=connection.id,
+        details={
+            "preset_id": preset.id,
+            "discovered": len(discovered_ids),
+            "synced": len(synced),
+            "callable": connection.callable_model_count,
+        },
+    )
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset), "models": synced}
+
+
 @app.post("/admin/provider-presets/{preset_id}/install", dependencies=[Depends(require_operator)])
 def install_provider_preset(preset_id: str, payload: ProviderPresetInstall, db: Session = Depends(get_db)) -> dict[str, object]:
     preset = get_provider_preset(preset_id)
@@ -1402,6 +1687,7 @@ def channel_data(channel: ModelChannel) -> dict[str, object]:
     return {
         "id": channel.id,
         "model_config_id": channel.model_config_id,
+        "provider_connection_id": channel.provider_connection_id,
         "name": channel.name,
         "provider_base_url": channel.provider_base_url,
         "upstream_model": channel.upstream_model,

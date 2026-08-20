@@ -160,6 +160,24 @@ class ProviderPresetInstall(BaseModel):
     model_ids: list[str] = Field(min_length=1, max_length=20)
 
 
+class ProviderConnectionConfigure(BaseModel):
+    provider_base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    clear_provider_api_key: bool = False
+    default_input_price_micros_per_1k: int = Field(default=0, ge=0)
+    default_output_price_micros_per_1k: int = Field(default=0, ge=0)
+    model_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    auto_publish: bool = True
+    balance_alert_threshold_micros: int = Field(default=0, ge=0)
+
+
+class ProviderBalanceManual(BaseModel):
+    amount: float = Field(ge=0)
+    currency: str = Field(default="CNY", min_length=3, max_length=12)
+    note: str | None = Field(default=None, max_length=255)
+
+
 class ModelUpdate(BaseModel):
     input_price_micros_per_1k: int | None = Field(default=None, ge=0)
     output_price_micros_per_1k: int | None = Field(default=None, ge=0)

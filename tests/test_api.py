@@ -1291,6 +1291,52 @@ async def test_provider_presets_install_disabled_candidates_without_credentials(
 
 
 @pytest.mark.asyncio
+async def test_provider_connection_syncs_entire_preset_and_publishes_callable_text_models(monkeypatch) -> None:
+    from app.config import get_settings
+    from app.models import ModelChannel, ModelConfig, ProviderConnection
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "provider_secrets_key", "p" * 32)
+
+    async def fake_discovery(_base_url: str, _env_name: str | None, _provider_api_key: str | None = None) -> list[str]:
+        return [
+            "qwen-plus", "qwen-turbo", "qwen-max", "qwen3-coder-plus",
+            "qwen-vl-max-latest", "qwen-image-plus", "wan2.1-t2v-turbo",
+        ]
+
+    monkeypatch.setattr("app.main.discover_upstream_models", fake_discovery)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        synced = await client.put(
+            "/admin/provider-connections/qwen",
+            headers={"X-Admin-Token": "test-admin"},
+            json={
+                "provider_api_key": "qwen-test-secret",
+                "default_input_price_micros_per_1k": 1200,
+                "default_output_price_micros_per_1k": 3600,
+            },
+        )
+        assert synced.status_code == 200
+        result = synced.json()
+        assert result["connection"]["credentials_configured"] is True
+        assert result["connection"]["synced_model_count"] == 7
+        assert result["connection"]["callable_model_count"] == 5
+        assert {item["public_name"] for item in result["models"] if item["callable"]} == {
+            "qwen/qwen-plus", "qwen/qwen-turbo", "qwen/qwen-max", "qwen/qwen3-coder-plus", "qwen/qwen-vl-max",
+        }
+        listed = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
+        qwen = {item["public_name"]: item for item in listed.json()["data"] if item["public_name"].startswith("qwen/") or item["public_name"].startswith("qwen")}
+        assert qwen["qwen/qwen-plus"]["active"] is True
+        assert qwen["qwen/qwen-image-plus"]["active"] is False
+        assert qwen["qwen/qwen-image-plus"]["publication_state"] == "candidate"
+        with SessionLocal() as db:
+            connection = db.query(ProviderConnection).filter_by(preset_id="qwen").one()
+            channel = db.query(ModelChannel).join(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen-plus").one()
+            assert channel.provider_connection_id == connection.id
+            assert db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen-plus").count() == 1
+
+
+@pytest.mark.asyncio
 async def test_oidc_login_links_stable_loksystem_identity(monkeypatch) -> None:
     import app.portal as portal_module
 

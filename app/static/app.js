@@ -4,6 +4,8 @@ const state = {
   view: "overview",
   accounts: [],
   models: [],
+  providerConnections: [],
+  providerPresets: [],
   channels: [],
   identity: null,
   modelFilters: { query: "", provider: "", type: "", publicationState: "" },
@@ -348,8 +350,14 @@ async function loadKeys() {
 }
 
 async function loadModels() {
-  const result = await api("/admin/models");
+  const [result, connections, presets] = await Promise.all([
+    api("/admin/models"),
+    api("/admin/provider-connections"),
+    api("/admin/provider-presets"),
+  ]);
   state.models = result.data;
+  state.providerConnections = connections.data || [];
+  state.providerPresets = presets.data || [];
   const providerSelect = document.getElementById("model-provider-filter");
   const selectedProvider = providerSelect.value;
   const providers = [...new Set(state.models.map((item) => item.catalog_metadata?.provider || "自定义").filter(Boolean))].sort();
@@ -367,21 +375,34 @@ function providerLogoSlug(provider) {
   const name = String(provider || "").toLocaleLowerCase();
   if (name.includes("deepseek")) return "deepseek";
   if (name.includes("qwen") || name.includes("通义")) return "qwen";
-  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "";
-  if (name.includes("kimi")) return "kimi";
+  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "glm-local";
+  if (name.includes("kimi")) return "kimi-local";
   if (name.includes("moonshot")) return "moonshotai";
   if (name.includes("minimax")) return "minimax";
-  if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "bytedance";
+  if (name.includes("doubao") || name.includes("豆包")) return "doubao-local";
+  if (name.includes("字节")) return "bytedance";
   return "";
+}
+
+function providerLogoColor(provider) {
+  const slug = providerLogoSlug(provider);
+  return { deepseek: "4D6BFE", qwen: "6155F5", moonshotai: "4C8BF5", minimax: "FF5B7F", bytedance: "2A5CAA" }[slug] || "59636D";
 }
 
 function providerLogo(provider, className = "provider-logo-image") {
   const slug = providerLogoSlug(provider);
-  return slug ? `<img class="${className}" src="https://cdn.simpleicons.org/${slug}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${escapeHtml(providerInitial(provider))}</span>` : escapeHtml(providerInitial(provider));
+  const source = { "glm-local": "/static/provider-logos/glm.png", "kimi-local": "/static/provider-logos/kimi.ico", "doubao-local": "/static/provider-logos/doubao.png" }[slug] || `https://cdn.simpleicons.org/${slug}/${providerLogoColor(provider)}`;
+  return slug ? `<img class="${className}" src="${source}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${escapeHtml(providerInitial(provider))}</span>` : escapeHtml(providerInitial(provider));
 }
 
 const featuredProviders = ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"];
+const featuredProviderOrder = ["deepseek", "qwen", "glm", "zhipu", "智谱", "kimi", "minimax", "doubao", "字节"];
 function isFeaturedProvider(provider) { return featuredProviders.some((name) => String(provider || "").toLocaleLowerCase().includes(name)); }
+function featuredProviderRank(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  const index = featuredProviderOrder.findIndex((item) => name.includes(item));
+  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+}
 function providerDescription(provider) {
   const name = String(provider || "").toLocaleLowerCase();
   if (name.includes("deepseek")) return "面向高强度推理与复杂应用的通用大模型系列，适合研发、开发与智能体场景。";
@@ -391,6 +412,38 @@ function providerDescription(provider) {
   if (name.includes("minimax")) return "MiniMax 文本、多模态与内容生成模型，适合 Agent、创作与交互场景。";
   if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "字节跳动模型服务，覆盖文本、视觉、图像与视频生成能力。";
   return "来自生态合作伙伴的模型系列，按统一接口接入并由平台集中管理。";
+}
+
+function providerPresetId(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  if (name.includes("deepseek")) return "deepseek";
+  if (name.includes("qwen") || name.includes("通义")) return "qwen";
+  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "glm";
+  if (name.includes("kimi") || name.includes("moonshot")) return "kimi";
+  if (name.includes("minimax")) return "minimax";
+  if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "doubao";
+  return "";
+}
+
+function providerConnection(provider) {
+  const presetId = providerPresetId(provider);
+  return state.providerConnections.find((item) => item.preset_id === presetId) || null;
+}
+
+function providerConnectionBadge(connection) {
+  if (!connection || !connection.credentials_configured) return '<span class="badge neutral">未配置厂家</span>';
+  if (connection.status === "healthy") return `<span class="badge success">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
+  if (connection.status === "degraded") return `<span class="badge warning">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
+  return '<span class="badge error">连接异常</span>';
+}
+
+function providerBalanceSummary(connection) {
+  if (!connection || connection.balance_status === "unknown") return '<span class="provider-balance-summary neutral">余额未查询</span>';
+  if (connection.balance_status === "unsupported") return '<span class="provider-balance-summary neutral">余额需控制台查询</span>';
+  if (connection.balance_status === "error") return '<span class="provider-balance-summary error">余额查询失败</span>';
+  const amount = connection.balance_micros == null ? "—" : formatMoney(connection.balance_micros);
+  const low = connection.balance_alert_threshold_micros > 0 && connection.balance_micros != null && connection.balance_micros <= connection.balance_alert_threshold_micros;
+  return `<span class="provider-balance-summary ${low ? "warning" : "success"}">上游余额 ${escapeHtml(amount)} ${escapeHtml(connection.balance_currency || "CNY")}</span>`;
 }
 
 function renderAdminProviderCards(models) {
@@ -407,7 +460,7 @@ function renderAdminProviderCards(models) {
   grid.hidden = false;
   back.hidden = true;
   const grouped = [...new Map(models.map((item) => [item.catalog_metadata?.provider || "自定义", models.filter((candidate) => (candidate.catalog_metadata?.provider || "自定义") === (item.catalog_metadata?.provider || "自定义"))])).values()];
-  const featured = grouped.filter((items) => isFeaturedProvider(items[0].catalog_metadata?.provider || ""));
+  const featured = grouped.filter((items) => isFeaturedProvider(items[0].catalog_metadata?.provider || "")).sort((a, b) => featuredProviderRank(a[0].catalog_metadata?.provider) - featuredProviderRank(b[0].catalog_metadata?.provider));
   const otherModels = grouped.filter((items) => !isFeaturedProvider(items[0].catalog_metadata?.provider || "")).flat();
   grid.innerHTML = featured.length || otherModels.length ? featured.map((items, index) => {
     const provider = items[0].catalog_metadata?.provider || "自定义";
@@ -415,8 +468,91 @@ function renderAdminProviderCards(models) {
     const healthy = items.reduce((sum, item) => sum + Number(item.healthy_channel_count || 0), 0);
     const channels = items.reduce((sum, item) => sum + Number(item.channel_count || 0), 0);
     const chips = items.slice(0, 3).map((item) => `<span>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</span>`).join("");
-    return `<button class="admin-provider-card tone-${index % 5}" type="button" data-model-provider="${escapeHtml(provider)}"><span class="admin-provider-logo">${providerLogo(provider)}</span><span class="admin-provider-copy"><strong>${escapeHtml(provider)}</strong><p>${escapeHtml(providerDescription(provider))}</p><span class="provider-model-chips">${chips}</span><small>${items.length} 个模型 · ${typeCounts || "待分类"} · ${healthy}/${channels} 渠道健康</small><b>探索系列 <i data-lucide="arrow-right"></i></b></span></button>`;
+    const connection = providerConnection(provider);
+    const presetId = providerPresetId(provider);
+    return `<article class="admin-provider-card tone-${index % 5}"><span class="admin-provider-logo">${providerLogo(provider)}</span><span class="admin-provider-copy"><span class="provider-card-title"><strong>${escapeHtml(provider)}</strong>${providerConnectionBadge(connection)}</span><p>${escapeHtml(providerDescription(provider))}</p><span class="provider-model-chips">${chips}</span><small>${items.length} 个模型 · ${typeCounts || "待分类"} · ${healthy}/${channels} 渠道健康</small>${providerBalanceSummary(connection)}<span class="provider-card-actions"><button class="table-button" type="button" data-model-provider="${escapeHtml(provider)}"><i data-lucide="list"></i><span>查看系列</span></button>${canOperate() && presetId ? `<button class="primary-button compact-provider-button" type="button" data-action="configure-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>${connection?.credentials_configured ? "管理接入" : "配置接入"}</span></button>` : ""}</span></span></article>`;
   }).join("") + `<button class="admin-provider-card provider-more-card" type="button" data-model-provider-more><span class="admin-provider-more-icon"><i data-lucide="search"></i></span><span class="admin-provider-copy"><strong>更多系列 / 厂商查询</strong><p>${otherModels.length ? "浏览其他第三方及新增模型" : "接入更多第三方模型"}</p><b>进入查询 <i data-lucide="arrow-right"></i></b></span></button>` : '<div class="empty-state compact"><i data-lucide="boxes"></i><span>没有符合筛选条件的供应商</span></div>';
+  icons();
+}
+
+function providerConnectionDialog(presetId) {
+  const preset = state.providerPresets.find((item) => item.id === presetId);
+  const connection = state.providerConnections.find((item) => item.preset_id === presetId);
+  if (!preset) { toast("没有找到供应商模板", true); return; }
+  const inputPrice = connection?.default_input_price_micros_per_1k ? microsPerThousandToYuanPerMillion(connection.default_input_price_micros_per_1k) : "";
+  const outputPrice = connection?.default_output_price_micros_per_1k ? microsPerThousandToYuanPerMillion(connection.default_output_price_micros_per_1k) : "";
+  const balanceText = connection?.balance_status === "available" ? `${formatMoney(connection.balance_micros)} ${connection.balance_currency || "CNY"}` : connection?.balance_status === "unsupported" ? "该供应商需在控制台查看" : connection?.balance_status === "error" ? "上次查询失败" : "尚未查询";
+  openDialog(`厂家接入 · ${preset.name}`, `
+    <form id="provider-connection-form">
+      <div class="dialog-body">
+        <div class="provider-connection-summary"><span class="admin-provider-logo">${providerLogo(preset.name)}</span><div><strong>一次配置，统一同步 ${preset.models.length} 个系列模型</strong><p>${escapeHtml(preset.note)}</p></div></div>
+        <div class="field"><label for="provider-connection-url">供应商 API 地址</label><input id="provider-connection-url" name="provider_base_url" required maxlength="500" value="${escapeHtml(connection?.provider_base_url || preset.base_url)}"></div>
+        <div class="field"><label for="provider-connection-key">供应商 API Key</label><input id="provider-connection-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="${connection?.credentials_configured ? "已保存；留空表示继续使用当前密钥" : "输入厂家控制台发放的 API Key"}"><small class="field-hint">密钥由服务端加密保存，不会回显到浏览器或模型列表。</small></div>
+        <div class="field"><label for="provider-connection-env">服务器密钥环境变量（可选）</label><input id="provider-connection-env" name="provider_api_key_env" maxlength="120" value="${escapeHtml(connection?.provider_api_key_env || preset.api_key_env || "")}" placeholder="例如 DASHSCOPE_API_KEY"><small class="field-hint">填写环境变量时，可不在此录入明文密钥。</small></div>
+        <div class="field-row"><div class="field"><label for="provider-default-input-price">批量默认输入售价 / 1M Token（元）</label><input id="provider-default-input-price" name="default_input_price" type="number" min="0" step="0.001" value="${inputPrice}" placeholder="可选"></div><div class="field"><label for="provider-default-output-price">批量默认输出售价 / 1M Token（元）</label><input id="provider-default-output-price" name="default_output_price" type="number" min="0" step="0.001" value="${outputPrice}" placeholder="可选"></div></div><small class="field-hint">可选兜底值，仅用于没有官方参考价的新模型；每个模型的最终用户售价不同，请在同步后进入模型列表的“定价”逐项维护。已有模型价格不会被该默认值覆盖。供应商采购成本请在渠道详情中单独维护。</small>
+        <div class="field"><label for="provider-balance-threshold">上游余额预警阈值（元，可选）</label><input id="provider-balance-threshold" name="balance_alert_threshold" type="number" min="0" step="0.01" value="${connection?.balance_alert_threshold_micros ? (connection.balance_alert_threshold_micros / 1000000).toFixed(2) : "0"}"><small class="field-hint">仅用于提醒采购，不会影响用户额度或自动扣款。</small></div>
+        <div class="provider-balance-panel"><div><strong>上游账户余额</strong><span>${escapeHtml(balanceText)}</span><small>${connection?.balance_checked_at ? `最近查询：${formatDate(connection.balance_checked_at)}` : "余额查询不会通过模型健康检查推断"}</small></div><div class="provider-card-actions"><button class="table-button" type="button" data-action="refresh-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="refresh-cw"></i><span>刷新余额</span></button><button class="secondary-button compact-provider-button" type="button" data-action="manual-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="pencil"></i><span>手工录入</span></button></div></div>
+        <label class="check-row"><input name="auto_publish" type="checkbox"><span>同步后自动发布符合条件的文本模型（生产环境建议关闭）</span></label>
+      <p class="dialog-copy">系统会读取厂家真实模型目录，为整系列复用该连接并更新健康状态。图像、视频等尚未接入统一调用适配器的模型会保留为候选，不会错误标记为可调用。同步完成后，请在模型列表中逐个核对官方价格、平台售价和渠道采购成本，再决定是否发布。</p>
+      </div>
+      <div class="dialog-actions provider-dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="secondary-button" type="button" data-action="test-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>测试连接</span></button><button class="primary-button" type="submit"><i data-lucide="refresh-cw"></i><span>${connection ? "重新同步系列" : "配置并同步系列"}</span></button></div>
+    </form>`);
+  document.getElementById("provider-connection-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const rawKey = String(form.get("provider_api_key") || "").trim();
+    const envName = String(form.get("provider_api_key_env") || "").trim();
+    const payload = {
+      provider_base_url: String(form.get("provider_base_url") || "").trim(),
+      provider_api_key_env: envName || null,
+      default_input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(form.get("default_input_price")),
+      default_output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(form.get("default_output_price")),
+      balance_alert_threshold_micros: Math.round(Number(form.get("balance_alert_threshold") || 0) * 1000000),
+      auto_publish: form.get("auto_publish") === "on",
+    };
+    if (rawKey) payload.provider_api_key = rawKey;
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    try {
+      const result = await api(`/admin/provider-connections/${presetId}`, { method: "PUT", body: JSON.stringify(payload) });
+      closeDialog();
+      const pricedCount = result.models.filter((item) => item.input_price_micros_per_1k > 0 && item.output_price_micros_per_1k > 0).length;
+      const pendingPriceCount = result.models.length - pricedCount;
+      toast(`${preset.name} 已同步 ${result.models.length} 个模型，其中 ${pricedCount} 个已配置单模型价格、${result.connection.callable_model_count} 个可调用${pendingPriceCount ? `，${pendingPriceCount} 个待核价` : ""}`);
+      await loadModels();
+    } catch (error) {
+      submit.disabled = false;
+      toast(error.message, true);
+    }
+  });
+  document.querySelector('[data-action="test-provider"]').addEventListener("click", async (event) => {
+    const form = new FormData(document.getElementById("provider-connection-form"));
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api(`/admin/provider-connections/${presetId}/test`, { method: "POST", body: JSON.stringify({ provider_base_url: String(form.get("provider_base_url") || "").trim(), provider_api_key_env: String(form.get("provider_api_key_env") || "").trim() || null, provider_api_key: String(form.get("provider_api_key") || "").trim() || null }) });
+      toast(`连接成功：发现 ${result.discovered_model_count} 个模型，耗时 ${result.latency_ms} ms`);
+    } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+  });
+  icons();
+}
+
+function manualProviderBalanceDialog(presetId) {
+  const preset = state.providerPresets.find((item) => item.id === presetId);
+  if (!preset) return;
+  openDialog(`手工记录余额 · ${preset.name}`, `<form id="manual-provider-balance-form"><div class="dialog-body"><p class="dialog-copy">当供应商没有公开余额 API 时，可从供应商控制台读取当前可用余额并记录。该记录会进入审计和采购预警，不会修改用户额度。</p><div class="field-row"><div class="field"><label for="manual-provider-balance-amount">可用余额</label><input id="manual-provider-balance-amount" name="amount" type="number" min="0" step="0.01" required></div><div class="field"><label for="manual-provider-balance-currency">币种</label><input id="manual-provider-balance-currency" name="currency" value="CNY" maxlength="12" required></div></div><div class="field"><label for="manual-provider-balance-note">备注（可选）</label><input id="manual-provider-balance-note" name="note" maxlength="255" placeholder="例如：2026-08-21 供应商控制台截图核验"></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存记录</span></button></div></form>`);
+  document.getElementById("manual-provider-balance-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const submit = event.currentTarget.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    try {
+      await api(`/admin/provider-connections/${presetId}/balance/manual`, { method: "POST", body: JSON.stringify({ amount: Number(form.get("amount")), currency: String(form.get("currency") || "CNY").trim(), note: String(form.get("note") || "").trim() || null }) });
+      closeDialog();
+      toast(`${preset.name} 上游余额记录已更新`);
+      await loadModels();
+    } catch (error) { submit.disabled = false; toast(error.message, true); }
+  });
   icons();
 }
 
@@ -806,7 +942,7 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
       <div class="dialog-body">
         <div class="field-row"><div class="field"><label for="model-input-price">输入价格 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">输出价格 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
         ${reference}
-        <p class="dialog-copy">平台价格使用人民币；新价格会用于后续请求，已结算请求不会被修改。</p>
+        <p class="dialog-copy">这里维护该模型面向 LokToken 用户的最终售价，按人民币 / 1M Token 计费；不同模型可以使用不同价格。供应商采购成本请在该模型的“渠道”中单独维护。新价格会用于后续请求，已结算请求不会被修改。</p>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存定价</span></button></div>
     </form>`);
@@ -1099,6 +1235,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
     if (target.dataset.action === "preflight-model") preflightModel(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "import-models") modelImportDialog().catch((error) => toast(error.message, true));
+    if (target.dataset.action === "configure-provider") providerConnectionDialog(target.dataset.providerId);
+    if (target.dataset.action === "manual-provider-balance") manualProviderBalanceDialog(target.dataset.providerId);
+    if (target.dataset.action === "refresh-provider-balance") {
+      const providerId = target.dataset.providerId;
+      target.disabled = true;
+      api(`/admin/provider-connections/${providerId}/balance/refresh`, { method: "POST", body: "{}" }).then(async (result) => {
+        state.providerConnections = state.providerConnections.map((item) => item.preset_id === providerId ? result.connection : item);
+        closeDialog();
+        toast(result.connection.balance_status === "available" ? "上游余额已更新" : (result.connection.balance_error || "该供应商暂不支持自动余额查询"));
+        await loadModels();
+      }).catch((error) => { target.disabled = false; toast(error.message, true); });
+    }
     if (target.dataset.action === "edit-model-pricing") modelPricingDialog(target.dataset.id, target.dataset.name, target.dataset.inputPrice, target.dataset.outputPrice);
     if (target.dataset.action === "manage-channels") channelDialog(target.dataset.id, target.dataset.name).catch((error) => toast(error.message, true));
     if (target.dataset.action === "edit-channel") editChannelDialog(target.dataset.id, target.dataset.modelId, target.dataset.modelName);
