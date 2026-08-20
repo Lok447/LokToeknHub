@@ -436,6 +436,8 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'id="admin-guide-link"' in admin_page and 'id="portal-guide-link"' in portal_page
         assert 'href="/guide/admin"' in admin_page and 'href="/guide/user"' in portal_page
         assert 'id="portal-register-link"' in portal_page and "无法登录" not in portal_page
+        assert 'data-auth-mode="register"' not in portal_page
+        assert 'id="portal-register-form"' in portal_page
         assert 'setAuthMode("register")' in portal_script
         assert 'document.getElementById("admin-guide-link").hidden = view !== "overview";' in admin_script
         assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script

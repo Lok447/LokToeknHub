@@ -1,7 +1,7 @@
 .workspace-switcher { display: grid; gap: 2px; min-width: 0; }
 .workspace-switcher label { color: var(--muted); font-size: 9px; font-weight: 700; }
 .workspace-switcher select { width: 100%; height: 30px; padding: 0 25px 0 8px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); background: var(--surface); font-size: 11px; font-weight: 700; }
-.auth-mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 20px 0 18px; padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
+.auth-mode-tabs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; margin: 20px 0 18px; padding: 3px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
 .auth-mode-tabs button { min-height: 31px; border: 0; border-radius: 3px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
 .auth-mode-tabs button.active { color: var(--ink); background: var(--surface); box-shadow: 0 1px 3px rgba(17, 24, 32, 0.1); }
 .auth-login-support { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 2px; color: var(--muted); font-size: 10px; }
