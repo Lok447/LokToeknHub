@@ -797,7 +797,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260819-11"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260820-3"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
