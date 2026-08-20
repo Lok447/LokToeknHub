@@ -69,7 +69,7 @@
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>用户概览</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="store"></i><span>模型广场</span></button>
         <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
@@ -149,7 +149,7 @@
         </section>
 
         <section class="view" id="portal-view-keys">
-          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="icon-button" id="keys-refresh" type="button" title="刷新 Key" aria-label="刷新 Key"><i data-lucide="refresh-cw"></i></button><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
+          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
           <div class="metric-grid compact key-metrics" id="portal-keys-metrics"></div>
           <section class="panel key-workspace">
             <div class="key-toolbar">
@@ -182,7 +182,7 @@
               <div class="field"><label for="usage-from-filter">开始时间</label><input id="usage-from-filter" name="from" type="datetime-local"></div>
               <div class="field"><label for="usage-to-filter">结束时间</label><input id="usage-to-filter" name="to" type="datetime-local"></div>
             </div>
-            <div class="usage-filter-actions"><button class="primary-button" type="submit"><i data-lucide="search"></i><span>查询</span></button><button class="secondary-button" id="usage-reset" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button><button class="icon-button" id="usage-refresh" type="button" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button><button class="icon-button" id="usage-export" type="button" title="导出 CSV" aria-label="导出 CSV"><i data-lucide="download"></i></button></div>
+            <div class="usage-filter-actions"><button class="primary-button" type="submit"><i data-lucide="search"></i><span>查询</span></button><button class="secondary-button" id="usage-reset" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button><button class="icon-button" id="usage-export" type="button" title="导出 CSV" aria-label="导出 CSV"><i data-lucide="download"></i></button></div>
           </form>
 
           <div class="request-analytics-grid">
@@ -221,11 +221,11 @@
             <section class="panel quota-action-panel"><div><div class="quota-action-icon blue"><i data-lucide="circle-plus"></i></div><h2>充值额度</h2><p>创建充值申请，到账后自动计入账户余额。</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建充值申请</span></button></section>
             <section class="panel quota-action-panel"><div><div class="quota-action-icon green"><i data-lucide="gift"></i></div><h2>兑换福利</h2><p>使用兑换码领取可用额度，核销成功后即时到账。</p></div><button class="secondary-button" data-go="redeem"><i data-lucide="arrow-right"></i><span>前往兑换</span></button></section>
           </div>
-          <section class="panel quota-history-panel"><div class="section-header"><div><h2>余额变动</h2><p id="quota-history-count">最近 0 条记录</p></div><button class="icon-button" id="quota-refresh" type="button" title="刷新余额记录" aria-label="刷新余额记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table class="quota-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>参考编号</th><th class="align-right">金额</th></tr></thead><tbody id="portal-transactions-table"></tbody></table></div></section>
+          <section class="panel quota-history-panel"><div class="section-header"><div><h2>余额变动</h2><p id="quota-history-count">最近 0 条记录</p></div></div><div class="table-wrap"><table class="quota-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>参考编号</th><th class="align-right">金额</th></tr></thead><tbody id="portal-transactions-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="portal-view-orders">
-          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="icon-button" id="orders-refresh" type="button" title="刷新订单" aria-label="刷新订单"><i data-lucide="refresh-cw"></i></button><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
+          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
           <section class="panel orders-workspace"><div class="orders-toolbar"><div class="field"><label for="order-status-filter">订单状态</label><select id="order-status-filter"><option value="">全部订单</option><option value="pending">待处理</option><option value="paid">已入账</option><option value="refunded">已退款</option></select></div><span id="order-result-count">共 0 个订单</span></div><div class="table-wrap"><table class="orders-table"><thead><tr><th>订单号</th><th>支付方式</th><th>金额</th><th>状态</th><th>创建时间</th><th>到账时间</th></tr></thead><tbody id="portal-orders-table"></tbody></table></div></section>
         </section>
 
@@ -235,7 +235,7 @@
             <section class="redeem-balance-panel"><i data-lucide="wallet-cards"></i><span>当前可用余额</span><strong id="redeem-balance">-</strong><small id="redeem-claim-count">暂无兑换记录</small></section>
             <section class="panel redeem-form-panel"><div class="section-header"><div><h2>兑换码</h2><p>兑换码区分大小写</p></div></div><form id="portal-redeem-form"><div class="input-with-icon"><i data-lucide="gift"></i><input id="redeem-code" name="code" autocomplete="off" required minlength="8" maxlength="120" placeholder="请输入兑换码"></div><button class="primary-button" type="submit"><i data-lucide="circle-check-big"></i><span>立即兑换</span></button></form></section>
             <section class="redeem-notice"><i data-lucide="info"></i><div><strong>关于兑换福利</strong><ul><li>每个账户对同一兑换码仅可领取一次。</li><li>兑换成功后，额度会即时计入当前账户。</li><li>无效、过期或已用尽的兑换码无法重复核销。</li></ul></div></section>
-            <section class="panel redeem-history-panel"><div class="section-header"><div><h2>兑换记录</h2><p id="redeem-history-count">最近 0 条记录</p></div><button class="icon-button" id="redeem-refresh" type="button" title="刷新兑换记录" aria-label="刷新兑换记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换时间</th><th class="align-right">到账额度</th></tr></thead><tbody id="portal-redemptions-table"></tbody></table></div></section>
+            <section class="panel redeem-history-panel"><div class="section-header"><div><h2>兑换记录</h2><p id="redeem-history-count">最近 0 条记录</p></div></div><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换时间</th><th class="align-right">到账额度</th></tr></thead><tbody id="portal-redemptions-table"></tbody></table></div></section>
           </div>
         </section>
       </div>

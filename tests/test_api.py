@@ -443,7 +443,7 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script
 
         admin_nav = ["管理概览", "模型管理", "账户管理", "API管理", "订单管理", "福利管理", "用量管理", "安全审计"]
-        portal_nav = ["用户概览", "模型广场", "额度管理", "API管理", "请求记录", "订单管理", "兑换福利"]
+        portal_nav = ["用户概览", "模型广场", "额度管理", "密钥管理", "请求记录", "订单管理", "兑换福利"]
         admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
         portal_nav_markup = portal_page.split('<nav aria-label="用户导航">', 1)[1].split("</nav>", 1)[0]
         assert [admin_nav_markup.index(label) for label in admin_nav] == sorted(admin_nav_markup.index(label) for label in admin_nav)
@@ -453,7 +453,7 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
             "payments": "订单管理", "redemptions": "福利管理", "usage": "用量管理", "audit": "安全审计",
         }.items())
         assert all(f'{key}: "{label}"' in portal_script for key, label in {
-            "overview": "用户概览", "models": "模型广场", "quota": "额度管理", "keys": "API管理",
+            "overview": "用户概览", "models": "模型广场", "quota": "额度管理", "keys": "密钥管理",
             "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
         }.items())
 
@@ -786,7 +786,8 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         portal_page = await client.get("/portal")
         assert portal_page.status_code == 200
         assert "LokToken用户中心" in portal_page.text
-        assert '<span>API管理</span>' in portal_page.text
+        assert '<span>密钥管理</span>' in portal_page.text
+        assert '<span>API管理</span>' not in portal_page.text
         assert 'src="/static/portal.js?v=portal-20260819-11"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
@@ -799,6 +800,8 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert 'id="portal-workspace-manager"' in portal_page.text
         assert 'id="portal-security"' in portal_page.text
         assert 'id="portal-refresh"' in portal_page.text
+        for local_refresh_id in ("keys-refresh", "quota-refresh", "orders-refresh", "redeem-refresh", "usage-refresh"):
+            assert f'id="{local_refresh_id}"' not in portal_page.text
         assert "LokSystem 一键注册 / 登录" in portal_page.text
         assert 'id="loksystem-login-button"' in portal_page.text
         assert portal_page.text.index('id="portal-login-form"') < portal_page.text.index('id="loksystem-login-button"') < portal_page.text.index('id="portal-register-form"')
@@ -812,7 +815,9 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "loksystem://add-provider?platform=LokToken" in portal_script.text
         assert "应用接入" in portal_script.text
         assert "在应用中完成配置" in portal_script.text
-        assert 'keys: "API管理"' in portal_script.text
+        assert 'keys: "密钥管理"' in portal_script.text
+        for local_refresh_id in ("keys-refresh", "quota-refresh", "orders-refresh", "redeem-refresh", "usage-refresh"):
+            assert local_refresh_id not in portal_script.text
         assert "if (loksystemStatus.enabled) loksystemLoginButton.hidden = false;" in portal_script.text
         assert "创建 API Key" not in portal_script.text
 

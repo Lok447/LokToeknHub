@@ -16,7 +16,7 @@ const portalState = {
   marketplace: { query: "", modality: "all" },
 };
 
-const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "API管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
+const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "密钥管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
 
 function portalIcons() {
   if (window.lucide) window.lucide.createIcons();
@@ -1087,15 +1087,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("portal-security").addEventListener("click", () => { closePortalAccountMenu(); portalSecurityDialog(); });
   document.getElementById("portal-workspace-manager").addEventListener("click", () => { closePortalAccountMenu(); workspaceManagerDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
-  document.getElementById("keys-refresh").addEventListener("click", () => loadKeys().catch((error) => portalToast(error.message, true)));
   document.getElementById("key-search").addEventListener("input", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
   document.getElementById("key-search").addEventListener("change", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
   document.getElementById("key-status-filter").addEventListener("change", (event) => { portalState.keyFilters.status = event.target.value; renderKeyTable(); });
   document.getElementById("model-marketplace-search").addEventListener("input", (event) => { portalState.marketplace.query = event.target.value; renderModelMarketplace(); });
-  document.getElementById("quota-refresh").addEventListener("click", () => loadQuota().catch((error) => portalToast(error.message, true)));
-  document.getElementById("orders-refresh").addEventListener("click", () => loadOrders().catch((error) => portalToast(error.message, true)));
   document.getElementById("order-status-filter").addEventListener("change", renderOrders);
-  document.getElementById("redeem-refresh").addEventListener("click", () => loadRedeem().catch((error) => portalToast(error.message, true)));
   document.getElementById("portal-redeem-form").addEventListener("submit", (event) => {
     event.preventDefault();
     redeemBenefit(event.currentTarget).catch((error) => portalToast(error.message, true));
@@ -1105,7 +1101,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("usage-reset").addEventListener("click", () => {
     const form = document.getElementById("portal-usage-filter"); form.reset(); document.getElementById("usage-range-filter").value = "7d"; document.getElementById("usage-status-filter").value = ""; portalState.usage.page = 1; toggleUsageCustomDates(); loadUsage().catch((error) => portalToast(error.message, true));
   });
-  document.getElementById("usage-refresh").addEventListener("click", () => loadUsage().catch((error) => portalToast(error.message, true)));
   document.getElementById("usage-export").addEventListener("click", () => exportUsage().then(() => portalToast("请求记录文件已导出")).catch((error) => portalToast(error.message, true)));
   document.getElementById("usage-page-size").addEventListener("change", (event) => { portalState.usage.pageSize = Number(event.target.value); portalState.usage.page = 1; loadUsage().catch((error) => portalToast(error.message, true)); });
   document.getElementById("usage-page-prev").addEventListener("click", () => { if (portalState.usage.page > 1) { portalState.usage.page -= 1; loadUsage().catch((error) => portalToast(error.message, true)); } });
