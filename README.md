@@ -34,6 +34,19 @@ uvicorn app.main:app --reload
 
 默认关闭 Mock（`TOKEN_MOCK_MODE=false`），服务只调用已配置的真实供应商。测试需要联调模拟链路时，必须在测试环境显式设置 `TOKEN_MOCK_MODE=true` 和 `TOKEN_SEED_BUILTIN_MODELS=true`；生产环境不得启用这两个开关。供应商密钥通过 `provider_api_key_env` 引用环境变量，不写入数据库。
 
+### 真实数据口径与本地 UAT 清理
+
+管理概览的余额、请求、Token、消费、账户和渠道状态均来自数据库账本与当前渠道检测结果，不由前端静态生成。`TOKEN_MOCK_MODE=false` 只代表请求走真实供应商链路；`TOKEN_ENVIRONMENT=development` 仍表示开发环境，历史 UAT/Smoke 请求不应被当作生产流量。
+
+本地完成 UAT 后，可先预览带有明确测试标识的账户，再执行清理。脚本只删除这些账户及其 Key、请求、余额流水、订单和登录关联，保留模型配置、供应商渠道和审计事件：
+
+```powershell
+python scripts/cleanup_uat_data.py
+python scripts/cleanup_uat_data.py --execute
+```
+
+生产环境不要使用该脚本；生产数据应通过环境隔离、数据库权限和正式迁移管理。
+
 管理台的 DeepSeek 预设已提供 `deepseek-v4-flash` 与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
 
 真实模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
