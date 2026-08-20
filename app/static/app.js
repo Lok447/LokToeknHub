@@ -7,6 +7,7 @@ const state = {
   channels: [],
   identity: null,
   modelFilters: { query: "", provider: "", type: "", publicationState: "" },
+  modelProviderDetail: "",
 };
 
 function isSuperadmin() {
@@ -64,7 +65,7 @@ const titles = {
   overview: "管理概览",
   models: "模型管理",
   accounts: "账户管理",
-  keys: "API管理",
+  keys: "密钥管理",
   payments: "订单管理",
   redemptions: "福利管理",
   usage: "用量管理",
@@ -346,7 +347,69 @@ async function loadModels() {
   const providers = [...new Set(state.models.map((item) => item.catalog_metadata?.provider || "自定义").filter(Boolean))].sort();
   providerSelect.innerHTML = '<option value="">全部服务商</option>' + providers.map((provider) => `<option value="${escapeHtml(provider)}">${escapeHtml(provider)}</option>`).join("");
   providerSelect.value = selectedProvider;
+  if (state.modelProviderDetail && state.modelProviderDetail !== "__more__" && !providers.includes(state.modelProviderDetail)) state.modelProviderDetail = "";
   renderModels();
+}
+
+function providerInitial(provider) {
+  return String(provider || "自定义").slice(0, 1).toUpperCase();
+}
+
+function providerLogoSlug(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  if (name.includes("deepseek")) return "deepseek";
+  if (name.includes("qwen") || name.includes("通义")) return "qwen";
+  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "";
+  if (name.includes("kimi")) return "kimi";
+  if (name.includes("moonshot")) return "moonshotai";
+  if (name.includes("minimax")) return "minimax";
+  if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "bytedance";
+  return "";
+}
+
+function providerLogo(provider, className = "provider-logo-image") {
+  const slug = providerLogoSlug(provider);
+  return slug ? `<img class="${className}" src="https://cdn.simpleicons.org/${slug}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${escapeHtml(providerInitial(provider))}</span>` : escapeHtml(providerInitial(provider));
+}
+
+const featuredProviders = ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"];
+function isFeaturedProvider(provider) { return featuredProviders.some((name) => String(provider || "").toLocaleLowerCase().includes(name)); }
+function providerDescription(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  if (name.includes("deepseek")) return "面向高强度推理与复杂应用的通用大模型系列，适合研发、开发与智能体场景。";
+  if (name.includes("qwen")) return "通义大模型体系，覆盖文本、多模态与视觉能力，适合企业级 AI 应用落地。";
+  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "GLM 通用大模型系列，覆盖中文理解、生成、对话与代码等企业应用能力。";
+  if (name.includes("kimi")) return "Moonshot AI 通用大模型体系，聚焦长上下文理解、高质量推理与知识整合。";
+  if (name.includes("minimax")) return "MiniMax 文本、多模态与内容生成模型，适合 Agent、创作与交互场景。";
+  if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "字节跳动模型服务，覆盖文本、视觉、图像与视频生成能力。";
+  return "来自生态合作伙伴的模型系列，按统一接口接入并由平台集中管理。";
+}
+
+function renderAdminProviderCards(models) {
+  const grid = document.getElementById("admin-provider-grid");
+  const list = document.getElementById("admin-model-list");
+  const back = document.getElementById("admin-model-provider-back");
+  if (state.modelProviderDetail) {
+    grid.hidden = true;
+    list.hidden = false;
+    back.hidden = false;
+    return;
+  }
+  list.hidden = true;
+  grid.hidden = false;
+  back.hidden = true;
+  const grouped = [...new Map(models.map((item) => [item.catalog_metadata?.provider || "自定义", models.filter((candidate) => (candidate.catalog_metadata?.provider || "自定义") === (item.catalog_metadata?.provider || "自定义"))])).values()];
+  const featured = grouped.filter((items) => isFeaturedProvider(items[0].catalog_metadata?.provider || ""));
+  const otherModels = grouped.filter((items) => !isFeaturedProvider(items[0].catalog_metadata?.provider || "")).flat();
+  grid.innerHTML = featured.length || otherModels.length ? featured.map((items, index) => {
+    const provider = items[0].catalog_metadata?.provider || "自定义";
+    const typeCounts = [...new Set(items.map(modelCategory))].map((type) => `${type === "text" ? "文本" : type === "image" ? "图像" : type === "video" ? "视频" : "语音"} ${items.filter((item) => modelCategory(item) === type).length}`).join(" · ");
+    const healthy = items.reduce((sum, item) => sum + Number(item.healthy_channel_count || 0), 0);
+    const channels = items.reduce((sum, item) => sum + Number(item.channel_count || 0), 0);
+    const chips = items.slice(0, 3).map((item) => `<span>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</span>`).join("");
+    return `<button class="admin-provider-card tone-${index % 5}" type="button" data-model-provider="${escapeHtml(provider)}"><span class="admin-provider-logo">${providerLogo(provider)}</span><span class="admin-provider-copy"><strong>${escapeHtml(provider)}</strong><p>${escapeHtml(providerDescription(provider))}</p><span class="provider-model-chips">${chips}</span><small>${items.length} 个模型 · ${typeCounts || "待分类"} · ${healthy}/${channels} 渠道健康</small><b>探索系列 <i data-lucide="arrow-right"></i></b></span></button>`;
+  }).join("") + `<button class="admin-provider-card provider-more-card" type="button" data-model-provider-more><span class="admin-provider-more-icon"><i data-lucide="search"></i></span><span class="admin-provider-copy"><strong>更多系列 / 厂商查询</strong><p>${otherModels.length ? "浏览其他第三方及新增模型" : "接入更多第三方模型"}</p><b>进入查询 <i data-lucide="arrow-right"></i></b></span></button>` : '<div class="empty-state compact"><i data-lucide="boxes"></i><span>没有符合筛选条件的供应商</span></div>';
+  icons();
 }
 
 function renderModels() {
@@ -369,8 +432,11 @@ function renderModels() {
       && (!filters.type || modelCategory(item) === filters.type)
       && (!filters.publicationState || item.publication_state === filters.publicationState);
   });
-  document.getElementById("model-result-count").textContent = `显示 ${models.length} / 共 ${state.models.length} 个模型`;
-  document.getElementById("models-table").innerHTML = models.length ? models.map((item) => {
+  const detailModels = state.modelProviderDetail === "__more__" ? models.filter((item) => !isFeaturedProvider(item.catalog_metadata?.provider || "")) : state.modelProviderDetail ? models.filter((item) => (item.catalog_metadata?.provider || "自定义") === state.modelProviderDetail) : models;
+  document.getElementById("model-result-count").textContent = state.modelProviderDetail ? `${state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail} · ${detailModels.length} 个模型` : `${new Set(models.map((item) => item.catalog_metadata?.provider || "自定义")).size} 家供应商 · ${models.length} 个模型`;
+  renderAdminProviderCards(models);
+  if (!state.modelProviderDetail) return;
+  document.getElementById("models-table").innerHTML = detailModels.length ? detailModels.map((item) => {
     const publishBlocked = item.publication_state === "blocked" && !item.active;
     const publishLabel = item.active ? "下架" : publishBlocked ? "完善后上架" : "上架";
     const publishTitle = publishBlocked ? ` title="${escapeHtml(item.publication_reasons.join("；"))}" disabled` : "";
@@ -1005,7 +1071,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view));
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
-  document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; renderModels(); });
+  document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; state.modelProviderDetail = ""; renderModels(); });
   document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
   document.getElementById("model-state-filter").addEventListener("change", (event) => { state.modelFilters.publicationState = event.target.value; renderModels(); });
   document.getElementById("close-dialog").addEventListener("click", closeDialog);
@@ -1016,6 +1082,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!target) return;
     if (target.dataset.close !== undefined) closeDialog();
     if (target.dataset.go) switchView(target.dataset.go);
+    if (target.dataset.modelProvider) { state.modelProviderDetail = target.dataset.modelProvider; state.modelFilters.provider = target.dataset.modelProvider; document.getElementById("model-provider-filter").value = target.dataset.modelProvider; renderModels(); }
+    if (target.dataset.modelProviderMore !== undefined) { state.modelProviderDetail = "__more__"; state.modelFilters.provider = ""; document.getElementById("model-provider-filter").value = ""; renderModels(); }
+    if (target.dataset.modelProviderBack !== undefined) { state.modelProviderDetail = ""; state.modelFilters.provider = ""; document.getElementById("model-provider-filter").value = ""; renderModels(); }
     if (target.dataset.action === "create-account") accountDialog();
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();

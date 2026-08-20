@@ -13,7 +13,7 @@ const portalState = {
   keyFilters: { search: "", status: "" },
   keyColumns: { name: true, key: true, usage: true, expires: true, "last-used": true, status: true, created: true },
   orders: [],
-  marketplace: { query: "", modality: "all" },
+  marketplace: { query: "", modality: "all", provider: "" },
 };
 
 const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "密钥管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
@@ -558,6 +558,24 @@ function modelIcon(item) {
   return item.builtin ? "sparkles" : "boxes";
 }
 
+function portalProviderDescription(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  if (name.includes("deepseek")) return "面向高强度推理与复杂应用的通用大模型系列，适合研发、开发与智能体场景。";
+  if (name.includes("qwen")) return "通义大模型体系，覆盖文本、多模态与视觉能力，适合企业级 AI 应用落地。";
+  if (name.includes("智谱") || name.includes("zhipu") || name.includes("glm")) return "GLM 通用大模型系列，覆盖中文理解、生成、对话与代码等企业应用能力。";
+  if (name.includes("kimi")) return "Moonshot AI 通用大模型体系，聚焦长上下文理解、高质量推理与知识整合。";
+  if (name.includes("minimax")) return "MiniMax 文本、多模态与内容生成模型，适合 Agent、创作与交互场景。";
+  if (name.includes("doubao") || name.includes("豆包") || name.includes("字节")) return "字节跳动模型服务，覆盖文本、视觉、图像与视频生成能力。";
+  return "来自生态合作伙伴的模型系列，按统一接口接入并由平台集中管理。";
+}
+
+function portalProviderLogo(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  const slug = name.includes("deepseek") ? "deepseek" : name.includes("qwen") || name.includes("通义") ? "qwen" : name.includes("智谱") || name.includes("zhipu") || name.includes("glm") ? "" : name.includes("kimi") ? "kimi" : name.includes("moonshot") ? "moonshotai" : name.includes("minimax") ? "minimax" : name.includes("doubao") || name.includes("豆包") || name.includes("字节") ? "bytedance" : "";
+  const initial = escapeHtml(String(provider || "自定义").slice(0, 1).toUpperCase());
+  return slug ? `<img class="provider-logo-image" src="https://cdn.simpleicons.org/${slug}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${initial}</span>` : initial;
+}
+
 function matchesMarketplaceModel(item) {
   const query = portalState.marketplace.query.trim().toLocaleLowerCase();
   const terms = [item.public_name, item.display_name, item.provider, item.summary, ...(item.capabilities || [])].join(" ").toLocaleLowerCase();
@@ -571,8 +589,14 @@ function renderModelMarketplace() {
     const count = value === "all" ? portalState.models.length : portalState.models.filter((item) => (item.modalities || []).includes(value)).length;
     return `<button type="button" class="${portalState.marketplace.modality === value ? "active" : ""}" data-model-filter="${value}">${label}<span>${count}</span></button>`;
   }).join("");
-  document.getElementById("model-marketplace-count").textContent = `已展示 ${visibleModels.length} / ${portalState.models.length} 个模型`;
-  document.getElementById("portal-models-table").innerHTML = visibleModels.length ? visibleModels.map((item) => `
+  const container = document.getElementById("portal-models-table");
+  const providerBack = document.getElementById("model-marketplace-provider-back");
+  if (portalState.marketplace.provider) {
+    const detailModels = portalState.marketplace.provider === "__more__" ? visibleModels.filter((item) => !["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(item.provider || "").toLocaleLowerCase().includes(name))) : visibleModels.filter((item) => (item.provider || "LokSystem") === portalState.marketplace.provider);
+    document.getElementById("model-marketplace-count").textContent = `${portalState.marketplace.provider === "__more__" ? "更多系列 / 厂商查询" : portalState.marketplace.provider} · ${detailModels.length} 个模型`;
+    providerBack.hidden = false;
+    container.classList.remove("provider-catalog-grid");
+    container.innerHTML = detailModels.length ? detailModels.map((item) => `
     <article class="model-catalog-card ${item.builtin ? "is-builtin" : ""}">
       <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span class="model-provider">${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
       <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
@@ -581,6 +605,20 @@ function renderModelMarketplace() {
       <div class="model-card-footer"><span><i data-lucide="activity"></i> ${modelHealth(item)}</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
     </article>
   `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
+  } else {
+    const providers = [...new Map(visibleModels.map((item) => [item.provider || "LokSystem", visibleModels.filter((candidate) => (candidate.provider || "LokSystem") === (item.provider || "LokSystem"))])).values()];
+    const featured = providers.filter((items) => ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name)));
+    const otherModels = providers.filter((items) => !["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name))).flat();
+    document.getElementById("model-marketplace-count").textContent = `${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
+    providerBack.hidden = true;
+    container.classList.add("provider-catalog-grid");
+    container.innerHTML = featured.length || otherModels.length ? featured.map((items) => {
+      const provider = items[0].provider || "LokSystem";
+      const categories = [...new Set(items.map((item) => (item.modalities || []).includes("image") ? "图像" : (item.modalities || []).includes("reasoning") ? "推理" : "文本"))].join(" · ");
+      const chips = items.slice(0, 3).map((item) => `<em>${escapeHtml(item.display_name || item.public_name)}</em>`).join("");
+      return `<button class="portal-provider-card" type="button" data-model-provider="${escapeHtml(provider)}"><span class="portal-provider-logo">${portalProviderLogo(provider)}</span><span><strong>${escapeHtml(provider)}</strong><p>${escapeHtml(portalProviderDescription(provider))}</p><span class="portal-provider-chips">${chips}</span><small>${items.length} 个模型 · ${categories} · ${items.filter((item) => item.health_status === "healthy").length} 个健康模型</small><b>探索系列 <i data-lucide="arrow-right"></i></b></span></button>`;
+    }).join("") + '<button class="portal-provider-card provider-more-card" type="button" data-model-provider-more><span class="portal-provider-logo"><i data-lucide="search"></i></span><span><strong>更多系列 / 厂商查询</strong><small>浏览其他第三方及新增模型</small><small>进入查询</small></span><i data-lucide="arrow-right"></i></button>' : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
+  }
   portalIcons();
 }
 
@@ -1132,6 +1170,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
     if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }
     if (target.dataset.modelFilter) { portalState.marketplace.modality = target.dataset.modelFilter; renderModelMarketplace(); }
+    if (target.dataset.modelProvider) { portalState.marketplace.provider = target.dataset.modelProvider; renderModelMarketplace(); }
+    if (target.dataset.modelProviderMore !== undefined) { portalState.marketplace.provider = "__more__"; renderModelMarketplace(); }
+    if (target.dataset.modelProviderBack !== undefined) { portalState.marketplace.provider = ""; renderModelMarketplace(); }
     if (target.dataset.modelDetail) modelDetailDialog(target.dataset.modelDetail);
     if (target.dataset.copyModelCode) {
       const model = portalState.models.find((item) => item.public_name === target.dataset.modelName);

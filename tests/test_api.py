@@ -442,20 +442,29 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'document.getElementById("admin-guide-link").hidden = view !== "overview";' in admin_script
         assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script
 
-        admin_nav = ["管理概览", "模型管理", "账户管理", "API管理", "订单管理", "福利管理", "用量管理", "安全审计"]
+        admin_nav = ["管理概览", "模型管理", "账户管理", "密钥管理", "订单管理", "福利管理", "用量管理", "安全审计"]
         portal_nav = ["用户概览", "模型广场", "额度管理", "密钥管理", "请求记录", "订单管理", "兑换福利"]
         admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
         portal_nav_markup = portal_page.split('<nav aria-label="用户导航">', 1)[1].split("</nav>", 1)[0]
         assert [admin_nav_markup.index(label) for label in admin_nav] == sorted(admin_nav_markup.index(label) for label in admin_nav)
         assert [portal_nav_markup.index(label) for label in portal_nav] == sorted(portal_nav_markup.index(label) for label in portal_nav)
         assert all(f'{key}: "{label}"' in admin_script for key, label in {
-            "overview": "管理概览", "models": "模型管理", "accounts": "账户管理", "keys": "API管理",
+            "overview": "管理概览", "models": "模型管理", "accounts": "账户管理", "keys": "密钥管理",
             "payments": "订单管理", "redemptions": "福利管理", "usage": "用量管理", "audit": "安全审计",
         }.items())
         assert all(f'{key}: "{label}"' in portal_script for key, label in {
             "overview": "用户概览", "models": "模型广场", "quota": "额度管理", "keys": "密钥管理",
             "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
         }.items())
+        assert 'id="admin-provider-grid"' in admin_page
+        assert 'id="admin-model-provider-back"' in admin_page
+        assert 'id="model-marketplace-provider-back"' in portal_page
+        assert "portal-provider-card" in portal_script
+        assert "admin-provider-card" in admin_script
+        assert "更多系列 / 厂商查询" in admin_script
+        assert "更多系列 / 厂商查询" in portal_script
+        assert "cdn.simpleicons.org" in admin_script
+        assert "cdn.simpleicons.org" in portal_script
 
         bootstrap = await client.post(
             "/admin/auth/bootstrap",

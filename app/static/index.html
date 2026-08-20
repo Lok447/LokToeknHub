@@ -13,7 +13,7 @@
   <section class="auth-screen" id="auth-screen">
     <div class="auth-layout">
       <section class="auth-product-intro">
-        <div class="auth-product-brand"><img src="/static/loksystem-icon.png" alt="LokSystem"><span><strong>LokSystem</strong><small>LOKTOKEN</small></span></div>
+        <div class="auth-product-brand"><img src="/static/loksystem-icon.png" alt="LokToken"><span><strong>LokToken</strong><small>MODEL GATEWAY</small></span></div>
         <div class="auth-product-copy"><p>UNIFIED MODEL SERVICE</p><h1>LokToken</h1><h2>统一模型接入与运营管理</h2><span>面向 LokSystem 生态的模型管理、账户额度、统一 API 与调用运营平台。</span></div>
         <div class="auth-product-points"><div><i data-lucide="boxes"></i><span>多模型统一接入</span></div><div><i data-lucide="shield-check"></i><span>账户与凭证治理</span></div><div><i data-lucide="activity"></i><span>调用链路可追溯</span></div></div>
       </section>
@@ -38,14 +38,14 @@
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
-        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+        <span class="brand-copy"><strong>LokToken</strong><small>MODEL GATEWAY</small></span>
       </div>
       <p class="nav-label">服务管理</p>
       <nav aria-label="主导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>管理概览</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型管理</span></button>
         <button class="nav-item" data-view="accounts"><i data-lucide="building-2"></i><span>账户管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button>
         <button class="nav-item" data-view="payments"><i data-lucide="credit-card"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redemptions"><i data-lucide="gift"></i><span>福利管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量管理</span></button>
@@ -104,7 +104,7 @@
         </section>
 
         <section class="view" id="view-keys">
-          <div class="section-header page-section-header"><div><h2>API Key</h2><p>账户访问凭证</p></div><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button></div>
+          <div class="section-header page-section-header"><div><h2>密钥管理</h2><p>账户访问凭证</p></div><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
         </section>
 
@@ -115,9 +115,10 @@
               <div class="input-with-icon"><i data-lucide="search"></i><input id="model-search" type="search" placeholder="搜索模型、上游 ID 或服务商" aria-label="搜索模型"></div>
               <select id="model-provider-filter" aria-label="服务商筛选"><option value="">全部服务商</option></select>
               <select id="model-state-filter" aria-label="发布状态筛选"><option value="">全部状态</option><option value="published">已上架</option><option value="candidate">候选</option><option value="blocked">待完善</option></select>
-              <span id="model-result-count">共 0 个模型</span>
+              <span id="model-result-count">共 0 个模型</span><button class="secondary-button compact-model-back" id="admin-model-provider-back" type="button" data-model-provider-back hidden><i data-lucide="arrow-left"></i><span>返回供应商</span></button>
             </div>
-            <div class="table-wrap"><table class="model-catalog-table"><thead><tr><th>公开模型</th><th>服务商</th><th>类型</th><th>平台输入 / 1M</th><th>平台输出 / 1M</th><th>渠道</th><th>健康</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div>
+            <div class="admin-provider-grid" id="admin-provider-grid"></div>
+            <div class="table-wrap" id="admin-model-list" hidden><table class="model-catalog-table"><thead><tr><th>公开模型</th><th>服务商</th><th>类型</th><th>平台输入 / 1M</th><th>平台输出 / 1M</th><th>渠道</th><th>健康</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div>
           </section>
         </section>
 
