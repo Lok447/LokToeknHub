@@ -174,6 +174,8 @@ class ModelChannelCreate(BaseModel):
     provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
     priority: int = Field(default=100, ge=0, le=10000)
     weight: int = Field(default=100, ge=1, le=10000)
+    provider_input_cost_micros_per_1k: int | None = Field(default=None, ge=0)
+    provider_output_cost_micros_per_1k: int | None = Field(default=None, ge=0)
     active: bool = True
 
 
@@ -186,6 +188,8 @@ class ModelChannelUpdate(BaseModel):
     clear_provider_api_key: bool = False
     priority: int | None = Field(default=None, ge=0, le=10000)
     weight: int | None = Field(default=None, ge=1, le=10000)
+    provider_input_cost_micros_per_1k: int | None = Field(default=None, ge=0)
+    provider_output_cost_micros_per_1k: int | None = Field(default=None, ge=0)
     active: bool | None = None
 
 
@@ -193,6 +197,21 @@ class ModelPreflightRequest(BaseModel):
     chat_probe: bool = False
     stream_probe: bool = False
     prompt: str = Field(default="Respond with OK.", min_length=1, max_length=500)
+
+
+class ProviderBillLineInput(BaseModel):
+    line_key: str | None = Field(default=None, min_length=1, max_length=160)
+    provider_request_id: str | None = Field(default=None, max_length=160)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    billed_cost_micros: int = Field(ge=0)
+    raw: dict[str, Any] | None = None
+
+
+class ProviderBillImportRequest(BaseModel):
+    provider: str = Field(min_length=1, max_length=64)
+    source_name: str = Field(min_length=1, max_length=255)
+    lines: list[ProviderBillLineInput] = Field(min_length=1, max_length=10000)
 
 
 class ChatMessage(BaseModel):
@@ -209,6 +228,17 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     temperature: float | None = None
     max_tokens: int | None = Field(default=None, gt=0, le=262144)
+    max_completion_tokens: int | None = Field(default=None, gt=0, le=262144)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    stop: str | list[str] | None = None
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
+    seed: int | None = None
+    response_format: dict[str, Any] | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
+    reasoning_effort: str | None = Field(default=None, max_length=32)
+    stream_options: dict[str, Any] | None = None
     stream: bool = False
     user: str | None = None
 

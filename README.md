@@ -4,6 +4,14 @@ TOKEN 是 loksystem 的统一模型调用和用量计费平台 MVP，当前版�
 
 TOKEN 1.2 面向 LokSystem 用户提供统一模型调用、账户额度、API Key、试用接入、充值订单和兑换福利。它与后续观测运营平台保持独立边界：TOKEN 只保存调用元数据和计费结果，不保存模型输入或输出正文。
 
+P0 生产网关基础已经补充 64 位微元账本、供应商请求与路由追踪、缓存/推理 Token、供应商成本、OpenAI 常用参数透传、模型元数据和 Prometheus 最小指标。生产环境通过 `TOKEN_MIN_REAL_PROVIDER_COUNT`（示例值为 3）约束真实发布供应商数量；未满足真实渠道、价格和健康检查时 `/admin/runtime` 的 `release_ready` 会保持 `false`。
+
+P1 运营治理已补充实时告警：管理概览和 `GET /admin/alerts` 会检查低余额、渠道熔断/异常、近期请求失败率、供应商成本倒挂和待处理订单，并标记是否阻断发布。告警按当前数据库数据计算，不依赖常驻调度器；生产环境可先接入 Prometheus，再将这些告警码映射到企业通知渠道。
+
+告警评估会以稳定指纹写入 `alert_incidents`，应用默认每 60 秒执行一次；同一告警持续存在时只更新状态，不重复通知，首次触发、重新触发和恢复时通过安全通知 Webhook 投递。可通过 `POST /admin/alerts/evaluate` 手动执行并查看投递结果。Webhook 使用 `X-LokToken-Signature` HMAC-SHA256 签名和 `X-LokToken-Event` 事件类型头，失败投递保持待处理并在后续周期重试。
+
+管理控制台“用量管理 → 供应商账单”支持导入归一化 JSON 账单。`POST /admin/provider-bills/import` 按 `provider_request_id`（缺失时可用平台 `request_id` 作为 `line_key`）逐笔核对 Token 和供应商成本，输出 `matched`、`mismatch`、`unmatched` 三种状态；相同供应商和相同内容哈希的账单不会重复导入。成本以微元传入，允许差异阈值由 `TOKEN_PROVIDER_BILL_COST_TOLERANCE_MICROS` 配置。
+
 ## 快速开始
 
 ```powershell

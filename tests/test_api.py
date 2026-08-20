@@ -21,7 +21,7 @@ from app.config import Settings, validate_startup_settings
 from app.guardrails import rate_limiter
 from app.main import app
 from app.config import get_settings
-from app.models import ApiKey, ExternalIdentity, UsageRecord
+from app.models import ApiKey, ExternalIdentity, ModelChannel, UsageRecord
 
 
 def setup_function() -> None:
@@ -1566,6 +1566,195 @@ async def test_channel_failover_opens_circuit_and_uses_backup(monkeypatch) -> No
         assert primary["circuit_open_until"] is not None
         assert backup_data["status"] == "healthy"
 
+
+@pytest.mark.asyncio
+async def test_p0_api_metadata_and_provider_route_cost_are_auditable(monkeypatch) -> None:
+    import app.services as services
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.setattr(settings, "default_provider_api_key", "test-provider")
+
+    class AuditedProviderClient(FakeProviderClient):
+        async def post(self, endpoint: str, **kwargs) -> FakeProviderResponse:
+            assert kwargs["json"]["max_tokens"] == 12
+            assert kwargs["json"]["response_format"] == {"type": "json_object"}
+            return FakeProviderResponse(200, {
+                "id": "provider-request-audited",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "{}"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 4,
+                    "total_tokens": 14,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                    "completion_tokens_details": {"reasoning_tokens": 1},
+                },
+            })
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        admin_headers = {"X-Admin-Token": "test-admin"}
+        key = await client.post("/admin/api-keys", headers=admin_headers, json={"name": "p0-audit-key"})
+        await client.post(f"/admin/api-keys/{key.json()['id']}/balance", headers=admin_headers, json={"amount_micros": 100_000, "idempotency_key": "p0-audit-topup"})
+        model = await client.post("/admin/models", headers=admin_headers, json={"public_name": "p0-audit-model", "upstream_model": "provider-model", "provider_base_url": "https://provider.invalid/v1", "input_price_micros_per_1k": 1000, "output_price_micros_per_1k": 2000})
+        channel_id = (await client.get(f"/admin/models/{model.json()['id']}/channels", headers=admin_headers)).json()["data"][0]["id"]
+        await client.patch(f"/admin/channels/{channel_id}", headers=admin_headers, json={"status": "healthy", "provider_input_cost_micros_per_1k": 500, "provider_output_cost_micros_per_1k": 1500})
+        # The status is intentionally set through the test DB below; the public
+        # channel update API does not allow operators to forge health state.
+        with SessionLocal() as db:
+            channel = db.get(ModelChannel, channel_id)
+            channel.status = "healthy"
+            channel.health_source = "provider"
+            db.commit()
+        monkeypatch.setattr(services.httpx, "AsyncClient", AuditedProviderClient)
+        response = await client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key.json()['key']}"}, json={"model": "p0-audit-model", "messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": 12, "response_format": {"type": "json_object"}})
+        models = await client.get("/v1/models", headers={"Authorization": f"Bearer {key.json()['key']}"})
+        metrics = await client.get("/metrics")
+
+    assert response.status_code == 200
+    assert models.status_code == 200 and models.json()["data"][-1]["supported_parameters"]
+    assert metrics.status_code == 200 and "loktoken_http_requests_total" in metrics.text
+    with SessionLocal() as db:
+        record = db.query(UsageRecord).filter(UsageRecord.request_id == response.headers["X-Request-ID"]).one()
+        assert record.provider_request_id == "provider-request-audited"
+        assert record.provider_channel_id == channel_id
+        assert record.provider_cost_micros == 11
+        assert record.input_cache_hit_tokens == 2
+        assert record.input_cache_miss_tokens == 8
+        assert record.reasoning_tokens == 1
+
+
+@pytest.mark.asyncio
+async def test_p1_operational_alerts_surface_release_blockers() -> None:
+    from app.models import BillingAccount, ModelConfig, PaymentOrder
+
+    settings = get_settings()
+    settings.alert_low_balance_micros = 1_000_000
+    settings.alert_lookback_minutes = 15
+    settings.alert_failure_rate_percent = 20
+    settings.alert_min_request_count = 5
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="alert-user", login_id="alert-user", name="Alert User", balance_micros=100)
+        db.add(account)
+        db.flush()
+        db.add_all([
+            ApiKey(name="expired", account_id=account.id, key_prefix="expired", key_hash="expired-alert-key", expires_at=now - timedelta(minutes=1)),
+            ApiKey(name="expiring", account_id=account.id, key_prefix="expiring", key_hash="expiring-alert-key", expires_at=now + timedelta(days=3)),
+        ])
+        model = ModelConfig(public_name="alert-model", upstream_model="alert-model", provider_base_url="https://provider.invalid/v1", input_price_micros_per_1k=1000, output_price_micros_per_1k=1000)
+        db.add(model)
+        db.flush()
+        db.add(ModelChannel(model_config_id=model.id, name="Alert primary", provider_base_url=model.provider_base_url, upstream_model=model.upstream_model, active=True, status="unhealthy", consecutive_failures=3))
+        for index in range(5):
+            db.add(UsageRecord(request_id=f"alert-{index}", trace_id=f"trace-alert-{index}", account_id=account.id, api_key_id=1, model=model.public_name, upstream_model=model.upstream_model, input_tokens=1, output_tokens=1, total_tokens=2, amount_micros=10, provider_cost_micros=20 if index == 0 else 0, status="success" if index == 0 else "error", latency_ms=10, created_at=now))
+        db.add(PaymentOrder(order_no="alert-order", account_id=account.id, amount_micros=1000, provider="manual", status="pending"))
+        db.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/admin/alerts", headers={"X-Admin-Token": "test-admin"})
+        overview = await client.get("/admin/overview", headers={"X-Admin-Token": "test-admin"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    codes = {item["code"] for item in payload["data"]}
+    assert {"low_balance", "expired_keys", "expiring_keys", "unhealthy_channels", "failure_rate", "cost_anomaly", "pending_orders"} <= codes
+    assert payload["release_blocking_count"] >= 3
+    assert overview.status_code == 200
+    assert overview.json()["alert_count"] == payload["count"]
+
+
+@pytest.mark.asyncio
+async def test_alert_webhook_is_deduplicated_and_recovery_is_delivered(monkeypatch) -> None:
+    import app.main as main_module
+    from app.models import BillingAccount, PaymentOrder
+
+    delivered: list[dict[str, object]] = []
+
+    class WebhookResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_post(_url: str, *, content: bytes, headers: dict[str, str], timeout: int) -> WebhookResponse:
+        assert timeout == 10
+        assert headers["X-LokToken-Signature"]
+        delivered.append(json.loads(content))
+        return WebhookResponse()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "security_delivery_mode", "webhook")
+    monkeypatch.setattr(settings, "security_delivery_webhook_url", "https://security.example.com/events")
+    monkeypatch.setattr(settings, "security_delivery_webhook_secret", "alert-webhook-secret-long-enough")
+    monkeypatch.setattr(main_module.httpx, "post", fake_post)
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="alert-webhook-user", name="Alert Webhook User", balance_micros=2_000_000)
+        db.add(account)
+        db.flush()
+        order = PaymentOrder(order_no="alert-webhook-order", account_id=account.id, amount_micros=1000, provider="manual", status="pending")
+        db.add(order)
+        db.commit()
+        order_id = order.id
+
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await client.post("/admin/alerts/evaluate", headers=headers)
+        second = await client.post("/admin/alerts/evaluate", headers=headers)
+        with SessionLocal() as db:
+            db.get(PaymentOrder, order_id).status = "rejected"
+            db.commit()
+        recovered = await client.post("/admin/alerts/evaluate", headers=headers)
+        final = await client.post("/admin/alerts/evaluate", headers=headers)
+
+    assert first.status_code == second.status_code == recovered.status_code == final.status_code == 200
+    assert [item["event"] for item in delivered] == ["alert_opened", "alert_recovered"]
+    assert delivered[0]["fingerprint"] == delivered[1]["fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_provider_bill_import_reconciles_each_line_and_is_idempotent() -> None:
+    from app.models import BillingAccount
+
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="bill-user", name="Bill User", balance_micros=1_000_000)
+        db.add(account)
+        db.flush()
+        api_key = ApiKey(name="bill-key", account_id=account.id, key_prefix="bill", key_hash="bill-key-hash")
+        db.add(api_key)
+        db.flush()
+        db.add_all([
+            UsageRecord(request_id="bill-platform-1", trace_id="bill-platform-1", account_id=account.id, api_key_id=api_key.id, model="bill-model", upstream_model="bill-model", input_tokens=10, output_tokens=5, total_tokens=15, amount_micros=50, provider_cost_micros=30, provider_request_id="provider-bill-1", status="success", latency_ms=10, created_at=now),
+            UsageRecord(request_id="bill-platform-2", trace_id="bill-platform-2", account_id=account.id, api_key_id=api_key.id, model="bill-model", upstream_model="bill-model", input_tokens=20, output_tokens=6, total_tokens=26, amount_micros=80, provider_cost_micros=40, provider_request_id="provider-bill-2", status="success", latency_ms=10, created_at=now),
+        ])
+        db.commit()
+
+    payload = {
+        "provider": "DeepSeek",
+        "source_name": "deepseek-2026-08-20.json",
+        "lines": [
+            {"provider_request_id": "provider-bill-1", "input_tokens": 10, "output_tokens": 5, "billed_cost_micros": 30},
+            {"provider_request_id": "provider-bill-2", "input_tokens": 20, "output_tokens": 6, "billed_cost_micros": 55},
+            {"provider_request_id": "provider-missing", "input_tokens": 1, "output_tokens": 1, "billed_cost_micros": 10},
+        ],
+    }
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        imported = await client.post("/admin/provider-bills/import", headers=headers, json=payload)
+        duplicate = await client.post("/admin/provider-bills/import", headers=headers, json=payload)
+        listed = await client.get("/admin/provider-bills", headers=headers)
+        detail = await client.get(f"/admin/provider-bills/{imported.json()['import']['id']}", headers=headers)
+
+    assert imported.status_code == 200
+    summary = imported.json()["import"]
+    assert (summary["matched_count"], summary["mismatch_count"], summary["unmatched_count"]) == (1, 1, 1)
+    assert summary["difference_micros"] == 25
+    assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
+    assert len(listed.json()["data"]) == 1
+    assert [item["status"] for item in detail.json()["lines"]] == ["matched", "mismatch", "unmatched"]
 
 @pytest.mark.asyncio
 async def test_streaming_failover_only_before_first_chunk(monkeypatch) -> None:

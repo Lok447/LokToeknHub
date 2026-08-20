@@ -270,6 +270,17 @@ async function loadOverview() {
     { label: "累计 Token", value: formatNumber(overview.total_tokens), icon: "binary", color: "orange" },
     { label: "累计消费", value: formatMoney(overview.amount_micros), icon: "receipt-text" },
   ]);
+  const alerts = overview.alerts || [];
+  const alertCount = document.getElementById("operational-alert-count");
+  alertCount.textContent = alerts.length ? `${alerts.length} 项待处理` : "运行正常";
+  alertCount.className = `badge ${alerts.some((item) => item.severity === "critical") ? "danger" : alerts.length ? "warning" : "success"}`;
+  document.getElementById("operational-alerts").innerHTML = alerts.length ? alerts.map((item) => `
+    <div class="operational-alert ${escapeHtml(item.severity)}">
+      <span class="metric-icon"><i data-lucide="${item.severity === "critical" ? "triangle-alert" : item.severity === "warning" ? "circle-alert" : "clipboard-list"}"></i></span>
+      <div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.detail)}</p><span>${escapeHtml(item.action || "请及时处理")}</span></div>
+      ${item.release_blocking ? '<span class="badge danger">阻断发布</span>' : '<span class="badge neutral">运营待办</span>'}
+    </div>
+  `).join("") : '<div class="empty-state compact"><i data-lucide="circle-check-big"></i><span>当前没有需要处理的运营告警</span></div>';
   const recent = records.data.slice(0, 8);
   document.getElementById("recent-usage").innerHTML = recent.length ? recent.map((item) => `
     <tr>
@@ -467,6 +478,29 @@ async function loadUsage() {
       <td>${statusBadge(item.status)}</td>
     </tr>
   `).join("") : emptyRow(8);
+}
+
+async function providerBillsDialog() {
+  const result = await api("/admin/provider-bills");
+  const rows = result.data.map((item) => `<tr><td>${formatDate(item.created_at)}</td><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.source_name)}</td><td>${item.matched_count} / ${item.mismatch_count} / ${item.unmatched_count}</td><td>${formatMoney(item.billed_cost_micros)}</td><td>${formatMoney(item.difference_micros)}</td></tr>`).join("") || emptyRow(6, "尚未导入供应商账单");
+  openDialog("供应商成本账单核验", `<form id="provider-bill-form"><div class="dialog-body">
+    <p class="dialog-copy">导入归一化 JSON，按供应商请求 ID 逐笔核对 Token 与成本。重复文件不会再次入账。</p>
+    <div class="field-row"><div class="field"><label for="bill-provider">供应商</label><input id="bill-provider" name="provider" required maxlength="64" placeholder="例如 DeepSeek"></div><div class="field"><label for="bill-source">账单文件名</label><input id="bill-source" name="source_name" required maxlength="255" placeholder="deepseek-2026-08.json"></div></div>
+    <div class="field"><label for="bill-lines">归一化账单行 JSON</label><textarea id="bill-lines" name="lines" required rows="8" placeholder='[{"provider_request_id":"...","input_tokens":10,"output_tokens":5,"billed_cost_micros":30}]'></textarea><small class="field-hint">成本单位为微元，1 元 = 1,000,000 微元。</small></div>
+    <div class="table-wrap"><table><thead><tr><th>导入时间</th><th>供应商</th><th>来源</th><th>一致 / 差异 / 未匹配</th><th>账单成本</th><th>差额</th></tr></thead><tbody>${rows}</tbody></table></div>
+  </div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="submit"><i data-lucide="upload"></i><span>导入并核验</span></button></div></form>`);
+  document.getElementById("provider-bill-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const lines = JSON.parse(form.get("lines"));
+      if (!Array.isArray(lines) || !lines.length) throw new Error("账单行必须是非空 JSON 数组");
+      const imported = await api("/admin/provider-bills/import", { method: "POST", body: JSON.stringify({ provider: form.get("provider"), source_name: form.get("source_name"), lines }) });
+      const summary = imported.import;
+      toast(imported.duplicate ? "该账单已导入，本次未重复处理" : `核验完成：${summary.matched_count} 条一致，${summary.mismatch_count} 条差异，${summary.unmatched_count} 条未匹配`, summary.mismatch_count + summary.unmatched_count > 0);
+      await providerBillsDialog();
+    } catch (error) { toast(error.message, true); }
+  });
 }
 
 const loaders = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, models: loadModels, payments: loadPayments, redemptions: loadRedemptions, usage: loadUsage, audit: loadAudit };
@@ -719,14 +753,15 @@ async function channelDialog(modelId, modelName) {
       <td><div class="primary-cell"><span>${escapeHtml(item.provider_base_url)}</span><span class="secondary">${escapeHtml(channelCredentialLabel(item))} · ${item.credentials_configured ? "密钥已配置" : "密钥未配置"}</span></div></td>
       <td>${item.priority}</td>
       <td>${item.weight}</td>
+      <td><div class="primary-cell"><span>输入 ${item.provider_input_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_input_cost_micros_per_1k) : "未配置"}</span><span class="secondary">输出 ${item.provider_output_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_output_cost_micros_per_1k) : "未配置"}</span></div></td>
       <td>${channelStatusBadge(item.status)}<span class="secondary block-text">${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : "尚未检测"}</span>${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
       <td>${item.consecutive_failures}</td>
       <td class="align-right"><div class="table-actions"><button class="table-button" data-action="edit-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="settings-2"></i><span>编辑</span></button><button class="table-button" data-action="check-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="activity"></i><span>检测</span></button><button class="table-button" data-action="toggle-channel" data-id="${item.id}" data-active="${!item.active}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}">${item.active ? "停用" : "启用"}</button></div></td>
     </tr>
-  `).join("") : emptyRow(7, "还没有可用渠道");
+  `).join("") : emptyRow(8, "还没有可用渠道");
   openDialog(`渠道管理 · ${modelName}`, `
     <div class="channel-workspace">
-      <div class="table-wrap channel-table"><table><thead><tr><th>渠道 / 上游</th><th>供应商地址</th><th>优先级</th><th>权重</th><th>健康</th><th>失败</th><th class="align-right">操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="table-wrap channel-table"><table><thead><tr><th>渠道 / 上游</th><th>供应商地址</th><th>优先级</th><th>权重</th><th>供应商成本 / 1M Token</th><th>健康</th><th>失败</th><th class="align-right">操作</th></tr></thead><tbody>${rows}</tbody></table></div>
       <form id="channel-form" class="channel-form">
         <div class="section-header"><div><h2>新增渠道</h2><p>优先级数值越小越先尝试，同级按权重分配</p></div></div>
         <div class="dialog-body">
@@ -735,6 +770,8 @@ async function channelDialog(modelId, modelName) {
           <div class="field-row"><div class="field"><label for="channel-key-env">密钥环境变量</label><input id="channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="DEEPSEEK_API_KEY"></div><div class="field"><label for="channel-provider-key">供应商 API Key</label><input id="channel-provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div><small class="field-hint">二选一：填写环境变量名，或直接录入供应商 Key。Key 只在提交时传输，服务端加密保存且不会再次显示。</small>
           <div class="field"><label for="channel-priority">优先级</label><input id="channel-priority" name="priority" type="number" min="0" max="10000" value="100" required></div>
           <div class="field"><label for="channel-weight">同级权重</label><input id="channel-weight" name="weight" type="number" min="1" max="10000" value="100" required></div>
+          <div class="field-row"><div class="field"><label for="channel-provider-input-cost">供应商输入成本 / 1M Token（元）</label><input id="channel-provider-input-cost" name="provider_input_cost" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="channel-provider-output-cost">供应商输出成本 / 1M Token（元）</label><input id="channel-provider-output-cost" name="provider_output_cost" type="number" min="0" step="0.001" value="0"></div></div>
+          <small class="field-hint">填写供应商实际成本后，请求记录会计算平台毛利；留空或 0 表示暂不做成本对账。</small>
         </div>
         <div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="submit"><i data-lucide="plus"></i><span>新增渠道</span></button></div>
       </form>
@@ -750,6 +787,8 @@ async function channelDialog(modelId, modelName) {
       provider_api_key: data.provider_api_key || null,
       priority: Number(data.priority),
       weight: Number(data.weight),
+      provider_input_cost_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.provider_input_cost),
+      provider_output_cost_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.provider_output_cost),
       active: true,
     };
     try {
@@ -772,6 +811,7 @@ function editChannelDialog(channelId, modelId, modelName) {
         <div class="field-row"><div class="field"><label for="edit-channel-key-env">密钥环境变量</label><input id="edit-channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" value="${escapeHtml(item.provider_api_key_env || "")}"></div><div class="field"><label for="edit-channel-provider-key">供应商 API Key</label><input id="edit-channel-provider-key" name="provider_api_key" type="password" placeholder="留空则保持当前密钥"></div></div><small class="field-hint">当前密钥不会回显；输入新 Key 会覆盖并加密保存。</small>
         <div class="field"><label for="edit-channel-priority">优先级</label><input id="edit-channel-priority" name="priority" type="number" min="0" max="10000" value="${item.priority}" required></div><label class="check-field"><input name="clear_provider_api_key" type="checkbox"><span>清除控制台托管密钥</span></label>
         <div class="field-row"><div class="field"><label for="edit-channel-weight">同级权重</label><input id="edit-channel-weight" name="weight" type="number" min="1" max="10000" value="${item.weight}" required></div><label class="check-field"><input name="active" type="checkbox" ${item.active ? "checked" : ""}><span>启用此渠道</span></label></div>
+        <div class="field-row"><div class="field"><label for="edit-channel-provider-input-cost">供应商输入成本 / 1M Token（元）</label><input id="edit-channel-provider-input-cost" name="provider_input_cost" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(item.provider_input_cost_micros_per_1k || 0)}"></div><div class="field"><label for="edit-channel-provider-output-cost">供应商输出成本 / 1M Token（元）</label><input id="edit-channel-provider-output-cost" name="provider_output_cost" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(item.provider_output_cost_micros_per_1k || 0)}"></div></div>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-action="manage-channels" data-id="${modelId}" data-name="${escapeHtml(modelName)}"><i data-lucide="arrow-left"></i><span>返回</span></button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存</span></button></div>
     </form>`);
@@ -786,6 +826,8 @@ function editChannelDialog(channelId, modelId, modelName) {
       provider_api_key: data.provider_api_key || null,
       priority: Number(data.priority),
       weight: Number(data.weight),
+      provider_input_cost_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.provider_input_cost),
+      provider_output_cost_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.provider_output_cost),
       active: data.active === "on",
       clear_provider_api_key: data.clear_provider_api_key === "on",
     };
@@ -991,6 +1033,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "confirm-payment") confirmPayment(target.dataset.id);
     if (target.dataset.action === "refund-payment") refundPayment(target.dataset.id);
     if (target.dataset.action === "reconcile-ledger") reconcileLedger();
+    if (target.dataset.action === "provider-bills") providerBillsDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "manage-admins") manageAdmins();
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);

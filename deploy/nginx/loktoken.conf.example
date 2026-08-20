@@ -1,6 +1,10 @@
 # LokToken reverse proxy template for an existing LokSystem host.
 # Replace the certificate paths and server_name before enabling it.
 
+# Shared edge protection for all backend instances. The application still
+# enforces per-key limits; this zone protects the public gateway itself.
+limit_req_zone $binary_remote_addr zone=loktoken_api:10m rate=30r/s;
+
 upstream loktoken_backend {
     server 127.0.0.1:8000;
     keepalive 32;
@@ -41,6 +45,8 @@ server {
 
     # Keep OpenAI-compatible SSE responses flowing without proxy buffering.
     location /v1/ {
+        limit_req zone=loktoken_api burst=60 nodelay;
+        limit_req_status 429;
         proxy_pass http://loktoken_backend;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -52,5 +58,13 @@ server {
         proxy_cache off;
         proxy_read_timeout 180s;
         proxy_send_timeout 30s;
+    }
+
+    location = /metrics {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://loktoken_backend;
+        proxy_set_header Host $host;
     }
 }

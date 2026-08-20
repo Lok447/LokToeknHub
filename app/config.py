@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     provider_timeout_seconds: int = 120
     channel_health_timeout_seconds: int = 10
     max_channel_attempts: int = 3
+    min_real_provider_count: int = 1
     channel_failure_threshold: int = 3
     channel_circuit_cooldown_seconds: int = 60
     payment_webhook_secret: str = "change-webhook-secret"
@@ -41,6 +42,12 @@ class Settings(BaseSettings):
     portal_rate_limit_window_seconds: int = 60
     auth_rate_limit_requests: int = 10
     auth_rate_limit_window_seconds: int = 60
+    alert_low_balance_micros: int = 1_000_000
+    alert_lookback_minutes: int = 15
+    alert_failure_rate_percent: float = 20.0
+    alert_min_request_count: int = 5
+    alert_evaluation_interval_seconds: int = 60
+    provider_bill_cost_tolerance_micros: int = 1
     portal_session_ttl_seconds: int = 604800
     admin_session_ttl_seconds: int = 28800
     password_reset_ttl_seconds: int = 900
@@ -102,12 +109,24 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_PUBLIC_BASE_URL must be a public HTTPS URL in production")
     if settings.max_request_body_bytes < 16_384:
         errors.append("TOKEN_MAX_REQUEST_BODY_BYTES must be at least 16384")
+    if settings.min_real_provider_count < 1:
+        errors.append("TOKEN_MIN_REAL_PROVIDER_COUNT must be positive")
     if settings.api_rate_limit_requests < 1 or settings.api_rate_limit_window_seconds < 1:
         errors.append("API rate limit settings must be positive")
     if settings.portal_rate_limit_requests < 1 or settings.portal_rate_limit_window_seconds < 1:
         errors.append("Portal rate limit settings must be positive")
     if settings.auth_rate_limit_requests < 1 or settings.auth_rate_limit_window_seconds < 1:
         errors.append("Auth rate limit settings must be positive")
+    if settings.alert_low_balance_micros < 0:
+        errors.append("TOKEN_ALERT_LOW_BALANCE_MICROS must be non-negative")
+    if settings.alert_lookback_minutes < 1 or settings.alert_min_request_count < 1:
+        errors.append("Alert lookback and minimum request count must be positive")
+    if settings.alert_evaluation_interval_seconds < 10:
+        errors.append("TOKEN_ALERT_EVALUATION_INTERVAL_SECONDS must be at least 10")
+    if settings.provider_bill_cost_tolerance_micros < 0:
+        errors.append("TOKEN_PROVIDER_BILL_COST_TOLERANCE_MICROS must be non-negative")
+    if settings.alert_failure_rate_percent <= 0 or settings.alert_failure_rate_percent > 100:
+        errors.append("TOKEN_ALERT_FAILURE_RATE_PERCENT must be between 0 and 100")
     if settings.admin_session_ttl_seconds < 300 or settings.password_reset_ttl_seconds < 300:
         errors.append("Session and password reset TTL settings must be at least 300 seconds")
     if settings.security_delivery_mode != "webhook":

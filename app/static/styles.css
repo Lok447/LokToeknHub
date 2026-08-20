@@ -201,9 +201,11 @@ tbody tr:hover { background: #fafbfc; }
 
 .password-row { display: flex; gap: 8px; }
 .password-row input { flex: 1; min-width: 0; }
-input, select { width: 100%; height: 40px; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 5px; background: #fff; color: var(--ink); }
-input:hover, select:hover { border-color: rgba(27, 37, 43, 0.34); }
-input:focus, select:focus { border-color: var(--signal); outline: 3px solid rgba(63, 111, 245, 0.12); }
+input, select, textarea { width: 100%; padding: 0 11px; border: 1px solid var(--line-strong); border-radius: 5px; background: #fff; color: var(--ink); }
+input, select { height: 40px; }
+textarea { min-height: 120px; padding-top: 10px; padding-bottom: 10px; resize: vertical; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }
+input:hover, select:hover, textarea:hover { border-color: rgba(27, 37, 43, 0.34); }
+input:focus, select:focus, textarea:focus { border-color: var(--signal); outline: 3px solid rgba(63, 111, 245, 0.12); }
 .check-field { min-height: 40px; display: flex; align-items: center; gap: 9px; align-self: end; color: #3d4650; font-size: 11px; font-weight: 700; }
 .check-field input { width: 16px; height: 16px; accent-color: var(--signal); }
 
@@ -331,4 +333,18 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .nav-item span { font-size: 11px; }
   .page-section-header { align-items: flex-start; flex-direction: column; }
   .page-section-header .primary-button { width: 100%; }
+}
+.operational-alerts-panel { margin-bottom: 18px; }
+.operational-alert-list { display: grid; gap: 10px; }
+.operational-alert { display: flex; align-items: flex-start; gap: 12px; padding: 12px 14px; border: 1px solid var(--border, #e5e7eb); border-left: 3px solid var(--muted, #94a3b8); background: var(--surface-subtle, #f8fafc); }
+.operational-alert.warning { border-left-color: #d97706; }
+.operational-alert.critical { border-left-color: #dc2626; }
+.operational-alert > div { flex: 1; min-width: 0; }
+.operational-alert strong { display: block; margin-bottom: 3px; }
+.operational-alert p { margin: 0 0 4px; color: var(--text-secondary, #64748b); font-size: 13px; }
+.operational-alert span:not(.badge) { color: var(--text-secondary, #64748b); font-size: 12px; }
+.empty-state.compact { min-height: 64px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--text-secondary, #64748b); }
+@media (max-width: 760px) {
+  .operational-alert { flex-wrap: wrap; }
+  .operational-alert .badge { margin-left: 32px; }
 }

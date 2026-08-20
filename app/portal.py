@@ -162,6 +162,13 @@ def usage_record_data(record: UsageRecord, key_name: str) -> dict[str, object]:
         "output_tokens": record.output_tokens,
         "total_tokens": record.total_tokens,
         "amount_micros": record.amount_micros,
+        "provider_cost_micros": record.provider_cost_micros,
+        "provider_channel_id": record.provider_channel_id,
+        "provider_request_id": record.provider_request_id,
+        "input_cache_hit_tokens": record.input_cache_hit_tokens,
+        "input_cache_miss_tokens": record.input_cache_miss_tokens,
+        "reasoning_tokens": record.reasoning_tokens,
+        "route_attempts": json.loads(record.route_attempts_json or "[]"),
         "status": record.status,
         "latency_ms": record.latency_ms,
         "error_message": record.error_message,
@@ -1119,12 +1126,12 @@ def export_usage(
     ).all()
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(["created_at", "request_id", "trace_id", "api_key", "model", "input_tokens", "output_tokens", "total_tokens", "latency_ms", "amount_micros", "status", "error_message"])
+    writer.writerow(["created_at", "request_id", "trace_id", "api_key", "model", "input_tokens", "output_tokens", "total_tokens", "latency_ms", "amount_micros", "provider_cost_micros", "provider_channel_id", "provider_request_id", "status", "error_message"])
     for record, key_name in rows:
         writer.writerow([
             record.created_at.isoformat(), csv_safe(record.request_id), csv_safe(record.trace_id), csv_safe(key_name), csv_safe(record.model),
             record.input_tokens, record.output_tokens, record.total_tokens, record.latency_ms,
-            record.amount_micros, csv_safe(record.status), csv_safe(record.error_message or ""),
+            record.amount_micros, record.provider_cost_micros, record.provider_channel_id, csv_safe(record.provider_request_id or ""), csv_safe(record.status), csv_safe(record.error_message or ""),
         ])
     filename = f"token-usage-{datetime.now(timezone.utc).date().isoformat()}.csv"
     return Response(

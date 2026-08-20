@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -10,7 +12,8 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+import httpx
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -18,18 +21,19 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
-from .db import engine, get_db, init_db
+from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, RedemptionCode, UsageRecord, utcnow
+from .metrics import observe_request, render_prometheus
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, ProviderBillImport, ProviderBillLine, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
 from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBillImportRequest, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -39,7 +43,31 @@ async def lifespan(_app: FastAPI):
     if not get_settings().auto_create_schema:
         with engine.connect() as connection:
             connection.execute(select(1))
-    yield
+    alert_task = asyncio.create_task(alert_evaluation_loop())
+    try:
+        yield
+    finally:
+        alert_task.cancel()
+        try:
+            await alert_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def alert_evaluation_loop() -> None:
+    """Evaluate operational alerts periodically without blocking requests."""
+    while True:
+        try:
+            await asyncio.to_thread(run_alert_evaluation)
+        except Exception:
+            # Delivery state stays pending and will be retried on the next tick.
+            pass
+        await asyncio.sleep(get_settings().alert_evaluation_interval_seconds)
+
+
+def run_alert_evaluation() -> None:
+    with SessionLocal() as db:
+        evaluate_alert_incidents(db, deliver=True)
 
 
 app = FastAPI(title="TOKEN Platform", version="1.2.0", lifespan=lifespan)
@@ -115,6 +143,7 @@ async def production_response_headers(request: Request, call_next):
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "invalid content length"})
     response = await call_next(request)
+    observe_request(request.url.path, request.method, response.status_code)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -123,6 +152,20 @@ async def production_response_headers(request: Request, call_next):
     if request.url.path in {"/portal", "/static/portal.js", "/static/portal.css", "/static/styles.css"}:
         response.headers.setdefault("Cache-Control", "no-store")
     return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
+    business_metrics = {
+        "loktoken_usage_success_total": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_usage_error_total": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.status == "error")) or 0,
+        "loktoken_revenue_micros_total": db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_provider_cost_micros_total": db.scalar(select(func.coalesce(func.sum(UsageRecord.provider_cost_micros), 0)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_channels_healthy": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "healthy")) or 0,
+        "loktoken_channels_unhealthy": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0,
+    }
+    payload = render_prometheus() + "\n".join(f"# TYPE {name} gauge\n{name} {value}" for name, value in business_metrics.items()) + "\n"
+    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/", include_in_schema=False)
@@ -298,6 +341,7 @@ def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
     mock_published = 0
     candidates = 0
     blocked = 0
+    published_provider_hosts: set[str] = set()
     credential_envs = sorted({
         channel.provider_api_key_env
         for channel in db.scalars(select(ModelChannel)).all()
@@ -312,12 +356,16 @@ def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
         state, _ = _model_publication_state(model, channels, settings)
         if state == "published":
             published += 1
+            published_provider_hosts.update(channel.provider_base_url.rstrip("/") for channel in channels if channel.active and channel.health_source == "provider")
         elif state == "mock_published":
             mock_published += 1
         elif state == "candidate":
             candidates += 1
         else:
             blocked += 1
+    alerts = build_operational_alerts(db)
+    gateway_ready = (published > 0 and len(published_provider_hosts) >= settings.min_real_provider_count) if not settings.mock_mode else mock_published > 0
+    release_blocking_alert_count = sum(1 for alert in alerts if alert["release_blocking"])
     return {
         "environment": settings.environment,
         "mock_mode": settings.mock_mode,
@@ -328,7 +376,12 @@ def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
         "candidate_model_count": candidates,
         "blocked_model_count": blocked,
         "provider_credentials": provider_credentials,
-        "release_ready": published > 0 if not settings.mock_mode else mock_published > 0,
+        "published_provider_count": len(published_provider_hosts),
+        "minimum_real_provider_count": settings.min_real_provider_count,
+        "gateway_ready": gateway_ready,
+        "release_ready": gateway_ready and release_blocking_alert_count == 0,
+        "operational_alert_count": len(alerts),
+        "release_blocking_alert_count": release_blocking_alert_count,
     }
 
 
@@ -343,6 +396,7 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, object]:
     for model in models:
         channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
         model_states.append(_model_publication_state(model, channels, settings)[0])
+    alerts = build_operational_alerts(db)
     return {
         "environment": settings.environment,
         "mock_mode": settings.mock_mode,
@@ -361,7 +415,352 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, object]:
         "mock_published_model_count": sum(state == "mock_published" for state in model_states),
         "candidate_model_count": sum(state == "candidate" for state in model_states),
         "blocked_model_count": sum(state == "blocked" for state in model_states),
+        "alerts": alerts,
+        "alert_count": len(alerts),
+        "release_blocking_alert_count": sum(1 for alert in alerts if alert["release_blocking"]),
     }
+
+
+def build_operational_alerts(db: Session) -> list[dict[str, object]]:
+    """Compute actionable P1 signals from durable platform data.
+
+    Alerts are deliberately calculated on read so a deployment does not need a
+    scheduler before operators can see a degraded channel or billing risk.
+    """
+    settings = get_settings()
+    now = utcnow()
+    alerts: list[dict[str, object]] = []
+
+    def add(code: str, severity: str, title: str, detail: str, count: int = 1, *, release_blocking: bool = False, action: str = "") -> None:
+        alerts.append({
+            "code": code,
+            "severity": severity,
+            "title": title,
+            "detail": detail,
+            "count": count,
+            "release_blocking": release_blocking,
+            "action": action,
+            "observed_at": now.isoformat(),
+        })
+
+    low_balance_count = db.scalar(
+        select(func.count(BillingAccount.id)).where(
+            BillingAccount.active.is_(True),
+            BillingAccount.balance_micros <= settings.alert_low_balance_micros,
+        )
+    ) or 0
+    if low_balance_count:
+        add(
+            "low_balance",
+            "warning",
+            "账户余额预警",
+            f"{low_balance_count} 个活跃账户余额低于 {settings.alert_low_balance_micros / 1_000_000:.2f} 元。",
+            low_balance_count,
+            action="发放额度或提醒用户充值",
+        )
+
+    expired_key_count = db.scalar(
+        select(func.count(ApiKey.id)).where(ApiKey.active.is_(True), ApiKey.expires_at.is_not(None), ApiKey.expires_at <= now)
+    ) or 0
+    if expired_key_count:
+        add(
+            "expired_keys",
+            "critical",
+            "存在已过期 API Key",
+            f"{expired_key_count} 个仍标记为启用的 API Key 已超过有效期。",
+            expired_key_count,
+            action="停用过期 Key 并通知所属账户",
+        )
+    expiring_key_count = db.scalar(
+        select(func.count(ApiKey.id)).where(
+            ApiKey.active.is_(True),
+            ApiKey.expires_at.is_not(None),
+            ApiKey.expires_at > now,
+            ApiKey.expires_at <= now + timedelta(days=7),
+        )
+    ) or 0
+    if expiring_key_count:
+        add(
+            "expiring_keys",
+            "warning",
+            "API Key 即将过期",
+            f"{expiring_key_count} 个 API Key 将在 7 天内过期。",
+            expiring_key_count,
+            action="提醒用户轮换 Key 或延长有效期",
+        )
+
+    unhealthy_count = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0
+    if unhealthy_count:
+        add(
+            "unhealthy_channels",
+            "critical",
+            "模型渠道异常",
+            f"{unhealthy_count} 个启用渠道健康检查失败或已触发熔断。",
+            unhealthy_count,
+            release_blocking=True,
+            action="检查密钥、上游地址并执行健康检查",
+        )
+
+    window_start = now - timedelta(minutes=settings.alert_lookback_minutes)
+    request_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start)) or 0
+    error_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start, UsageRecord.status == "error")) or 0
+    failure_rate = (error_count / request_count * 100) if request_count else 0.0
+    if request_count >= settings.alert_min_request_count and failure_rate >= settings.alert_failure_rate_percent:
+        add(
+            "failure_rate",
+            "critical",
+            "近期请求失败率过高",
+            f"最近 {settings.alert_lookback_minutes} 分钟 {request_count} 次请求中有 {error_count} 次失败（{failure_rate:.1f}%）。",
+            error_count,
+            release_blocking=True,
+            action="检查渠道状态、上游限流和最近错误记录",
+        )
+
+    loss_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start, UsageRecord.status == "success", UsageRecord.provider_cost_micros > UsageRecord.amount_micros)) or 0
+    if loss_count:
+        add(
+            "cost_anomaly",
+            "critical",
+            "供应商成本高于平台售价",
+            f"最近窗口内 {loss_count} 次成功请求的供应商成本超过平台收费，存在倒挂风险。",
+            loss_count,
+            release_blocking=True,
+            action="核对供应商价格和模型售价后再继续放量",
+        )
+
+    pending_count = db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0
+    if pending_count:
+        add(
+            "pending_orders",
+            "info",
+            "待运营处理订单",
+            f"当前有 {pending_count} 个充值订单等待确认。",
+            pending_count,
+            action="进入订单管理完成确认或拒绝",
+        )
+    return alerts
+
+
+def alert_fingerprint(alert: dict[str, object]) -> str:
+    """Keep fingerprints stable while allowing the count/detail to change."""
+    raw = f"{alert['code']}|{alert['severity']}|{alert['release_blocking']}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def deliver_alert_event(event: str, incident: AlertIncident) -> bool:
+    settings = get_settings()
+    if settings.security_delivery_mode == "development":
+        return True
+    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or len(settings.security_delivery_webhook_secret) < 16:
+        return False
+    body = json.dumps({
+        "event": event,
+        "incident_id": incident.id,
+        "fingerprint": incident.fingerprint,
+        "code": incident.code,
+        "severity": incident.severity,
+        "title": incident.title,
+        "detail": incident.detail,
+        "action": incident.action,
+        "count": incident.count,
+        "state": incident.state,
+        "first_seen_at": incident.first_seen_at.isoformat(),
+        "last_seen_at": incident.last_seen_at.isoformat(),
+        "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(settings.security_delivery_webhook_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    try:
+        response = httpx.post(
+            settings.security_delivery_webhook_url,
+            content=body,
+            headers={"Content-Type": "application/json", "X-LokToken-Signature": signature, "X-LokToken-Event": event},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPError:
+        return False
+
+
+def evaluate_alert_incidents(db: Session, *, deliver: bool = False) -> dict[str, object]:
+    """Upsert alert incidents and emit only state transitions."""
+    now = utcnow()
+    current = {alert_fingerprint(item): item for item in build_operational_alerts(db)}
+    incidents = {item.fingerprint: item for item in db.scalars(select(AlertIncident)).all()}
+    emitted: list[dict[str, object]] = []
+    for fingerprint, alert in current.items():
+        incident = incidents.get(fingerprint)
+        if incident is None:
+            incident = AlertIncident(
+                fingerprint=fingerprint,
+                code=str(alert["code"]),
+                severity=str(alert["severity"]),
+                title=str(alert["title"]),
+                detail=str(alert["detail"]),
+                action=str(alert.get("action") or ""),
+                count=int(alert.get("count") or 1),
+                state="active",
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            db.add(incident)
+            db.flush()
+            incident.pending_event = "alert_opened"
+            emitted.append({"event": "alert_opened", "incident": incident})
+        else:
+            reopened = incident.state == "resolved"
+            incident.code = str(alert["code"])
+            incident.severity = str(alert["severity"])
+            incident.title = str(alert["title"])
+            incident.detail = str(alert["detail"])
+            incident.action = str(alert.get("action") or "")
+            incident.count = int(alert.get("count") or 1)
+            incident.state = "active"
+            incident.last_seen_at = now
+            incident.resolved_at = None
+            if reopened:
+                incident.pending_event = "alert_reopened"
+                emitted.append({"event": "alert_reopened", "incident": incident})
+    for fingerprint, incident in incidents.items():
+        if fingerprint not in current and incident.state == "active":
+            incident.state = "resolved"
+            incident.resolved_at = now
+            incident.last_seen_at = now
+            incident.pending_event = "alert_recovered"
+            emitted.append({"event": "alert_recovered", "incident": incident})
+    db.commit()
+    delivered = 0
+    failed = 0
+    if deliver:
+        pending_incidents = db.scalars(select(AlertIncident).where(AlertIncident.pending_event.is_not(None))).all()
+        for incident in pending_incidents:
+            event = str(incident.pending_event)
+            if deliver_alert_event(event, incident):
+                incident.last_notified_state = event
+                incident.notified_at = utcnow()
+                incident.pending_event = None
+                delivered += 1
+            else:
+                failed += 1
+        db.commit()
+    return {"active_count": len(current), "transitions": [item["event"] for item in emitted], "delivered": delivered, "failed": failed}
+
+
+@app.get("/admin/alerts", dependencies=[Depends(require_admin)])
+def admin_alerts(db: Session = Depends(get_db)) -> dict[str, object]:
+    alerts = build_operational_alerts(db)
+    incidents = evaluate_alert_incidents(db)
+    return {
+        "data": alerts,
+        "incidents": [
+            {"id": item.id, "fingerprint": item.fingerprint, "code": item.code, "state": item.state, "count": item.count, "last_seen_at": item.last_seen_at.isoformat(), "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None}
+            for item in db.scalars(select(AlertIncident).order_by(AlertIncident.last_seen_at.desc()).limit(100)).all()
+        ],
+        "count": len(alerts),
+        "release_blocking_count": sum(1 for alert in alerts if alert["release_blocking"]),
+        "generated_at": utcnow().isoformat(),
+        "evaluation": incidents,
+    }
+
+
+@app.post("/admin/alerts/evaluate", dependencies=[Depends(require_operator)])
+def evaluate_and_deliver_alerts(db: Session = Depends(get_db)) -> dict[str, object]:
+    return evaluate_alert_incidents(db, deliver=True)
+
+
+def provider_bill_summary_data(record: ProviderBillImport) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "provider": record.provider,
+        "source_name": record.source_name,
+        "source_hash": record.source_hash,
+        "line_count": record.line_count,
+        "matched_count": record.matched_count,
+        "mismatch_count": record.mismatch_count,
+        "unmatched_count": record.unmatched_count,
+        "billed_cost_micros": record.billed_cost_micros,
+        "recorded_cost_micros": record.recorded_cost_micros,
+        "difference_micros": record.billed_cost_micros - record.recorded_cost_micros,
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+@app.post("/admin/provider-bills/import", dependencies=[Depends(require_finance_operator)])
+def import_provider_bill(payload: ProviderBillImportRequest, db: Session = Depends(get_db)) -> dict[str, object]:
+    """Import a normalized supplier bill and reconcile it against usage rows.
+
+    The API intentionally accepts normalized JSON rather than provider-specific
+    CSV files. A small adapter can convert each supplier export to this shape
+    while keeping provider credentials and raw files outside the application.
+    """
+    canonical = json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    source_hash = hashlib.sha256(canonical).hexdigest()
+    existing = db.scalar(select(ProviderBillImport).where(ProviderBillImport.provider == payload.provider, ProviderBillImport.source_hash == source_hash))
+    if existing:
+        return {"duplicate": True, "import": provider_bill_summary_data(existing), "lines": []}
+    record = ProviderBillImport(provider=payload.provider, source_name=payload.source_name, source_hash=source_hash, line_count=len(payload.lines), created_at=utcnow())
+    db.add(record)
+    db.flush()
+    tolerance = get_settings().provider_bill_cost_tolerance_micros
+    seen_keys: set[str] = set()
+    details: list[dict[str, object]] = []
+    for index, item in enumerate(payload.lines, start=1):
+        line_key = item.line_key or item.provider_request_id or f"line-{index}"
+        if line_key in seen_keys:
+            raise HTTPException(status_code=422, detail=f"duplicate bill line key: {line_key}")
+        seen_keys.add(line_key)
+        usage = None
+        if item.provider_request_id:
+            usage = db.scalar(select(UsageRecord).where(UsageRecord.provider_request_id == item.provider_request_id).order_by(UsageRecord.id.desc()))
+        if usage is None and item.line_key:
+            usage = db.scalar(select(UsageRecord).where(UsageRecord.request_id == item.line_key))
+        recorded_cost = usage.provider_cost_micros if usage else 0
+        diff = item.billed_cost_micros - recorded_cost
+        token_match = bool(usage and usage.input_tokens == item.input_tokens and usage.output_tokens == item.output_tokens)
+        cost_match = bool(usage and abs(diff) <= tolerance)
+        status = "matched" if usage and token_match and cost_match else "mismatch" if usage else "unmatched"
+        db.add(ProviderBillLine(
+            import_id=record.id,
+            line_key=line_key,
+            provider_request_id=item.provider_request_id,
+            billed_input_tokens=item.input_tokens,
+            billed_output_tokens=item.output_tokens,
+            billed_cost_micros=item.billed_cost_micros,
+            recorded_cost_micros=recorded_cost,
+            usage_record_id=usage.id if usage else None,
+            status=status,
+            diff_micros=diff,
+            raw_json=json.dumps(item.raw or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            created_at=utcnow(),
+        ))
+        record.billed_cost_micros += item.billed_cost_micros
+        record.recorded_cost_micros += recorded_cost
+        if status == "matched":
+            record.matched_count += 1
+        elif status == "mismatch":
+            record.mismatch_count += 1
+        else:
+            record.unmatched_count += 1
+        details.append({"line_key": line_key, "provider_request_id": item.provider_request_id, "usage_record_id": usage.id if usage else None, "status": status, "diff_micros": diff, "recorded_input_tokens": usage.input_tokens if usage else None, "recorded_output_tokens": usage.output_tokens if usage else None})
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="provider_bill.imported", target_type="provider_bill_import", target_id=record.id, details={"provider": record.provider, "source_name": record.source_name, "line_count": record.line_count, "mismatch_count": record.mismatch_count, "unmatched_count": record.unmatched_count})
+    db.commit()
+    db.refresh(record)
+    return {"duplicate": False, "import": provider_bill_summary_data(record), "lines": details}
+
+
+@app.get("/admin/provider-bills", dependencies=[Depends(require_admin)])
+def list_provider_bills(db: Session = Depends(get_db)) -> dict[str, object]:
+    records = db.scalars(select(ProviderBillImport).order_by(ProviderBillImport.id.desc()).limit(100)).all()
+    return {"data": [provider_bill_summary_data(item) for item in records]}
+
+
+@app.get("/admin/provider-bills/{import_id}", dependencies=[Depends(require_admin)])
+def provider_bill_detail(import_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    record = db.get(ProviderBillImport, import_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="provider bill import not found")
+    lines = db.scalars(select(ProviderBillLine).where(ProviderBillLine.import_id == record.id).order_by(ProviderBillLine.id)).all()
+    return {"import": provider_bill_summary_data(record), "lines": [{"id": item.id, "line_key": item.line_key, "provider_request_id": item.provider_request_id, "billed_input_tokens": item.billed_input_tokens, "billed_output_tokens": item.billed_output_tokens, "billed_cost_micros": item.billed_cost_micros, "recorded_cost_micros": item.recorded_cost_micros, "usage_record_id": item.usage_record_id, "status": item.status, "diff_micros": item.diff_micros} for item in lines]}
 
 
 @app.post("/admin/payment-orders", dependencies=[Depends(require_finance_operator)])
@@ -1015,6 +1414,8 @@ def channel_data(channel: ModelChannel) -> dict[str, object]:
         "circuit_open_until": channel.circuit_open_until.isoformat() if channel.circuit_open_until else None,
         "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None,
         "last_error": channel.last_error,
+        "provider_input_cost_micros_per_1k": channel.provider_input_cost_micros_per_1k,
+        "provider_output_cost_micros_per_1k": channel.provider_output_cost_micros_per_1k,
         "created_at": channel.created_at.isoformat(),
     }
 
@@ -1180,7 +1581,26 @@ async def preflight_model(
 def list_models(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
     require_api_key(authorization, db)
     models = [model for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all() if model_is_callable(db, model)]
-    return {"object": "list", "data": [{"id": item.public_name, "object": "model", "owned_by": "token"} for item in models]}
+    data = []
+    for item in models:
+        metadata = parse_model_json(item.catalog_metadata_json) or {}
+        data.append({
+            "id": item.public_name,
+            "object": "model",
+            "owned_by": metadata.get("provider", "token"),
+            "created": int(item.created_at.timestamp()),
+            "context_length": metadata.get("context_window"),
+            "architecture": {
+                "input_modalities": metadata.get("modalities", ["text"]),
+                "output_modalities": ["text"],
+            },
+            "pricing": {
+                "input_cny_per_1k": item.input_price_micros_per_1k,
+                "output_cny_per_1k": item.output_price_micros_per_1k,
+            },
+            "supported_parameters": metadata.get("supported_parameters", ["messages", "stream", "temperature", "max_tokens"]),
+        })
+    return {"object": "list", "data": data}
 
 
 @app.get("/v1/models/{model_id:path}")
@@ -1229,7 +1649,7 @@ async def chat_completions(
     if db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
         raise HTTPException(status_code=409, detail="request id already used")
     estimated_input = estimate_tokens(payload.messages)
-    reservation = calculate_amount(model, estimated_input, payload.max_tokens or settings.reservation_output_tokens)
+    reservation = calculate_amount(model, estimated_input, payload.max_tokens or payload.max_completion_tokens or settings.reservation_output_tokens)
     try:
         reserve_balance(db, account, api_key, reservation, request_id)
     except ValueError as exc:
@@ -1245,8 +1665,9 @@ async def chat_completions(
             saw_provider_data = False
             completed = False
             error_message: str | None = None
+            route_meta: dict[str, object] = {}
             try:
-                async for chunk in stream_provider(db, model, payload):
+                async for chunk in stream_provider(db, model, payload, route_meta):
                     text = chunk.decode("utf-8", errors="replace")
                     if text.startswith("data: ") and "[DONE]" not in text:
                         try:
@@ -1277,6 +1698,7 @@ async def chat_completions(
                 if not input_tokens and (completed or saw_provider_data):
                     input_tokens = estimated_input
                 actual_amount = calculate_amount(model, input_tokens, output_tokens)
+                provider_channel = db.get(ModelChannel, route_meta.get("provider_channel_id")) if route_meta.get("provider_channel_id") else None
                 settle_balance(db, account, api_key, reservation, actual_amount, request_id)
                 save_usage(
                     db,
@@ -1289,6 +1711,12 @@ async def chat_completions(
                     "success" if completed else "error",
                     int((time.perf_counter() - started) * 1000),
                     error_message,
+                    provider_cost_micros=provider_cost(provider_channel, input_tokens, output_tokens, route_meta.get("usage_details")) if provider_channel else 0,
+                    provider_channel_id=provider_channel.id if provider_channel else None,
+                    provider_request_id=route_meta.get("provider_request_id"),
+                    usage_details=route_meta.get("usage_details"),
+                    raw_usage=route_meta.get("raw_usage"),
+                    route_attempts=route_meta.get("route_attempts"),
                 )
 
         return StreamingResponse(
@@ -1298,10 +1726,22 @@ async def chat_completions(
         )
     started = time.perf_counter()
     try:
-        response, input_tokens, output_tokens = await call_provider(db, model, payload)
+        provider_result = await call_provider_details(db, model, payload)
+        response = provider_result.response
+        input_tokens = provider_result.input_tokens
+        output_tokens = provider_result.output_tokens
         actual_amount = calculate_amount(model, input_tokens, output_tokens)
         settle_balance(db, account, api_key, reservation, actual_amount, request_id)
-        save_usage(db, api_key, model, request_id, trace_id, input_tokens, output_tokens, "success", int((time.perf_counter() - started) * 1000))
+        save_usage(
+            db, api_key, model, request_id, trace_id, input_tokens, output_tokens, "success",
+            int((time.perf_counter() - started) * 1000),
+            provider_cost_micros=provider_result.provider_cost_micros,
+            provider_channel_id=provider_result.channel_id,
+            provider_request_id=provider_result.provider_request_id,
+            usage_details=provider_result.usage_details,
+            raw_usage=provider_result.raw_usage,
+            route_attempts=provider_result.route_attempts,
+        )
         response.setdefault("model", model.public_name)
         return JSONResponse(response, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
     except HTTPException as exc:
@@ -1351,6 +1791,13 @@ def usage_records(db: Session = Depends(get_db)) -> dict[str, object]:
             "output_tokens": record.output_tokens,
             "total_tokens": record.total_tokens,
             "amount_micros": record.amount_micros,
+            "provider_cost_micros": record.provider_cost_micros,
+            "provider_channel_id": record.provider_channel_id,
+            "provider_request_id": record.provider_request_id,
+            "input_cache_hit_tokens": record.input_cache_hit_tokens,
+            "input_cache_miss_tokens": record.input_cache_miss_tokens,
+            "reasoning_tokens": record.reasoning_tokens,
+            "route_attempts": json.loads(record.route_attempts_json or "[]"),
             "status": record.status,
             "latency_ms": record.latency_ms,
             "error_message": record.error_message,

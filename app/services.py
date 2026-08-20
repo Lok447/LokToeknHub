@@ -1,8 +1,10 @@
 import os
+import os
 import json
 import random
 import time
 import uuid
+from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -38,6 +40,53 @@ def calculate_amount(model: ModelConfig, input_tokens: int, output_tokens: int) 
         input_tokens * model.input_price_micros_per_1k // 1000
         + output_tokens * model.output_price_micros_per_1k // 1000
     )
+
+
+def normalize_request_payload(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Build a provider payload while normalizing the two OpenAI token names."""
+    payload = request.model_dump(exclude_none=True)
+    max_completion_tokens = payload.pop("max_completion_tokens", None)
+    if max_completion_tokens is not None and "max_tokens" not in payload:
+        payload["max_tokens"] = max_completion_tokens
+    return payload
+
+
+def extract_usage(data: dict[str, Any], estimated_input: int = 0) -> tuple[int, int, dict[str, int]]:
+    usage = data.get("usage") or {}
+    input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", estimated_input)) or 0)
+    output_tokens = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+    details = {
+        "input_cache_hit_tokens": int(usage.get("prompt_cache_hit_tokens", usage.get("cache_read_input_tokens", 0)) or 0),
+        "input_cache_miss_tokens": int(usage.get("prompt_cache_miss_tokens", usage.get("cache_creation_input_tokens", 0)) or 0),
+        "reasoning_tokens": int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", usage.get("reasoning_tokens", 0)) or 0),
+    }
+    return input_tokens, output_tokens, details
+
+
+def provider_cost(channel: ModelChannel, input_tokens: int, output_tokens: int, usage_details: dict[str, int] | None = None) -> int:
+    """Calculate auditable provider cost when operators configured channel prices."""
+    usage_details = usage_details or {}
+    input_price = channel.provider_input_cost_micros_per_1k
+    output_price = channel.provider_output_cost_micros_per_1k
+    if input_price is None or output_price is None:
+        return 0
+    hit = usage_details.get("input_cache_hit_tokens", 0)
+    miss = usage_details.get("input_cache_miss_tokens", 0)
+    priced_input = hit + miss if hit or miss else input_tokens
+    return priced_input * input_price // 1000 + output_tokens * output_price // 1000
+
+
+@dataclass
+class ProviderCallDetails:
+    response: dict[str, Any]
+    input_tokens: int
+    output_tokens: int
+    channel_id: int | None = None
+    provider_request_id: str | None = None
+    provider_cost_micros: int = 0
+    usage_details: dict[str, int] = field(default_factory=dict)
+    raw_usage: dict[str, Any] = field(default_factory=dict)
+    route_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def reserved_amount(model: ModelConfig, input_tokens: int, output_tokens: int) -> int:
@@ -296,47 +345,62 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     return {"healthy": True, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": "OK"}
 
 
-async def call_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> tuple[dict[str, Any], int, int]:
+async def call_provider_details(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> ProviderCallDetails:
     settings = get_settings()
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
-        if channels:
-            mark_channel_success(db, channels[0])
+        channel = channels[0] if channels else None
+        if channel:
+            mark_channel_success(db, channel)
         output = "TOKEN mock response"
         output_tokens = max(1, len(output) // 4)
-        return {
+        response = {
             "id": "chatcmpl-" + uuid.uuid4().hex,
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model.public_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": output}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": estimated_input, "completion_tokens": output_tokens, "total_tokens": estimated_input + output_tokens},
-        }, estimated_input, output_tokens
+        }
+        return ProviderCallDetails(response, estimated_input, output_tokens, channel_id=channel.id if channel else None, provider_request_id=response["id"], raw_usage=response["usage"])
 
     channels = select_channels(db, model)
     if not channels:
         raise HTTPException(status_code=502, detail="no available channel for model")
     last_detail = "all available channels failed"
+    route_attempts: list[dict[str, Any]] = []
     for channel in channels:
         endpoint, headers = _provider_auth(channel)
-        payload = request.model_dump(exclude_none=True)
+        payload = normalize_request_payload(request)
         payload["model"] = channel.upstream_model
         payload.setdefault("max_tokens", settings.reservation_output_tokens)
+        attempt_started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
                 response = await client.post(endpoint, json=payload, headers=headers)
             if response.is_error:
+                route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
                 raise ProviderCallError(
                     f"{channel.name}: HTTP {response.status_code}: {response.text[:500]}",
                     retryable=_retryable_status(response.status_code),
                 )
             data = response.json()
+            input_tokens, output_tokens, usage_details = extract_usage(data, estimated_input)
             usage = data.get("usage") or {}
-            input_tokens = int(usage.get("prompt_tokens", estimated_input))
-            output_tokens = int(usage.get("completion_tokens", 0))
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_success(db, channel)
-            return data, input_tokens, output_tokens
+            return ProviderCallDetails(
+                data,
+                input_tokens,
+                output_tokens,
+                channel_id=channel.id,
+                provider_request_id=str(data.get("id")) if data.get("id") else None,
+                provider_cost_micros=provider_cost(channel, input_tokens, output_tokens, usage_details),
+                usage_details=usage_details,
+                raw_usage=usage,
+                route_attempts=route_attempts,
+            )
         except ProviderCallError as exc:
             last_detail = exc.detail
             mark_channel_failure(db, channel, exc.detail)
@@ -344,20 +408,35 @@ async def call_provider(db: Session, model: ModelConfig, request: ChatCompletion
                 break
         except httpx.HTTPError as exc:
             last_detail = f"{channel.name}: provider unavailable: {exc}"
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             last_detail = f"{channel.name}: invalid provider response: {exc}"
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
     raise HTTPException(status_code=502, detail=last_detail)
 
 
-async def stream_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+async def call_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> tuple[dict[str, Any], int, int]:
+    """Backward-compatible provider call tuple used by preflight and older integrations."""
+    result = await call_provider_details(db, model, request)
+    return result.response, result.input_tokens, result.output_tokens
+
+
+async def stream_provider(
+    db: Session,
+    model: ModelConfig,
+    request: ChatCompletionRequest,
+    route_meta: dict[str, Any] | None = None,
+) -> AsyncIterator[bytes]:
     settings = get_settings()
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
         if channels:
             mark_channel_success(db, channels[0])
+            if route_meta is not None:
+                route_meta.update({"provider_channel_id": channels[0].id, "route_attempts": [{"channel_id": channels[0].id, "channel": channels[0].name, "status": 200, "latency_ms": 0}]})
         completion_id = "chatcmpl-" + uuid.uuid4().hex
         base = {"id": completion_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model.public_name}
         chunks = [
@@ -380,18 +459,21 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
         emitted = False
         endpoint, headers = _provider_auth(channel)
         headers["Accept"] = "text/event-stream"
-        payload = request.model_dump(exclude_none=True)
+        payload = normalize_request_payload(request)
         payload["model"] = channel.upstream_model
         payload["stream"] = True
         payload.setdefault("max_tokens", settings.reservation_output_tokens)
         stream_options = payload.get("stream_options") or {}
         stream_options["include_usage"] = True
         payload["stream_options"] = stream_options
+        attempt_started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
                     if response.is_error:
                         detail = (await response.aread()).decode("utf-8", errors="replace")[:500]
+                        if route_meta is not None:
+                            route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
                         raise ProviderCallError(
                             f"{channel.name}: HTTP {response.status_code}: {detail}",
                             retryable=_retryable_status(response.status_code),
@@ -399,8 +481,22 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
                     async for line in response.aiter_lines():
                         if line:
                             emitted = True
+                            if route_meta is not None and line.startswith("data: ") and "[DONE]" not in line:
+                                try:
+                                    chunk_data = json.loads(line[6:].strip())
+                                    route_meta.setdefault("provider_request_id", chunk_data.get("id"))
+                                    usage = chunk_data.get("usage") or {}
+                                    if usage:
+                                        _, _, usage_details = extract_usage(chunk_data, estimated_input)
+                                        route_meta["usage_details"] = usage_details
+                                        route_meta["raw_usage"] = usage
+                                except (TypeError, ValueError, json.JSONDecodeError):
+                                    pass
                             yield (line + "\n\n").encode("utf-8")
             mark_channel_success(db, channel)
+            if route_meta is not None:
+                route_meta["provider_channel_id"] = channel.id
+                route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": 200, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             return
         except ProviderCallError as exc:
             last_detail = exc.detail
@@ -409,6 +505,8 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
                 raise HTTPException(status_code=502, detail=exc.detail) from exc
         except httpx.HTTPError as exc:
             last_detail = f"{channel.name}: provider unavailable: {exc}"
+            if route_meta is not None:
+                route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
             if emitted:
                 raise HTTPException(status_code=502, detail=last_detail) from exc
@@ -426,6 +524,14 @@ def save_usage(
     status: str,
     latency_ms: int,
     error_message: str | None = None,
+    *,
+    provider_cost_micros: int = 0,
+    provider_channel_id: int | None = None,
+    provider_request_id: str | None = None,
+    usage_details: dict[str, int] | None = None,
+    raw_usage: dict[str, Any] | None = None,
+    route_attempts: list[dict[str, Any]] | None = None,
+    price_version: str | None = None,
 ) -> UsageRecord:
     tracked_key = db.get(ApiKey, api_key.id)
     if tracked_key:
@@ -443,6 +549,15 @@ def save_usage(
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         amount_micros=calculate_amount(model, input_tokens, output_tokens),
+        provider_cost_micros=provider_cost_micros,
+        provider_channel_id=provider_channel_id,
+        provider_request_id=provider_request_id,
+        input_cache_hit_tokens=(usage_details or {}).get("input_cache_hit_tokens", 0),
+        input_cache_miss_tokens=(usage_details or {}).get("input_cache_miss_tokens", 0),
+        reasoning_tokens=(usage_details or {}).get("reasoning_tokens", 0),
+        price_version=price_version,
+        route_attempts_json=json.dumps(route_attempts or [], ensure_ascii=False, separators=(",", ":")),
+        raw_usage_json=json.dumps(raw_usage or {}, ensure_ascii=False, separators=(",", ":")),
         status=status,
         latency_ms=latency_ms,
         error_message=error_message,

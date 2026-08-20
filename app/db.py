@@ -99,11 +99,31 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN health_source VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
         if "encrypted_api_key" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN encrypted_api_key TEXT"))
+        if "provider_input_cost_micros_per_1k" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_input_cost_micros_per_1k INTEGER"))
+        if "provider_output_cost_micros_per_1k" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_output_cost_micros_per_1k INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_channels_health_source ON model_channels (health_source)"))
         if "catalog_metadata_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN catalog_metadata_json TEXT"))
         if "official_pricing_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
+        usage_additions = {
+            "provider_cost_micros": "INTEGER NOT NULL DEFAULT 0",
+            "provider_channel_id": "INTEGER",
+            "provider_request_id": "VARCHAR(160)",
+            "input_cache_hit_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "input_cache_miss_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "reasoning_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "price_version": "VARCHAR(64)",
+            "route_attempts_json": "TEXT",
+            "raw_usage_json": "TEXT",
+        }
+        for column, definition in usage_additions.items():
+            if column not in usage_columns:
+                connection.execute(text(f"ALTER TABLE usage_records ADD COLUMN {column} {definition}"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_provider_channel_id ON usage_records (provider_channel_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_provider_request_id ON usage_records (provider_request_id)"))
         if not settings.mock_mode:
             connection.execute(text(
                 "DELETE FROM model_channels WHERE model_config_id IN ("
