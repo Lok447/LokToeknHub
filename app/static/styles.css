@@ -190,6 +190,7 @@ tbody tr:hover { background: #fafbfc; }
 .full-button { width: 100%; margin-top: 6px; }
 .icon-button { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 38px; border: 1px solid var(--line); border-radius: 5px; color: #59636d; background: var(--surface); }
 .icon-button:hover { color: var(--ink); border-color: var(--line-strong); background: var(--surface-soft); }
+.icon-button:disabled { opacity: 0.4; cursor: not-allowed; }
 .icon-button svg { width: 17px; height: 17px; stroke-width: 1.8; }
 .text-button { display: inline-flex; align-items: center; gap: 7px; padding: 7px 0; color: #2856d8; background: transparent; font-size: 11px; font-weight: 700; }
 .table-button { min-height: 29px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 10px; border-radius: 4px; color: #2856d8; background: var(--signal-soft); font-size: 10px; font-weight: 700; }

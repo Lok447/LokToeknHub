@@ -21,7 +21,7 @@ from app.config import Settings, validate_startup_settings
 from app.guardrails import rate_limiter
 from app.main import app
 from app.config import get_settings
-from app.models import ApiKey, ExternalIdentity, ModelChannel, UsageRecord
+from app.models import ApiKey, ExternalIdentity, ModelChannel, ModelConfig, UsageRecord
 
 
 def setup_function() -> None:
@@ -803,7 +803,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260820-3"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260821-1"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
@@ -1136,6 +1136,65 @@ async def test_batch_model_import_pricing_and_api_rate_limit(monkeypatch) -> Non
         limited_call = await client.post("/v1/chat/completions", headers=headers, json={"model": "lok-chat", "messages": [{"role": "user", "content": "again"}]})
         assert limited_call.status_code == 429
         assert limited_call.headers["retry-after"]
+
+
+@pytest.mark.asyncio
+async def test_model_pricing_margin_uses_official_reference_price() -> None:
+    with SessionLocal() as db:
+        model = ModelConfig(
+            public_name="margin-model",
+            upstream_model="margin-upstream",
+            provider_base_url="https://provider.example/v1",
+            input_price_micros_per_1k=1000,
+            output_price_micros_per_1k=2000,
+            official_pricing_json=json.dumps({"off_peak": {"input_cache_miss_micros": 1_000_000, "output_micros": 2_000_000}}),
+            active=False,
+        )
+        db.add(model)
+        db.commit()
+        model_id = model.id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        updated = await client.patch(f"/admin/models/{model_id}", headers={"X-Admin-Token": "test-admin"}, json={"pricing_margin_bps": 2500})
+        assert updated.status_code == 200
+        assert updated.json()["pricing_margin_bps"] == 2500
+        assert updated.json()["input_price_micros_per_1k"] == 1334
+        assert updated.json()["output_price_micros_per_1k"] == 2667
+        listed = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
+        item = next(item for item in listed.json()["data"] if item["id"] == model_id)
+        assert item["pricing_margin_bps"] == 2500
+
+
+@pytest.mark.asyncio
+async def test_model_pricing_margin_requires_official_reference_price() -> None:
+    with SessionLocal() as db:
+        model = ModelConfig(public_name="manual-only-model", upstream_model="manual-only", provider_base_url="https://provider.example/v1", active=False)
+        db.add(model)
+        db.commit()
+        model_id = model.id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        updated = await client.patch(f"/admin/models/{model_id}", headers={"X-Admin-Token": "test-admin"}, json={"pricing_margin_bps": 2500})
+        assert updated.status_code == 422
+        assert "官方价格" in updated.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_model_delete_requires_unpublished() -> None:
+    with SessionLocal() as db:
+        candidate = ModelConfig(public_name="deletable-model", upstream_model="deletable", provider_base_url="https://provider.example/v1", active=False)
+        active = ModelConfig(public_name="active-model", upstream_model="active", provider_base_url="https://provider.example/v1", active=True)
+        db.add_all([candidate, active])
+        db.commit()
+        candidate_id, active_id = candidate.id, active.id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        deleted = await client.delete(f"/admin/models/{candidate_id}", headers={"X-Admin-Token": "test-admin"})
+        assert deleted.status_code == 200
+        assert deleted.json()["deleted"] is True
+        blocked = await client.delete(f"/admin/models/{active_id}", headers={"X-Admin-Token": "test-admin"})
+        assert blocked.status_code == 409
+        assert "下架" in blocked.json()["detail"]
 
 
 def test_production_startup_configuration_rejects_unsafe_defaults() -> None:

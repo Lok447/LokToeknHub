@@ -168,7 +168,8 @@ class ProviderConnectionConfigure(BaseModel):
     default_input_price_micros_per_1k: int = Field(default=0, ge=0)
     default_output_price_micros_per_1k: int = Field(default=0, ge=0)
     model_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
-    auto_publish: bool = True
+    # Kept for backwards compatibility with older clients. New UI syncs never publish automatically.
+    auto_publish: bool = False
     balance_alert_threshold_micros: int = Field(default=0, ge=0)
 
 
@@ -181,6 +182,7 @@ class ProviderBalanceManual(BaseModel):
 class ModelUpdate(BaseModel):
     input_price_micros_per_1k: int | None = Field(default=None, ge=0)
     output_price_micros_per_1k: int | None = Field(default=None, ge=0)
+    pricing_margin_bps: int | None = Field(default=None, ge=0, le=9900)
     active: bool | None = None
 
 

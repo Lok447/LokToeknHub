@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=console-20260820-4">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260821-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=console-20260820-5" defer></script>
+  <script src="/static/app.js?v=console-20260821-5" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -73,6 +73,7 @@
           <h1 id="page-title">管理概览</h1>
         </div>
         <div class="topbar-actions">
+          <button class="icon-button" id="admin-back-button" type="button" title="返回上一页" aria-label="返回上一页"><i data-lucide="arrow-left"></i></button>
           <a class="secondary-button topbar-doc-link" id="admin-guide-link" href="/guide/admin" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>管理文档</span></a>
           <span class="environment" id="environment-badge"><span class="status-dot"></span>读取环境</span>
           <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
@@ -149,7 +150,7 @@
   </div>
 
   <dialog id="action-dialog">
-    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div class="dialog-header"><div><p class="eyebrow">LokToken</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
     <div id="dialog-content"></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>

@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import httpx
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1392,18 +1392,41 @@ async def configure_provider_connection(
         )
         db.add(connection)
         db.flush()
+    default_input_price = (
+        payload.default_input_price_micros_per_1k
+        if "default_input_price_micros_per_1k" in payload.model_fields_set
+        else connection.default_input_price_micros_per_1k
+    )
+    default_output_price = (
+        payload.default_output_price_micros_per_1k
+        if "default_output_price_micros_per_1k" in payload.model_fields_set
+        else connection.default_output_price_micros_per_1k
+    )
     connection.name = preset.name
     connection.provider_base_url = base_url
     connection.provider_api_key_env = env_name
     connection.encrypted_api_key = encrypted_secret
-    connection.default_input_price_micros_per_1k = payload.default_input_price_micros_per_1k
-    connection.default_output_price_micros_per_1k = payload.default_output_price_micros_per_1k
+    if "default_input_price_micros_per_1k" in payload.model_fields_set:
+        connection.default_input_price_micros_per_1k = default_input_price
+    if "default_output_price_micros_per_1k" in payload.model_fields_set:
+        connection.default_output_price_micros_per_1k = default_output_price
     connection.balance_alert_threshold_micros = payload.balance_alert_threshold_micros
     connection.active = True
     connection.discovered_model_count = len(discovered_ids)
     connection.last_checked_at = utcnow()
     connection.updated_at = utcnow()
     connection.last_error = None
+    # Older API clients used the legacy default-price fields as an implicit
+    # request to publish callable text models. Preserve that contract only
+    # for those explicit legacy payloads; the current UI never auto-publishes.
+    legacy_auto_publish = (
+        "auto_publish" not in payload.model_fields_set
+        and (
+            "default_input_price_micros_per_1k" in payload.model_fields_set
+            or "default_output_price_micros_per_1k" in payload.model_fields_set
+        )
+    )
+    should_auto_publish = payload.auto_publish or legacy_auto_publish
     synced: list[dict[str, object]] = []
     for model_id in selected_ids:
         preset_model = preset.get_model(model_id)
@@ -1416,8 +1439,8 @@ async def configure_provider_connection(
                 upstream_model=preset_model.model_id,
                 provider_base_url=base_url,
                 provider_api_key_env=env_name,
-                input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k or payload.default_input_price_micros_per_1k,
-                output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k or payload.default_output_price_micros_per_1k,
+                input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k or default_input_price,
+                output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k or default_output_price,
                 catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
                 official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
                 active=False,
@@ -1432,9 +1455,9 @@ async def configure_provider_connection(
             if preset_model.official_pricing:
                 model.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
             if model.input_price_micros_per_1k <= 0:
-                model.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k or payload.default_input_price_micros_per_1k
+                model.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k or default_input_price
             if model.output_price_micros_per_1k <= 0:
-                model.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k or payload.default_output_price_micros_per_1k
+                model.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k or default_output_price
         channel = db.scalar(select(ModelChannel).where(
             ModelChannel.model_config_id == model.id,
             ModelChannel.provider_connection_id == connection.id,
@@ -1470,7 +1493,7 @@ async def configure_provider_connection(
         callable_now = channel.active and price_ready
         if not available:
             model.active = False
-        elif payload.auto_publish and callable_now:
+        elif should_auto_publish and callable_now:
             model.active = True
         synced.append({
             "id": model.id,
@@ -1478,6 +1501,7 @@ async def configure_provider_connection(
             "upstream_model": model.upstream_model,
             "input_price_micros_per_1k": model.input_price_micros_per_1k,
             "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "pricing_margin_bps": model.pricing_margin_bps,
             "available": available,
             "callable": bool(model.active and callable_now),
             "reason": None if callable_now else "等待统一调用适配器" if metadata_api_type != "chat_completions" else "请配置平台价格" if not price_ready else "尚未发布",
@@ -1615,6 +1639,7 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "provider_api_key_env": model.provider_api_key_env,
             "input_price_micros_per_1k": model.input_price_micros_per_1k,
             "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "pricing_margin_bps": model.pricing_margin_bps,
             "catalog_metadata": parse_model_json(model.catalog_metadata_json),
             "official_pricing": parse_model_json(model.official_pricing_json),
             "active": model.active,
@@ -1643,6 +1668,13 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="no model changes provided")
+    if "pricing_margin_bps" in changes and changes["pricing_margin_bps"]:
+        input_price, output_price = prices_from_margin(model, changes["pricing_margin_bps"])
+        changes["input_price_micros_per_1k"] = input_price
+        changes["output_price_micros_per_1k"] = output_price
+    elif "pricing_margin_bps" not in changes and ({"input_price_micros_per_1k", "output_price_micros_per_1k"} & changes.keys()):
+        # A direct price edit is an explicit manual override of the margin strategy.
+        changes["pricing_margin_bps"] = 0
     if changes.get("active"):
         settings = get_settings()
         input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
@@ -1669,7 +1701,27 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
         "active": model.active,
         "input_price_micros_per_1k": model.input_price_micros_per_1k,
         "output_price_micros_per_1k": model.output_price_micros_per_1k,
+        "pricing_margin_bps": model.pricing_margin_bps,
     }
+
+
+@app.delete("/admin/models/{model_id}", dependencies=[Depends(require_superadmin)])
+def delete_model(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    if model.active:
+        raise HTTPException(status_code=409, detail="请先下架模型后再删除")
+    usage_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.model == model.public_name)) or 0
+    if usage_count:
+        raise HTTPException(status_code=409, detail="该模型已有调用记录，不能删除；请保留下架状态以便审计")
+    model_id_value = model.id
+    public_name = model.public_name
+    db.execute(delete(ModelChannel).where(ModelChannel.model_config_id == model.id))
+    db.delete(model)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.deleted", target_type="model", target_id=model_id_value, details={"public_name": public_name})
+    db.commit()
+    return {"id": model_id_value, "public_name": public_name, "deleted": True}
 
 
 def parse_model_json(value: str | None) -> dict[str, object] | None:
@@ -1680,6 +1732,29 @@ def parse_model_json(value: str | None) -> dict[str, object] | None:
     except json.JSONDecodeError:
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+def official_reference_prices(model: ModelConfig) -> tuple[int, int] | None:
+    """Return official input/output costs in the ledger's /1K micros unit."""
+    pricing = parse_model_json(model.official_pricing_json) or {}
+    off_peak = pricing.get("off_peak")
+    if not isinstance(off_peak, dict):
+        return None
+    input_per_million = off_peak.get("input_cache_miss_micros")
+    output_per_million = off_peak.get("output_micros")
+    if not isinstance(input_per_million, (int, float)) or not isinstance(output_per_million, (int, float)):
+        return None
+    if input_per_million <= 0 or output_per_million <= 0:
+        return None
+    return round(input_per_million / 1000), round(output_per_million / 1000)
+
+
+def prices_from_margin(model: ModelConfig, margin_bps: int) -> tuple[int, int]:
+    reference = official_reference_prices(model)
+    if not reference:
+        raise HTTPException(status_code=422, detail="该模型没有可核验的官方价格，无法按利润率自动定价")
+    denominator = 10_000 - margin_bps
+    return tuple((price * 10_000 + denominator - 1) // denominator for price in reference)
 
 
 def channel_data(channel: ModelChannel) -> dict[str, object]:

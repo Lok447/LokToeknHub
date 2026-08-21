@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken用户中心</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=portal-20260820-3">
-  <link rel="stylesheet" href="/static/portal.css?v=portal-20260820-3">
+  <link rel="stylesheet" href="/static/styles.css?v=portal-20260821-1">
+  <link rel="stylesheet" href="/static/portal.css?v=portal-20260821-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/portal.js?v=portal-20260820-3" defer></script>
+  <script src="/static/portal.js?v=portal-20260821-1" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
@@ -97,7 +97,7 @@
           <p class="eyebrow">LOKTOKEN / USER</p>
           <h1 id="portal-page-title">用户概览</h1>
         </div>
-        <div class="topbar-actions"><a class="secondary-button topbar-doc-link" id="portal-guide-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
+        <div class="topbar-actions"><button class="icon-button" id="portal-back-button" type="button" title="返回上一页" aria-label="返回上一页"><i data-lucide="arrow-left"></i></button><a class="secondary-button topbar-doc-link" id="portal-guide-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
       </header>
 
       <div class="content">
@@ -243,7 +243,7 @@
   </div>
 
   <dialog id="portal-dialog">
-    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="portal-dialog-title"></h2></div><button class="icon-button" id="portal-dialog-close" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div class="dialog-header"><div><p class="eyebrow">LokToken</p><h2 id="portal-dialog-title"></h2></div><button class="icon-button" id="portal-dialog-close" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
     <div id="portal-dialog-content"></div>
   </dialog>
   <div class="toast" id="portal-toast" role="status"></div>

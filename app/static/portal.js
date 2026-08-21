@@ -18,6 +18,38 @@ const portalState = {
 
 const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "密钥管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
 
+const portalViewFromUrl = () => {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return Object.prototype.hasOwnProperty.call(portalTitles, view) ? view : "overview";
+};
+
+function portalViewUrl(view) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("view", view);
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
+function primePortalHistory(view) {
+  if (window.history.state?.app === "portal" && window.history.state.view === view) return;
+  const url = portalViewUrl(view);
+  window.history.replaceState({ app: "portal", view }, "", url);
+  window.history.pushState({ app: "portal", view }, "", url);
+}
+
+function updatePortalHistory(view, mode = "push") {
+  if (mode === "none") return;
+  const current = window.history.state;
+  if (mode === "replace" || current?.app !== "portal" || current.view !== view) {
+    window.history[mode === "replace" ? "replaceState" : "pushState"]({ app: "portal", view }, "", portalViewUrl(view));
+  }
+}
+
+function navigatePortalBack() {
+  if (portalState.view === "overview") return;
+  if (window.history.state?.app === "portal") window.history.back();
+  else switchPortalView("overview");
+}
+
 function portalIcons() {
   if (window.lucide) window.lucide.createIcons();
 }
@@ -190,7 +222,7 @@ async function establishPortalSession(result) {
   await loadProfile();
   await loadWorkspaces();
   showPortalShell();
-  await switchPortalView("overview");
+  await switchPortalView(portalViewFromUrl());
 }
 
 function setAuthMode(mode) {
@@ -912,12 +944,16 @@ async function redeemBenefit(form) {
 
 const portalLoaders = { overview: loadOverview, keys: loadKeys, models: loadModels, usage: loadUsage, quota: loadQuota, orders: loadOrders, redeem: loadRedeem };
 
-async function switchPortalView(view) {
+async function switchPortalView(view, { historyMode = "push" } = {}) {
+  if (!Object.prototype.hasOwnProperty.call(portalTitles, view)) view = "overview";
   portalState.view = view;
+  updatePortalHistory(view, historyMode);
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `portal-view-${view}`));
   document.getElementById("portal-page-title").textContent = portalTitles[view];
   document.getElementById("portal-guide-link").hidden = view !== "overview";
+  const backButton = document.getElementById("portal-back-button");
+  if (backButton) backButton.disabled = view === "overview";
   try { await portalLoaders[view](); } catch (error) { portalToast(error.message, true); }
 }
 
@@ -1131,7 +1167,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("portal-logout").addEventListener("click", () => {
     sessionStorage.removeItem("token_portal_access"); portalState.token = ""; closePortalAccountMenu(); document.getElementById("portal-token").value = ""; showPortalAuth();
   });
-  document.getElementById("portal-refresh").addEventListener("click", () => switchPortalView(portalState.view));
+  document.getElementById("portal-refresh").addEventListener("click", () => switchPortalView(portalState.view, { historyMode: "none" }));
+  document.getElementById("portal-back-button").addEventListener("click", navigatePortalBack);
   document.getElementById("portal-security").addEventListener("click", () => { closePortalAccountMenu(); portalSecurityDialog(); });
   document.getElementById("portal-workspace-manager").addEventListener("click", () => { closePortalAccountMenu(); workspaceManagerDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
@@ -1195,9 +1232,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.requestId) loadUsageDetail(target.dataset.requestId).catch((error) => portalToast(error.message, true));
   });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closePortalAccountMenu(); });
+  window.addEventListener("popstate", (event) => {
+    if (!portalState.token) return;
+    if (event.state?.app === "portal") switchPortalView(event.state.view, { historyMode: "none" });
+    else {
+      primePortalHistory(portalState.view);
+      switchPortalView(portalState.view, { historyMode: "none" });
+    }
+  });
   if (portalState.token) {
     document.getElementById("portal-token").value = portalState.token;
-    try { await loadProfile(); await loadWorkspaces(); showPortalShell(); await switchPortalView("overview"); } catch (error) { showPortalAuth(error.message); }
+    try { await loadProfile(); await loadWorkspaces(); showPortalShell(); const view = portalViewFromUrl(); primePortalHistory(view); await switchPortalView(view, { historyMode: "none" }); } catch (error) { showPortalAuth(error.message); }
   } else {
     showPortalAuth(loksystemSsoError || "");
   }

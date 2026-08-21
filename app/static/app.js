@@ -41,9 +41,9 @@ function applyRoleUi() {
     "create-account", "create-key", "health-check-all", "import-models", "create-model",
     "create-payment", "create-redemption", "trial-link", "topup", "confirm-payment",
     "refund-payment", "toggle-redemption", "edit-model-pricing", "manage-channels",
-    "preflight-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
+    "preflight-model", "delete-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
   ] : [
-    "manage-admins", "refund-payment", "preflight-model",
+    "manage-admins", "refund-payment", "preflight-model", "delete-model",
   ]);
   document.querySelectorAll("[data-action]").forEach((element) => {
     element.hidden = hiddenActions.has(element.dataset.action);
@@ -73,6 +73,38 @@ const titles = {
   usage: "用量管理",
   audit: "安全审计",
 };
+
+const adminViewFromUrl = () => {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return Object.prototype.hasOwnProperty.call(titles, view) ? view : "overview";
+};
+
+function adminViewUrl(view) {
+  const params = new URLSearchParams(window.location.search);
+  params.set("view", view);
+  return `${window.location.pathname}?${params.toString()}`;
+}
+
+function primeAdminHistory(view) {
+  if (window.history.state?.app === "admin" && window.history.state.view === view) return;
+  const url = adminViewUrl(view);
+  window.history.replaceState({ app: "admin", view }, "", url);
+  window.history.pushState({ app: "admin", view }, "", url);
+}
+
+function updateAdminHistory(view, mode = "push") {
+  if (mode === "none") return;
+  const current = window.history.state;
+  if (mode === "replace" || current?.app !== "admin" || current.view !== view) {
+    window.history[mode === "replace" ? "replaceState" : "pushState"]({ app: "admin", view }, "", adminViewUrl(view));
+  }
+}
+
+function navigateAdminBack() {
+  if (state.view === "overview") return;
+  if (window.history.state?.app === "admin") window.history.back();
+  else switchView("overview");
+}
 function icons() {
   if (window.lucide) window.lucide.createIcons();
 }
@@ -431,7 +463,7 @@ function providerConnection(provider) {
 }
 
 function providerConnectionBadge(connection) {
-  if (!connection || !connection.credentials_configured) return '<span class="badge neutral">未配置厂家</span>';
+  if (!connection || !connection.credentials_configured) return '<span class="badge neutral">未配置服务商</span>';
   if (connection.status === "healthy") return `<span class="badge success">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
   if (connection.status === "degraded") return `<span class="badge warning">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
   return '<span class="badge error">连接异常</span>';
@@ -479,21 +511,17 @@ function providerConnectionDialog(presetId) {
   const preset = state.providerPresets.find((item) => item.id === presetId);
   const connection = state.providerConnections.find((item) => item.preset_id === presetId);
   if (!preset) { toast("没有找到供应商模板", true); return; }
-  const inputPrice = connection?.default_input_price_micros_per_1k ? microsPerThousandToYuanPerMillion(connection.default_input_price_micros_per_1k) : "";
-  const outputPrice = connection?.default_output_price_micros_per_1k ? microsPerThousandToYuanPerMillion(connection.default_output_price_micros_per_1k) : "";
   const balanceText = connection?.balance_status === "available" ? `${formatMoney(connection.balance_micros)} ${connection.balance_currency || "CNY"}` : connection?.balance_status === "unsupported" ? "该供应商需在控制台查看" : connection?.balance_status === "error" ? "上次查询失败" : "尚未查询";
-  openDialog(`厂家接入 · ${preset.name}`, `
+  openDialog(`服务商接入 · ${preset.name}`, `
     <form id="provider-connection-form">
       <div class="dialog-body">
         <div class="provider-connection-summary"><span class="admin-provider-logo">${providerLogo(preset.name)}</span><div><strong>一次配置，统一同步 ${preset.models.length} 个系列模型</strong><p>${escapeHtml(preset.note)}</p></div></div>
         <div class="field"><label for="provider-connection-url">供应商 API 地址</label><input id="provider-connection-url" name="provider_base_url" required maxlength="500" value="${escapeHtml(connection?.provider_base_url || preset.base_url)}"></div>
-        <div class="field"><label for="provider-connection-key">供应商 API Key</label><input id="provider-connection-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="${connection?.credentials_configured ? "已保存；留空表示继续使用当前密钥" : "输入厂家控制台发放的 API Key"}"><small class="field-hint">密钥由服务端加密保存，不会回显到浏览器或模型列表。</small></div>
+        <div class="field"><label for="provider-connection-key">供应商 API Key</label><input id="provider-connection-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="${connection?.credentials_configured ? "已保存；留空表示继续使用当前密钥" : "输入服务商控制台发放的 API Key"}"><small class="field-hint">密钥由服务端加密保存，不会回显到浏览器或模型列表。</small></div>
         <div class="field"><label for="provider-connection-env">服务器密钥环境变量（可选）</label><input id="provider-connection-env" name="provider_api_key_env" maxlength="120" value="${escapeHtml(connection?.provider_api_key_env || preset.api_key_env || "")}" placeholder="例如 DASHSCOPE_API_KEY"><small class="field-hint">填写环境变量时，可不在此录入明文密钥。</small></div>
-        <div class="field-row"><div class="field"><label for="provider-default-input-price">批量默认输入售价 / 1M Token（元）</label><input id="provider-default-input-price" name="default_input_price" type="number" min="0" step="0.001" value="${inputPrice}" placeholder="可选"></div><div class="field"><label for="provider-default-output-price">批量默认输出售价 / 1M Token（元）</label><input id="provider-default-output-price" name="default_output_price" type="number" min="0" step="0.001" value="${outputPrice}" placeholder="可选"></div></div><small class="field-hint">可选兜底值，仅用于没有官方参考价的新模型；每个模型的最终用户售价不同，请在同步后进入模型列表的“定价”逐项维护。已有模型价格不会被该默认值覆盖。供应商采购成本请在渠道详情中单独维护。</small>
         <div class="field"><label for="provider-balance-threshold">上游余额预警阈值（元，可选）</label><input id="provider-balance-threshold" name="balance_alert_threshold" type="number" min="0" step="0.01" value="${connection?.balance_alert_threshold_micros ? (connection.balance_alert_threshold_micros / 1000000).toFixed(2) : "0"}"><small class="field-hint">仅用于提醒采购，不会影响用户额度或自动扣款。</small></div>
         <div class="provider-balance-panel"><div><strong>上游账户余额</strong><span>${escapeHtml(balanceText)}</span><small>${connection?.balance_checked_at ? `最近查询：${formatDate(connection.balance_checked_at)}` : "余额查询不会通过模型健康检查推断"}</small></div><div class="provider-card-actions"><button class="table-button" type="button" data-action="refresh-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="refresh-cw"></i><span>刷新余额</span></button><button class="secondary-button compact-provider-button" type="button" data-action="manual-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="pencil"></i><span>手工录入</span></button></div></div>
-        <label class="check-row"><input name="auto_publish" type="checkbox"><span>同步后自动发布符合条件的文本模型（生产环境建议关闭）</span></label>
-      <p class="dialog-copy">系统会读取厂家真实模型目录，为整系列复用该连接并更新健康状态。图像、视频等尚未接入统一调用适配器的模型会保留为候选，不会错误标记为可调用。同步完成后，请在模型列表中逐个核对官方价格、平台售价和渠道采购成本，再决定是否发布。</p>
+      <p class="dialog-copy">系统会读取服务商真实模型目录，为整系列复用该连接并更新健康状态。图像、视频等尚未接入统一调用适配器的模型会保留为候选，不会错误标记为可调用。同步完成后，请在模型列表中逐个维护平台售价、核对渠道采购成本和预检状态，再决定是否发布。</p>
       </div>
       <div class="dialog-actions provider-dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="secondary-button" type="button" data-action="test-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>测试连接</span></button><button class="primary-button" type="submit"><i data-lucide="refresh-cw"></i><span>${connection ? "重新同步系列" : "配置并同步系列"}</span></button></div>
     </form>`);
@@ -505,10 +533,7 @@ function providerConnectionDialog(presetId) {
     const payload = {
       provider_base_url: String(form.get("provider_base_url") || "").trim(),
       provider_api_key_env: envName || null,
-      default_input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(form.get("default_input_price")),
-      default_output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(form.get("default_output_price")),
       balance_alert_threshold_micros: Math.round(Number(form.get("balance_alert_threshold") || 0) * 1000000),
-      auto_publish: form.get("auto_publish") === "on",
     };
     if (rawKey) payload.provider_api_key = rawKey;
     const submit = event.currentTarget.querySelector('button[type="submit"]');
@@ -587,6 +612,11 @@ function renderModels() {
     const apiType = modelApiType(item);
     const chatCompatible = apiType === "chat_completions";
     const provider = item.catalog_metadata?.provider || "自定义";
+    const channelButton = `<button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button>`;
+    const pricingButton = `<button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}" ${chatCompatible ? "" : 'disabled title="非 Token 计费尚未启用"'}><i data-lucide="receipt-text"></i><span>定价</span></button>`;
+    const preflightButton = isSuperadmin() ? `<button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" ${chatCompatible ? "" : 'disabled title="等待统一调用适配器"'}><i data-lucide="flask-conical"></i><span>预检</span></button>` : "";
+    const publishButton = `<button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}"${publishTitle}>${publishLabel}</button>`;
+    const deleteButton = isSuperadmin() ? `<button class="table-button danger" data-action="delete-model" data-id="${item.id}" data-name="${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}"><i data-lucide="trash-2"></i><span>删除</span></button>` : "";
     return `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</strong><span class="secondary mono">${escapeHtml(item.public_name)}</span><span class="secondary mono">上游：${escapeHtml(item.upstream_model)}</span></div></td>
@@ -597,7 +627,7 @@ function renderModels() {
       <td>${formatNumber(item.channel_count)}</td>
       <td><span class="channel-health"><strong>${formatNumber(item.healthy_channel_count)}</strong> / ${formatNumber(item.channel_count)}</span></td>
       <td>${modelPublicationBadge(item)}</td>
-      <td class="align-right">${canOperate() ? `<div class="table-actions">${isSuperadmin() ? `<button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" ${chatCompatible ? "" : 'disabled title="等待统一调用适配器"'}><i data-lucide="flask-conical"></i><span>预检</span></button>` : ""}<button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}" ${chatCompatible ? "" : 'disabled title="非 Token 计费尚未启用"'}><i data-lucide="receipt-text"></i><span>定价</span></button><button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button><button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}"${publishTitle}>${publishLabel}</button></div>` : '<span class="secondary">只读</span>'}</td>
+      <td class="align-right">${canOperate() ? `<div class="table-actions">${channelButton}${pricingButton}${preflightButton}${publishButton}${deleteButton}</div>` : '<span class="secondary">只读</span>'}</td>
     </tr>
   `; }).join("") : emptyRow(9, "没有符合筛选条件的模型");
   icons();
@@ -715,12 +745,16 @@ async function providerBillsDialog() {
 
 const loaders = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, models: loadModels, payments: loadPayments, redemptions: loadRedemptions, usage: loadUsage, audit: loadAudit };
 
-async function switchView(view) {
+async function switchView(view, { historyMode = "push" } = {}) {
+  if (!Object.prototype.hasOwnProperty.call(titles, view)) view = "overview";
   state.view = view;
+  updateAdminHistory(view, historyMode);
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `view-${view}`));
   document.getElementById("page-title").textContent = titles[view];
   document.getElementById("admin-guide-link").hidden = view !== "overview";
+  const backButton = document.getElementById("admin-back-button");
+  if (backButton) backButton.disabled = view === "overview";
   try { await loaders[view](); } catch (error) { toast(error.message, true); }
 }
 
@@ -934,22 +968,52 @@ async function modelImportDialog() {
 function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMicros) {
   const model = state.models.find((item) => item.id === Number(modelId));
   const pricing = model?.official_pricing;
+  const hasOfficialPrice = Boolean(pricing?.off_peak?.input_cache_miss_micros > 0 && pricing?.off_peak?.output_micros > 0);
+  const configuredMargin = Number(model?.pricing_margin_bps || 0) / 100;
+  const currentInputPerMillion = Number(inputPriceMicros || 0) * 1000;
+  const inferredMargin = hasOfficialPrice && currentInputPerMillion > 0
+    ? Math.max(0.01, Math.min(99, (1 - Number(pricing.off_peak.input_cache_miss_micros) / currentInputPerMillion) * 100))
+    : 20;
+  const initialMargin = configuredMargin > 0 ? configuredMargin : Number(inferredMargin.toFixed(2));
   const reference = pricing?.off_peak ? `
     <div class="field-hint">官网参考价（人民币 / 1M，已按 ${pricing.exchange_rate_usd_to_cny || "部署配置"} 汇率换算）</div>
     <div class="key-detail-grid"><div><span>缓存命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>未命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出 · 低峰</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div><div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">DeepSeek 官网</a></strong></div></div>` : "";
   openDialog(`模型定价 · ${modelName}`, `
     <form id="model-pricing-form">
       <div class="dialog-body">
-        <div class="field-row"><div class="field"><label for="model-input-price">输入价格 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">输出价格 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
         ${reference}
-        <p class="dialog-copy">这里维护该模型面向 LokToken 用户的最终售价，按人民币 / 1M Token 计费；不同模型可以使用不同价格。供应商采购成本请在该模型的“渠道”中单独维护。新价格会用于后续请求，已结算请求不会被修改。</p>
+        ${hasOfficialPrice ? `<div class="field"><label for="model-pricing-mode">定价方式</label><select id="model-pricing-mode" name="pricing_mode"><option value="margin" selected>按官方价格和利润率自动定价</option><option value="manual">手工设置平台售价</option></select></div><div class="field" id="model-margin-field"><label for="model-margin">目标利润率（%）</label><input id="model-margin" name="margin" type="number" min="0.01" max="99" step="0.01" value="${initialMargin}" required><small class="field-hint">按毛利率计算：平台售价 = 官方价格 ÷（1 - 利润率）。官方输入价采用未命中缓存、低峰档。</small></div>` : '<p class="dialog-copy">该模型尚无可核验的官方价格，请先手工设置平台售价；补齐官方价格后可启用利润率自动定价。</p>'}
+        <div class="field-row"><div class="field"><label for="model-input-price">平台输入售价 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">平台输出售价 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
+        <p class="dialog-copy">这里维护该模型面向 LokToken 用户的最终售价，按人民币 / 1M Token 计费。供应商采购成本请在该模型的“渠道”中单独维护。新价格只用于后续请求，已结算请求不会被修改。</p>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存定价</span></button></div>
     </form>`);
+  const modeInput = document.getElementById("model-pricing-mode");
+  const marginInput = document.getElementById("model-margin");
+  const inputPrice = document.getElementById("model-input-price");
+  const outputPrice = document.getElementById("model-output-price");
+  const updatePricePreview = () => {
+    const automatic = hasOfficialPrice && modeInput.value === "margin";
+    document.getElementById("model-margin-field").hidden = !automatic;
+    inputPrice.readOnly = automatic;
+    outputPrice.readOnly = automatic;
+    if (!automatic) return;
+    const margin = Math.min(99, Math.max(0.01, Number(marginInput.value || 0))) / 100;
+    inputPrice.value = (Number(pricing.off_peak.input_cache_miss_micros) / 1_000_000 / (1 - margin)).toFixed(3);
+    outputPrice.value = (Number(pricing.off_peak.output_micros) / 1_000_000 / (1 - margin)).toFixed(3);
+  };
+  if (hasOfficialPrice) {
+    modeInput.addEventListener("change", updatePricePreview);
+    marginInput.addEventListener("input", updatePricePreview);
+    updatePricePreview();
+  }
   document.getElementById("model-pricing-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = { input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.input_price), output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.output_price) };
+    const automatic = hasOfficialPrice && data.pricing_mode === "margin";
+    const payload = automatic
+      ? { pricing_margin_bps: Math.round(Number(data.margin) * 100) }
+      : { pricing_margin_bps: 0, input_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.input_price), output_price_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.output_price) };
     try { await api(`/admin/models/${modelId}`, { method: "PATCH", body: JSON.stringify(payload) }); closeDialog(); toast("模型定价已更新"); await loadModels(); } catch (error) { toast(error.message, true); }
   });
 }
@@ -1183,6 +1247,15 @@ async function toggleEntity(kind, id, active) {
   } catch (error) { toast(error.message, true); }
 }
 
+async function deleteModel(modelId, modelName) {
+  if (!window.confirm(`删除“${modelName}”？删除后模型、渠道配置和候选目录记录将移除，且不可恢复。已有调用记录的模型无法删除。`)) return;
+  try {
+    await api(`/admin/models/${modelId}`, { method: "DELETE" });
+    toast(`模型“${modelName}”已删除`);
+    await loadModels();
+  } catch (error) { toast(error.message, true); }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   icons();
   document.getElementById("auth-form").addEventListener("submit", async (event) => {
@@ -1195,7 +1268,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       setAdminIdentity(data.admin);
       sessionStorage.setItem("token_admin_token", state.token);
       showApp();
-      await switchView("overview");
+      const view = adminViewFromUrl();
+      primeAdminHistory(view);
+      await switchView(view, { historyMode: "none" });
     } catch (error) { showAuth(error.message); }
   });
   document.getElementById("toggle-token").addEventListener("click", () => {
@@ -1213,7 +1288,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     api("/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
     sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; state.identity = null; closeAdminAccountMenu(); document.getElementById("admin-password").value = ""; showAuth();
   });
-  document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view));
+  document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view, { historyMode: "none" }));
+  document.getElementById("admin-back-button").addEventListener("click", navigateAdminBack);
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
   document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; state.modelProviderDetail = ""; renderModels(); });
   document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
@@ -1260,13 +1336,22 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "reconcile-ledger") reconcileLedger();
     if (target.dataset.action === "provider-bills") providerBillsDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "manage-admins") manageAdmins();
+    if (target.dataset.action === "delete-model") deleteModel(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");
   });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeAdminAccountMenu(); });
+  window.addEventListener("popstate", (event) => {
+    if (!state.token) return;
+    if (event.state?.app === "admin") switchView(event.state.view, { historyMode: "none" });
+    else {
+      primeAdminHistory(state.view);
+      switchView(state.view, { historyMode: "none" });
+    }
+  });
   if (state.token) {
-    try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); await switchView("overview"); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
+    try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); const view = adminViewFromUrl(); primeAdminHistory(view); await switchView(view, { historyMode: "none" }); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
   } else {
     showAuth();
   }

@@ -119,6 +119,8 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN catalog_metadata_json TEXT"))
         if "official_pricing_json" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
+        if "pricing_margin_bps" not in model_columns:
+            connection.execute(text("ALTER TABLE model_configs ADD COLUMN pricing_margin_bps INTEGER NOT NULL DEFAULT 0"))
         for name, definition in {
             "balance_micros": "BIGINT",
             "balance_currency": "VARCHAR(12)",

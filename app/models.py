@@ -103,6 +103,8 @@ class ModelConfig(Base):
     provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
     input_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
     output_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Stored in basis points: 100 bps = 1%. A null/zero value means manual pricing.
+    pricing_margin_bps: Mapped[int] = mapped_column(Integer, default=0)
     catalog_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     official_pricing_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
