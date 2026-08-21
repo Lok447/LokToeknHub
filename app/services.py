@@ -1,8 +1,10 @@
 import os
+import os
 import json
 import random
 import time
 import uuid
+from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -14,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import get_settings
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, UsageRecord, utcnow
+from .provider_secrets import ProviderSecretError, decrypt_provider_secret
 from .schemas import ChatCompletionRequest
 
 
@@ -37,6 +40,53 @@ def calculate_amount(model: ModelConfig, input_tokens: int, output_tokens: int) 
         input_tokens * model.input_price_micros_per_1k // 1000
         + output_tokens * model.output_price_micros_per_1k // 1000
     )
+
+
+def normalize_request_payload(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Build a provider payload while normalizing the two OpenAI token names."""
+    payload = request.model_dump(exclude_none=True)
+    max_completion_tokens = payload.pop("max_completion_tokens", None)
+    if max_completion_tokens is not None and "max_tokens" not in payload:
+        payload["max_tokens"] = max_completion_tokens
+    return payload
+
+
+def extract_usage(data: dict[str, Any], estimated_input: int = 0) -> tuple[int, int, dict[str, int]]:
+    usage = data.get("usage") or {}
+    input_tokens = int(usage.get("prompt_tokens", usage.get("input_tokens", estimated_input)) or 0)
+    output_tokens = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+    details = {
+        "input_cache_hit_tokens": int(usage.get("prompt_cache_hit_tokens", usage.get("cache_read_input_tokens", 0)) or 0),
+        "input_cache_miss_tokens": int(usage.get("prompt_cache_miss_tokens", usage.get("cache_creation_input_tokens", 0)) or 0),
+        "reasoning_tokens": int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", usage.get("reasoning_tokens", 0)) or 0),
+    }
+    return input_tokens, output_tokens, details
+
+
+def provider_cost(channel: ModelChannel, input_tokens: int, output_tokens: int, usage_details: dict[str, int] | None = None) -> int:
+    """Calculate auditable provider cost when operators configured channel prices."""
+    usage_details = usage_details or {}
+    input_price = channel.provider_input_cost_micros_per_1k
+    output_price = channel.provider_output_cost_micros_per_1k
+    if input_price is None or output_price is None:
+        return 0
+    hit = usage_details.get("input_cache_hit_tokens", 0)
+    miss = usage_details.get("input_cache_miss_tokens", 0)
+    priced_input = hit + miss if hit or miss else input_tokens
+    return priced_input * input_price // 1000 + output_tokens * output_price // 1000
+
+
+@dataclass
+class ProviderCallDetails:
+    response: dict[str, Any]
+    input_tokens: int
+    output_tokens: int
+    channel_id: int | None = None
+    provider_request_id: str | None = None
+    provider_cost_micros: int = 0
+    usage_details: dict[str, int] = field(default_factory=dict)
+    raw_usage: dict[str, Any] = field(default_factory=dict)
+    route_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def reserved_amount(model: ModelConfig, input_tokens: int, output_tokens: int) -> int:
@@ -64,8 +114,11 @@ def reserve_balance(
         raise ValueError("insufficient balance")
     locked_account.balance_micros -= amount_micros
     locked_key.spent_micros += amount_micros
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key.id,
         amount_micros=-amount_micros,
         transaction_type="reservation",
@@ -93,8 +146,11 @@ def settle_balance(
         return
     locked_account.balance_micros += delta
     locked_key.spent_micros = max(0, locked_key.spent_micros - delta)
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key.id,
         amount_micros=delta,
         transaction_type="settlement",
@@ -112,6 +168,7 @@ def credit_balance(
     reference_id: str,
     description: str | None,
     api_key_id: int | None = None,
+    project_id: int | None = None,
     audit_event: dict[str, object] | None = None,
 ) -> BillingAccount:
     existing = db.scalar(select(AccountBalanceTransaction).where(AccountBalanceTransaction.reference_id == reference_id))
@@ -123,8 +180,11 @@ def credit_balance(
     if not locked_account:
         raise ValueError("account not found")
     locked_account.balance_micros += amount_micros
+    project = db.get(Project, project_id) if project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         api_key_id=api_key_id,
         amount_micros=amount_micros,
         transaction_type="topup",
@@ -170,11 +230,12 @@ def select_channels(db: Session, model: ModelConfig) -> list[ModelChannel]:
     return ordered[:settings.max_channel_attempts]
 
 
-def mark_channel_success(db: Session, channel: ModelChannel) -> None:
+def mark_channel_success(db: Session, channel: ModelChannel, source: str = "provider") -> None:
     tracked = db.get(ModelChannel, channel.id)
     if not tracked:
         return
     tracked.status = "healthy"
+    tracked.health_source = source
     tracked.consecutive_failures = 0
     tracked.circuit_open_until = None
     tracked.last_checked_at = utcnow()
@@ -198,17 +259,28 @@ def mark_channel_failure(db: Session, channel: ModelChannel, detail: str) -> Non
 
 def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     settings = get_settings()
-    api_key = os.getenv(channel.provider_api_key_env, "") if channel.provider_api_key_env else settings.default_provider_api_key
+    try:
+        api_key = decrypt_provider_secret(channel.encrypted_api_key) if channel.encrypted_api_key else None
+    except ProviderSecretError:
+        api_key = None
+    if not api_key:
+        api_key = os.getenv(channel.provider_api_key_env, "") if channel.provider_api_key_env else settings.default_provider_api_key
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return channel.provider_base_url.rstrip("/") + "/chat/completions", headers
 
 
-async def discover_upstream_models(provider_base_url: str, provider_api_key_env: str | None) -> list[str]:
+async def discover_upstream_models(
+    provider_base_url: str,
+    provider_api_key_env: str | None,
+    provider_api_key: str | None = None,
+) -> list[str]:
     """Read an OpenAI-compatible model catalogue without persisting provider secrets."""
     settings = get_settings()
-    api_key = os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key
+    api_key = provider_api_key or (os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key)
+    if provider_api_key_env and not api_key.strip():
+        raise ValueError(f"供应商密钥环境变量未配置: {provider_api_key_env}")
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -227,6 +299,44 @@ async def discover_upstream_models(provider_base_url: str, provider_api_key_env:
     return model_ids[:500]
 
 
+async def fetch_provider_balance(
+    preset_id: str,
+    provider_base_url: str,
+    provider_api_key_env: str | None,
+    provider_api_key: str | None = None,
+) -> dict[str, Any]:
+    """Fetch a provider account balance when the provider exposes a documented endpoint.
+
+    Most providers expose billing only in their console, so unsupported providers
+    deliberately return a structured result instead of guessing from model health.
+    """
+    settings = get_settings()
+    if preset_id != "deepseek":
+        return {"status": "unsupported", "source": "console", "detail": "该供应商未提供可验证的余额 API，请在供应商控制台查看或手工录入。"}
+    api_key = provider_api_key or (os.getenv(provider_api_key_env, "") if provider_api_key_env else settings.default_provider_api_key)
+    if not api_key.strip():
+        raise ValueError("供应商密钥未配置，无法查询余额")
+    base = provider_base_url.rstrip("/")
+    endpoint = base.removesuffix("/v1") + "/user/balance"
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=settings.channel_health_timeout_seconds) as client:
+            response = await client.get(endpoint, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"供应商余额查询失败: {exc}") from exc
+    infos = payload.get("balance_infos") if isinstance(payload, dict) else None
+    if not isinstance(infos, list) or not infos:
+        raise ValueError("供应商余额响应缺少 balance_infos")
+    item = next((entry for entry in infos if isinstance(entry, dict) and str(entry.get("currency", "")).upper() == "CNY"), infos[0])
+    try:
+        amount_micros = round(float(item.get("total_balance", 0)) * 1_000_000)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("供应商余额不是有效数字") from exc
+    return {"status": "available", "source": "api", "amount_micros": amount_micros, "currency": str(item.get("currency") or "CNY").upper(), "raw": payload}
+
+
 def _retryable_status(status_code: int) -> bool:
     return status_code in {408, 409, 425, 429} or status_code >= 500
 
@@ -235,15 +345,38 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     settings = get_settings()
     started = time.perf_counter()
     if settings.mock_mode:
-        mark_channel_success(db, channel)
+        mark_channel_success(db, channel, "mock")
         return {"healthy": True, "latency_ms": 0, "detail": "Mock mode"}
     endpoint, headers = _provider_auth(channel)
+    if channel.provider_api_key_env and "Authorization" not in headers:
+        detail = f"供应商密钥环境变量未配置: {channel.provider_api_key_env}"
+        mark_channel_failure(db, channel, detail)
+        return {"healthy": False, "latency_ms": 0, "detail": detail}
     endpoint = endpoint.removesuffix("/chat/completions") + "/models"
     try:
         async with httpx.AsyncClient(timeout=settings.channel_health_timeout_seconds) as client:
             response = await client.get(endpoint, headers=headers)
         if response.is_error:
             detail = f"HTTP {response.status_code}: {response.text[:500]}"
+            mark_channel_failure(db, channel, detail)
+            return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+        try:
+            payload = response.json()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        items = payload.get("data") if isinstance(payload, dict) else None
+        provider_model_ids = {
+            str(item.get("id", "")).strip()
+            for item in items or []
+            if isinstance(item, dict) and str(item.get("id", "")).strip()
+        }
+        if not provider_model_ids:
+            detail = "供应商模型目录响应无有效模型"
+            mark_channel_failure(db, channel, detail)
+            return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+        if channel.upstream_model not in provider_model_ids:
+            available = ", ".join(sorted(provider_model_ids)[:10])
+            detail = f"供应商模型目录不包含上游模型: {channel.upstream_model}; 可用模型: {available}"
             mark_channel_failure(db, channel, detail)
             return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
     except httpx.HTTPError as exc:
@@ -254,47 +387,62 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     return {"healthy": True, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": "OK"}
 
 
-async def call_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> tuple[dict[str, Any], int, int]:
+async def call_provider_details(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> ProviderCallDetails:
     settings = get_settings()
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
-        if channels:
-            mark_channel_success(db, channels[0])
+        channel = channels[0] if channels else None
+        if channel:
+            mark_channel_success(db, channel)
         output = "TOKEN mock response"
         output_tokens = max(1, len(output) // 4)
-        return {
+        response = {
             "id": "chatcmpl-" + uuid.uuid4().hex,
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model.public_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": output}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": estimated_input, "completion_tokens": output_tokens, "total_tokens": estimated_input + output_tokens},
-        }, estimated_input, output_tokens
+        }
+        return ProviderCallDetails(response, estimated_input, output_tokens, channel_id=channel.id if channel else None, provider_request_id=response["id"], raw_usage=response["usage"])
 
     channels = select_channels(db, model)
     if not channels:
         raise HTTPException(status_code=502, detail="no available channel for model")
     last_detail = "all available channels failed"
+    route_attempts: list[dict[str, Any]] = []
     for channel in channels:
         endpoint, headers = _provider_auth(channel)
-        payload = request.model_dump(exclude_none=True)
+        payload = normalize_request_payload(request)
         payload["model"] = channel.upstream_model
         payload.setdefault("max_tokens", settings.reservation_output_tokens)
+        attempt_started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
                 response = await client.post(endpoint, json=payload, headers=headers)
             if response.is_error:
+                route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
                 raise ProviderCallError(
                     f"{channel.name}: HTTP {response.status_code}: {response.text[:500]}",
                     retryable=_retryable_status(response.status_code),
                 )
             data = response.json()
+            input_tokens, output_tokens, usage_details = extract_usage(data, estimated_input)
             usage = data.get("usage") or {}
-            input_tokens = int(usage.get("prompt_tokens", estimated_input))
-            output_tokens = int(usage.get("completion_tokens", 0))
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_success(db, channel)
-            return data, input_tokens, output_tokens
+            return ProviderCallDetails(
+                data,
+                input_tokens,
+                output_tokens,
+                channel_id=channel.id,
+                provider_request_id=str(data.get("id")) if data.get("id") else None,
+                provider_cost_micros=provider_cost(channel, input_tokens, output_tokens, usage_details),
+                usage_details=usage_details,
+                raw_usage=usage,
+                route_attempts=route_attempts,
+            )
         except ProviderCallError as exc:
             last_detail = exc.detail
             mark_channel_failure(db, channel, exc.detail)
@@ -302,20 +450,35 @@ async def call_provider(db: Session, model: ModelConfig, request: ChatCompletion
                 break
         except httpx.HTTPError as exc:
             last_detail = f"{channel.name}: provider unavailable: {exc}"
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             last_detail = f"{channel.name}: invalid provider response: {exc}"
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
     raise HTTPException(status_code=502, detail=last_detail)
 
 
-async def stream_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> AsyncIterator[bytes]:
+async def call_provider(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> tuple[dict[str, Any], int, int]:
+    """Backward-compatible provider call tuple used by preflight and older integrations."""
+    result = await call_provider_details(db, model, request)
+    return result.response, result.input_tokens, result.output_tokens
+
+
+async def stream_provider(
+    db: Session,
+    model: ModelConfig,
+    request: ChatCompletionRequest,
+    route_meta: dict[str, Any] | None = None,
+) -> AsyncIterator[bytes]:
     settings = get_settings()
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
         if channels:
             mark_channel_success(db, channels[0])
+            if route_meta is not None:
+                route_meta.update({"provider_channel_id": channels[0].id, "route_attempts": [{"channel_id": channels[0].id, "channel": channels[0].name, "status": 200, "latency_ms": 0}]})
         completion_id = "chatcmpl-" + uuid.uuid4().hex
         base = {"id": completion_id, "object": "chat.completion.chunk", "created": int(time.time()), "model": model.public_name}
         chunks = [
@@ -338,18 +501,21 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
         emitted = False
         endpoint, headers = _provider_auth(channel)
         headers["Accept"] = "text/event-stream"
-        payload = request.model_dump(exclude_none=True)
+        payload = normalize_request_payload(request)
         payload["model"] = channel.upstream_model
         payload["stream"] = True
         payload.setdefault("max_tokens", settings.reservation_output_tokens)
         stream_options = payload.get("stream_options") or {}
         stream_options["include_usage"] = True
         payload["stream_options"] = stream_options
+        attempt_started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
                 async with client.stream("POST", endpoint, json=payload, headers=headers) as response:
                     if response.is_error:
                         detail = (await response.aread()).decode("utf-8", errors="replace")[:500]
+                        if route_meta is not None:
+                            route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
                         raise ProviderCallError(
                             f"{channel.name}: HTTP {response.status_code}: {detail}",
                             retryable=_retryable_status(response.status_code),
@@ -357,8 +523,22 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
                     async for line in response.aiter_lines():
                         if line:
                             emitted = True
+                            if route_meta is not None and line.startswith("data: ") and "[DONE]" not in line:
+                                try:
+                                    chunk_data = json.loads(line[6:].strip())
+                                    route_meta.setdefault("provider_request_id", chunk_data.get("id"))
+                                    usage = chunk_data.get("usage") or {}
+                                    if usage:
+                                        _, _, usage_details = extract_usage(chunk_data, estimated_input)
+                                        route_meta["usage_details"] = usage_details
+                                        route_meta["raw_usage"] = usage
+                                except (TypeError, ValueError, json.JSONDecodeError):
+                                    pass
                             yield (line + "\n\n").encode("utf-8")
             mark_channel_success(db, channel)
+            if route_meta is not None:
+                route_meta["provider_channel_id"] = channel.id
+                route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": 200, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             return
         except ProviderCallError as exc:
             last_detail = exc.detail
@@ -367,6 +547,8 @@ async def stream_provider(db: Session, model: ModelConfig, request: ChatCompleti
                 raise HTTPException(status_code=502, detail=exc.detail) from exc
         except httpx.HTTPError as exc:
             last_detail = f"{channel.name}: provider unavailable: {exc}"
+            if route_meta is not None:
+                route_meta.setdefault("route_attempts", []).append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
             if emitted:
                 raise HTTPException(status_code=502, detail=last_detail) from exc
@@ -384,6 +566,14 @@ def save_usage(
     status: str,
     latency_ms: int,
     error_message: str | None = None,
+    *,
+    provider_cost_micros: int = 0,
+    provider_channel_id: int | None = None,
+    provider_request_id: str | None = None,
+    usage_details: dict[str, int] | None = None,
+    raw_usage: dict[str, Any] | None = None,
+    route_attempts: list[dict[str, Any]] | None = None,
+    price_version: str | None = None,
 ) -> UsageRecord:
     tracked_key = db.get(ApiKey, api_key.id)
     if tracked_key:
@@ -392,6 +582,8 @@ def save_usage(
         request_id=request_id,
         trace_id=trace_id,
         account_id=api_key.account_id,
+        workspace_id=db.get(Project, api_key.project_id).workspace_id if api_key.project_id and db.get(Project, api_key.project_id) else None,
+        project_id=api_key.project_id,
         api_key_id=api_key.id,
         model=model.public_name,
         upstream_model=model.upstream_model,
@@ -399,6 +591,15 @@ def save_usage(
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         amount_micros=calculate_amount(model, input_tokens, output_tokens),
+        provider_cost_micros=provider_cost_micros,
+        provider_channel_id=provider_channel_id,
+        provider_request_id=provider_request_id,
+        input_cache_hit_tokens=(usage_details or {}).get("input_cache_hit_tokens", 0),
+        input_cache_miss_tokens=(usage_details or {}).get("input_cache_miss_tokens", 0),
+        reasoning_tokens=(usage_details or {}).get("reasoning_tokens", 0),
+        price_version=price_version,
+        route_attempts_json=json.dumps(route_attempts or [], ensure_ascii=False, separators=(",", ":")),
+        raw_usage_json=json.dumps(raw_usage or {}, ensure_ascii=False, separators=(",", ":")),
         status=status,
         latency_ms=latency_ms,
         error_message=error_message,

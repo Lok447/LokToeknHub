@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
+import hmac
 import json
+import os
 import re
 import time
 import uuid
@@ -9,23 +12,29 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+import httpx
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
-from .db import engine, get_db, init_db
+from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
-from .models import AccountBalanceTransaction, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, RedemptionCode, UsageRecord, utcnow
+from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
+from .metrics import observe_request, render_prometheus
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionCode, UsageRecord, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentWebhook, RedemptionCodeCreate, UsageSummary
-from .security import create_key, create_redemption_code, hash_key, require_admin, require_api_key, verify_webhook_signature
-from .services import calculate_amount, call_provider, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, reserve_balance, save_usage, settle_balance, stream_provider
+from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
+from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
+from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider
+from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -34,7 +43,31 @@ async def lifespan(_app: FastAPI):
     if not get_settings().auto_create_schema:
         with engine.connect() as connection:
             connection.execute(select(1))
-    yield
+    alert_task = asyncio.create_task(alert_evaluation_loop())
+    try:
+        yield
+    finally:
+        alert_task.cancel()
+        try:
+            await alert_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def alert_evaluation_loop() -> None:
+    """Evaluate operational alerts periodically without blocking requests."""
+    while True:
+        try:
+            await asyncio.to_thread(run_alert_evaluation)
+        except Exception:
+            # Delivery state stays pending and will be retried on the next tick.
+            pass
+        await asyncio.sleep(get_settings().alert_evaluation_interval_seconds)
+
+
+def run_alert_evaluation() -> None:
+    with SessionLocal() as db:
+        evaluate_alert_incidents(db, deliver=True)
 
 
 app = FastAPI(title="TOKEN Platform", version="1.2.0", lifespan=lifespan)
@@ -54,6 +87,49 @@ app.include_router(portal_router)
 _request_id_pattern = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 
+def _openai_error_type(status_code: int, detail: str) -> tuple[str, str]:
+    """Return an OpenAI-compatible error type and stable machine code."""
+    if detail == "insufficient balance":
+        return "insufficient_balance", "insufficient_balance"
+    if detail == "api key spending limit exceeded":
+        return "quota_exceeded", "quota_exceeded"
+    if status_code == 401:
+        return "authentication_error", "invalid_api_key"
+    if status_code == 403:
+        return "permission_error", "permission_denied"
+    if status_code == 404 and detail.startswith("unknown model:"):
+        return "invalid_request_error", "model_not_found"
+    if status_code == 503 and detail.startswith("model unavailable:"):
+        return "server_error", "model_unavailable"
+    if status_code == 409:
+        return "invalid_request_error", "request_conflict"
+    if status_code == 429:
+        return "rate_limit_error", "rate_limit_exceeded"
+    if status_code >= 500:
+        return "server_error", "upstream_error"
+    return "invalid_request_error", "invalid_request"
+
+
+@app.exception_handler(HTTPException)
+async def api_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Expose gateway failures in the error shape expected by OpenAI clients."""
+    if not request.url.path.startswith("/v1/"):
+        content = {"detail": exc.detail}
+        return JSONResponse(status_code=exc.status_code, content=content, headers=exc.headers or {})
+    detail = str(exc.detail)
+    error_type, error_code = _openai_error_type(exc.status_code, detail)
+    message = "账户余额不足，请先充值或兑换额度后再调用模型。" if error_code == "insufficient_balance" else detail
+    content = {
+        "error": {"message": message, "type": error_type, "param": None, "code": error_code},
+        # Keep the legacy field for existing integrations that read FastAPI's detail shape.
+        "detail": detail,
+    }
+    headers = dict(exc.headers or {})
+    if exc.status_code == 401:
+        headers.setdefault("WWW-Authenticate", "Bearer")
+    return JSONResponse(status_code=exc.status_code, content=content, headers=headers)
+
+
 @app.middleware("http")
 async def production_response_headers(request: Request, call_next):
     supplied_request_id = request.headers.get("x-request-id", "")
@@ -67,14 +143,29 @@ async def production_response_headers(request: Request, call_next):
         except ValueError:
             return JSONResponse(status_code=400, content={"detail": "invalid content length"})
     response = await call_next(request)
+    observe_request(request.url.path, request.method, response.status_code)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("X-Request-ID", correlation_id)
-    if request.url.path == "/portal":
+    if request.url.path in {"/portal", "/static/portal.js", "/static/portal.css", "/static/styles.css"}:
         response.headers.setdefault("Cache-Control", "no-store")
     return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
+    business_metrics = {
+        "loktoken_usage_success_total": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_usage_error_total": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.status == "error")) or 0,
+        "loktoken_revenue_micros_total": db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_provider_cost_micros_total": db.scalar(select(func.coalesce(func.sum(UsageRecord.provider_cost_micros), 0)).where(UsageRecord.status == "success")) or 0,
+        "loktoken_channels_healthy": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "healthy")) or 0,
+        "loktoken_channels_unhealthy": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0,
+    }
+    payload = render_prometheus() + "\n".join(f"# TYPE {name} gauge\n{name} {value}" for name, value in business_metrics.items()) + "\n"
+    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
 
 
 @app.get("/", include_in_schema=False)
@@ -122,15 +213,193 @@ def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> 
         "created_at": order.created_at.isoformat(),
         "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         "refunded_at": order.refunded_at.isoformat() if order.refunded_at else None,
+        "reviewed_by_admin_id": order.reviewed_by_admin_id,
+        "reviewed_at": order.reviewed_at.isoformat() if order.reviewed_at else None,
+        "review_note": order.review_note,
+    }
+
+
+def admin_user_data(user: AdminUser) -> dict[str, object]:
+    return {
+        "id": user.id,
+        "login_id": user.login_id,
+        "role": user.role,
+        "active": user.active,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "created_at": user.created_at.isoformat(),
+    }
+
+
+def admin_auth_response(user: AdminUser, db: Session) -> dict[str, object]:
+    token, session = create_admin_session(db, user)
+    db.flush()
+    user.last_login_at = utcnow()
+    record_audit_event(db, actor_type="admin", actor_id=user.login_id, action="admin.session_created", target_type="admin_session", target_id=session.id, details={"role": user.role})
+    db.commit()
+    db.refresh(session)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_at": session.expires_at.isoformat(),
+        "admin": admin_user_data(user),
+    }
+
+
+@app.post("/admin/auth/bootstrap")
+def bootstrap_admin(
+    payload: AdminUserCreate,
+    _: None = Depends(require_bootstrap_admin_token),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    if db.scalar(select(AdminUser.id).limit(1)) is not None:
+        raise HTTPException(status_code=409, detail="administrator bootstrap is no longer available")
+    user = AdminUser(login_id=payload.login_id.lower(), password_hash=hash_password(payload.password), role="superadmin")
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="administrator login already exists") from exc
+    record_audit_event(db, actor_type="bootstrap", actor_id="bootstrap-admin", action="admin.bootstrap_created", target_type="admin_user", target_id=user.id, details={"login_id": user.login_id})
+    return admin_auth_response(user, db)
+
+
+@app.post("/admin/auth/login")
+def login_admin(payload: AdminLogin, request: Request, db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    rate_limiter.check("admin-login", request.client.host if request.client else "unknown", settings.auth_rate_limit_requests, settings.auth_rate_limit_window_seconds)
+    user = db.scalar(select(AdminUser).where(AdminUser.login_id == payload.login_id.lower()))
+    if not user or not user.active or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="invalid administrator credentials")
+    return admin_auth_response(user, db)
+
+
+@app.post("/admin/auth/logout", dependencies=[Depends(require_admin)])
+def logout_admin(context: AdminContext = Depends(require_admin), db: Session = Depends(get_db)) -> dict[str, bool]:
+    if context.session:
+        context.session.revoked_at = utcnow()
+        record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.session_revoked", target_type="admin_session", target_id=context.session.id, details={"self": True})
+        db.commit()
+    return {"revoked": True}
+
+
+@app.get("/admin/auth/me", dependencies=[Depends(require_admin)])
+def admin_identity(context: AdminContext = Depends(require_admin)) -> dict[str, object]:
+    if context.bootstrap:
+        return {"bootstrap": True, "role": context.role, "login_id": context.actor_id}
+    return {"bootstrap": False, "admin": admin_user_data(context.user)}
+
+
+@app.get("/admin/users", dependencies=[Depends(require_superadmin)])
+def list_admin_users(db: Session = Depends(get_db)) -> dict[str, object]:
+    users = db.scalars(select(AdminUser).order_by(AdminUser.id)).all()
+    return {"data": [admin_user_data(user) for user in users]}
+
+
+@app.post("/admin/users", dependencies=[Depends(require_superadmin)])
+def create_admin_user(payload: AdminUserCreate, context: AdminContext = Depends(require_superadmin), db: Session = Depends(get_db)) -> dict[str, object]:
+    user = AdminUser(login_id=payload.login_id.lower(), password_hash=hash_password(payload.password), role=payload.role)
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="administrator login already exists") from exc
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.user_created", target_type="admin_user", target_id=user.id, details={"login_id": user.login_id, "role": user.role})
+    db.commit()
+    db.refresh(user)
+    return admin_user_data(user)
+
+
+@app.patch("/admin/users/{admin_user_id}", dependencies=[Depends(require_superadmin)])
+def update_admin_user(admin_user_id: int, payload: AdminUserUpdate, context: AdminContext = Depends(require_superadmin), db: Session = Depends(get_db)) -> dict[str, object]:
+    user = db.get(AdminUser, admin_user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="administrator not found")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="no administrator changes provided")
+    if context.user and context.user.id == user.id and changes.get("active") is False:
+        raise HTTPException(status_code=422, detail="administrator cannot deactivate their own account")
+    for field, value in changes.items():
+        setattr(user, field, value)
+    if changes.get("active") is False:
+        user.session_version += 1
+        for session in db.scalars(select(AdminSession).where(AdminSession.admin_user_id == user.id, AdminSession.revoked_at.is_(None))).all():
+            session.revoked_at = utcnow()
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="admin.user_updated", target_type="admin_user", target_id=user.id, details=changes)
+    db.commit()
+    db.refresh(user)
+    return admin_user_data(user)
+
+
+@app.get("/admin/runtime", dependencies=[Depends(require_admin)])
+def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
+    models = db.scalars(select(ModelConfig)).all()
+    published = 0
+    mock_published = 0
+    candidates = 0
+    blocked = 0
+    published_provider_hosts: set[str] = set()
+    credential_envs = sorted({
+        channel.provider_api_key_env
+        for channel in db.scalars(select(ModelChannel)).all()
+        if channel.provider_api_key_env
+    })
+    provider_credentials = [
+        {"env": env_name, "configured": bool(os.getenv(env_name, "").strip())}
+        for env_name in credential_envs
+    ]
+    for model in models:
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        state, _ = _model_publication_state(model, channels, settings)
+        if state == "published":
+            published += 1
+            published_provider_hosts.update(channel.provider_base_url.rstrip("/") for channel in channels if channel.active and channel.health_source == "provider")
+        elif state == "mock_published":
+            mock_published += 1
+        elif state == "candidate":
+            candidates += 1
+        else:
+            blocked += 1
+    alerts = build_operational_alerts(db)
+    gateway_ready = (published > 0 and len(published_provider_hosts) >= settings.min_real_provider_count) if not settings.mock_mode else mock_published > 0
+    release_blocking_alert_count = sum(1 for alert in alerts if alert["release_blocking"])
+    return {
+        "environment": settings.environment,
+        "mock_mode": settings.mock_mode,
+        "seed_builtin_models": settings.seed_builtin_models,
+        "data_mode": "mock" if settings.mock_mode else "real",
+        "published_model_count": published,
+        "mock_published_model_count": mock_published,
+        "candidate_model_count": candidates,
+        "blocked_model_count": blocked,
+        "provider_credentials": provider_credentials,
+        "published_provider_count": len(published_provider_hosts),
+        "minimum_real_provider_count": settings.min_real_provider_count,
+        "gateway_ready": gateway_ready,
+        "release_ready": gateway_ready and release_blocking_alert_count == 0,
+        "operational_alert_count": len(alerts),
+        "release_blocking_alert_count": release_blocking_alert_count,
     }
 
 
 @app.get("/admin/overview", dependencies=[Depends(require_admin)])
-def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
+def admin_overview(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
     active_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True))) or 0
     healthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "healthy")) or 0
     unhealthy_channels = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0
+    models = db.scalars(select(ModelConfig)).all()
+    model_states = []
+    for model in models:
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        model_states.append(_model_publication_state(model, channels, settings)[0])
+    alerts = build_operational_alerts(db)
     return {
+        "environment": settings.environment,
+        "mock_mode": settings.mock_mode,
         "account_count": db.scalar(select(func.count(BillingAccount.id))) or 0,
         "active_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.active.is_(True))) or 0,
         "active_model_count": db.scalar(select(func.count(ModelConfig.id)).where(ModelConfig.active.is_(True))) or 0,
@@ -142,10 +411,359 @@ def admin_overview(db: Session = Depends(get_db)) -> dict[str, int]:
         "healthy_channel_count": healthy_channels,
         "unhealthy_channel_count": unhealthy_channels,
         "pending_payment_count": db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0,
+        "published_model_count": sum(state == "published" for state in model_states),
+        "mock_published_model_count": sum(state == "mock_published" for state in model_states),
+        "candidate_model_count": sum(state == "candidate" for state in model_states),
+        "blocked_model_count": sum(state == "blocked" for state in model_states),
+        "alerts": alerts,
+        "alert_count": len(alerts),
+        "release_blocking_alert_count": sum(1 for alert in alerts if alert["release_blocking"]),
     }
 
 
-@app.post("/admin/payment-orders", dependencies=[Depends(require_admin)])
+def build_operational_alerts(db: Session) -> list[dict[str, object]]:
+    """Compute actionable P1 signals from durable platform data.
+
+    Alerts are deliberately calculated on read so a deployment does not need a
+    scheduler before operators can see a degraded channel or billing risk.
+    """
+    settings = get_settings()
+    now = utcnow()
+    alerts: list[dict[str, object]] = []
+
+    def add(code: str, severity: str, title: str, detail: str, count: int = 1, *, release_blocking: bool = False, action: str = "") -> None:
+        alerts.append({
+            "code": code,
+            "severity": severity,
+            "title": title,
+            "detail": detail,
+            "count": count,
+            "release_blocking": release_blocking,
+            "action": action,
+            "observed_at": now.isoformat(),
+        })
+
+    low_balance_count = db.scalar(
+        select(func.count(BillingAccount.id)).where(
+            BillingAccount.active.is_(True),
+            BillingAccount.balance_micros <= settings.alert_low_balance_micros,
+        )
+    ) or 0
+    if low_balance_count:
+        add(
+            "low_balance",
+            "warning",
+            "账户余额预警",
+            f"{low_balance_count} 个活跃账户余额低于 {settings.alert_low_balance_micros / 1_000_000:.2f} 元。",
+            low_balance_count,
+            action="发放额度或提醒用户充值",
+        )
+
+    expired_key_count = db.scalar(
+        select(func.count(ApiKey.id)).where(ApiKey.active.is_(True), ApiKey.expires_at.is_not(None), ApiKey.expires_at <= now)
+    ) or 0
+    if expired_key_count:
+        add(
+            "expired_keys",
+            "critical",
+            "存在已过期 API Key",
+            f"{expired_key_count} 个仍标记为启用的 API Key 已超过有效期。",
+            expired_key_count,
+            action="停用过期 Key 并通知所属账户",
+        )
+    expiring_key_count = db.scalar(
+        select(func.count(ApiKey.id)).where(
+            ApiKey.active.is_(True),
+            ApiKey.expires_at.is_not(None),
+            ApiKey.expires_at > now,
+            ApiKey.expires_at <= now + timedelta(days=7),
+        )
+    ) or 0
+    if expiring_key_count:
+        add(
+            "expiring_keys",
+            "warning",
+            "API Key 即将过期",
+            f"{expiring_key_count} 个 API Key 将在 7 天内过期。",
+            expiring_key_count,
+            action="提醒用户轮换 Key 或延长有效期",
+        )
+
+    unhealthy_count = db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.active.is_(True), ModelChannel.status == "unhealthy")) or 0
+    if unhealthy_count:
+        add(
+            "unhealthy_channels",
+            "critical",
+            "模型渠道异常",
+            f"{unhealthy_count} 个启用渠道健康检查失败或已触发熔断。",
+            unhealthy_count,
+            release_blocking=True,
+            action="检查密钥、上游地址并执行健康检查",
+        )
+
+    window_start = now - timedelta(minutes=settings.alert_lookback_minutes)
+    request_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start)) or 0
+    error_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start, UsageRecord.status == "error")) or 0
+    failure_rate = (error_count / request_count * 100) if request_count else 0.0
+    if request_count >= settings.alert_min_request_count and failure_rate >= settings.alert_failure_rate_percent:
+        add(
+            "failure_rate",
+            "critical",
+            "近期请求失败率过高",
+            f"最近 {settings.alert_lookback_minutes} 分钟 {request_count} 次请求中有 {error_count} 次失败（{failure_rate:.1f}%）。",
+            error_count,
+            release_blocking=True,
+            action="检查渠道状态、上游限流和最近错误记录",
+        )
+
+    loss_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.created_at >= window_start, UsageRecord.status == "success", UsageRecord.provider_cost_micros > UsageRecord.amount_micros)) or 0
+    if loss_count:
+        add(
+            "cost_anomaly",
+            "critical",
+            "供应商成本高于平台售价",
+            f"最近窗口内 {loss_count} 次成功请求的供应商成本超过平台收费，存在倒挂风险。",
+            loss_count,
+            release_blocking=True,
+            action="核对供应商价格和模型售价后再继续放量",
+        )
+
+    pending_count = db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.status == "pending")) or 0
+    if pending_count:
+        add(
+            "pending_orders",
+            "info",
+            "待运营处理订单",
+            f"当前有 {pending_count} 个充值订单等待确认。",
+            pending_count,
+            action="进入订单管理完成确认或拒绝",
+        )
+    return alerts
+
+
+def alert_fingerprint(alert: dict[str, object]) -> str:
+    """Keep fingerprints stable while allowing the count/detail to change."""
+    raw = f"{alert['code']}|{alert['severity']}|{alert['release_blocking']}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def deliver_alert_event(event: str, incident: AlertIncident) -> bool:
+    settings = get_settings()
+    if settings.security_delivery_mode == "development":
+        return True
+    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or len(settings.security_delivery_webhook_secret) < 16:
+        return False
+    body = json.dumps({
+        "event": event,
+        "incident_id": incident.id,
+        "fingerprint": incident.fingerprint,
+        "code": incident.code,
+        "severity": incident.severity,
+        "title": incident.title,
+        "detail": incident.detail,
+        "action": incident.action,
+        "count": incident.count,
+        "state": incident.state,
+        "first_seen_at": incident.first_seen_at.isoformat(),
+        "last_seen_at": incident.last_seen_at.isoformat(),
+        "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(settings.security_delivery_webhook_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    try:
+        response = httpx.post(
+            settings.security_delivery_webhook_url,
+            content=body,
+            headers={"Content-Type": "application/json", "X-LokToken-Signature": signature, "X-LokToken-Event": event},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return True
+    except httpx.HTTPError:
+        return False
+
+
+def evaluate_alert_incidents(db: Session, *, deliver: bool = False) -> dict[str, object]:
+    """Upsert alert incidents and emit only state transitions."""
+    now = utcnow()
+    current = {alert_fingerprint(item): item for item in build_operational_alerts(db)}
+    incidents = {item.fingerprint: item for item in db.scalars(select(AlertIncident)).all()}
+    emitted: list[dict[str, object]] = []
+    for fingerprint, alert in current.items():
+        incident = incidents.get(fingerprint)
+        if incident is None:
+            incident = AlertIncident(
+                fingerprint=fingerprint,
+                code=str(alert["code"]),
+                severity=str(alert["severity"]),
+                title=str(alert["title"]),
+                detail=str(alert["detail"]),
+                action=str(alert.get("action") or ""),
+                count=int(alert.get("count") or 1),
+                state="active",
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            db.add(incident)
+            db.flush()
+            incident.pending_event = "alert_opened"
+            emitted.append({"event": "alert_opened", "incident": incident})
+        else:
+            reopened = incident.state == "resolved"
+            incident.code = str(alert["code"])
+            incident.severity = str(alert["severity"])
+            incident.title = str(alert["title"])
+            incident.detail = str(alert["detail"])
+            incident.action = str(alert.get("action") or "")
+            incident.count = int(alert.get("count") or 1)
+            incident.state = "active"
+            incident.last_seen_at = now
+            incident.resolved_at = None
+            if reopened:
+                incident.pending_event = "alert_reopened"
+                emitted.append({"event": "alert_reopened", "incident": incident})
+    for fingerprint, incident in incidents.items():
+        if fingerprint not in current and incident.state == "active":
+            incident.state = "resolved"
+            incident.resolved_at = now
+            incident.last_seen_at = now
+            incident.pending_event = "alert_recovered"
+            emitted.append({"event": "alert_recovered", "incident": incident})
+    db.commit()
+    delivered = 0
+    failed = 0
+    if deliver:
+        pending_incidents = db.scalars(select(AlertIncident).where(AlertIncident.pending_event.is_not(None))).all()
+        for incident in pending_incidents:
+            event = str(incident.pending_event)
+            if deliver_alert_event(event, incident):
+                incident.last_notified_state = event
+                incident.notified_at = utcnow()
+                incident.pending_event = None
+                delivered += 1
+            else:
+                failed += 1
+        db.commit()
+    return {"active_count": len(current), "transitions": [item["event"] for item in emitted], "delivered": delivered, "failed": failed}
+
+
+@app.get("/admin/alerts", dependencies=[Depends(require_admin)])
+def admin_alerts(db: Session = Depends(get_db)) -> dict[str, object]:
+    alerts = build_operational_alerts(db)
+    incidents = evaluate_alert_incidents(db)
+    return {
+        "data": alerts,
+        "incidents": [
+            {"id": item.id, "fingerprint": item.fingerprint, "code": item.code, "state": item.state, "count": item.count, "last_seen_at": item.last_seen_at.isoformat(), "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None}
+            for item in db.scalars(select(AlertIncident).order_by(AlertIncident.last_seen_at.desc()).limit(100)).all()
+        ],
+        "count": len(alerts),
+        "release_blocking_count": sum(1 for alert in alerts if alert["release_blocking"]),
+        "generated_at": utcnow().isoformat(),
+        "evaluation": incidents,
+    }
+
+
+@app.post("/admin/alerts/evaluate", dependencies=[Depends(require_operator)])
+def evaluate_and_deliver_alerts(db: Session = Depends(get_db)) -> dict[str, object]:
+    return evaluate_alert_incidents(db, deliver=True)
+
+
+def provider_bill_summary_data(record: ProviderBillImport) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "provider": record.provider,
+        "source_name": record.source_name,
+        "source_hash": record.source_hash,
+        "line_count": record.line_count,
+        "matched_count": record.matched_count,
+        "mismatch_count": record.mismatch_count,
+        "unmatched_count": record.unmatched_count,
+        "billed_cost_micros": record.billed_cost_micros,
+        "recorded_cost_micros": record.recorded_cost_micros,
+        "difference_micros": record.billed_cost_micros - record.recorded_cost_micros,
+        "created_at": record.created_at.isoformat(),
+    }
+
+
+@app.post("/admin/provider-bills/import", dependencies=[Depends(require_finance_operator)])
+def import_provider_bill(payload: ProviderBillImportRequest, db: Session = Depends(get_db)) -> dict[str, object]:
+    """Import a normalized supplier bill and reconcile it against usage rows.
+
+    The API intentionally accepts normalized JSON rather than provider-specific
+    CSV files. A small adapter can convert each supplier export to this shape
+    while keeping provider credentials and raw files outside the application.
+    """
+    canonical = json.dumps(payload.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    source_hash = hashlib.sha256(canonical).hexdigest()
+    existing = db.scalar(select(ProviderBillImport).where(ProviderBillImport.provider == payload.provider, ProviderBillImport.source_hash == source_hash))
+    if existing:
+        return {"duplicate": True, "import": provider_bill_summary_data(existing), "lines": []}
+    record = ProviderBillImport(provider=payload.provider, source_name=payload.source_name, source_hash=source_hash, line_count=len(payload.lines), created_at=utcnow())
+    db.add(record)
+    db.flush()
+    tolerance = get_settings().provider_bill_cost_tolerance_micros
+    seen_keys: set[str] = set()
+    details: list[dict[str, object]] = []
+    for index, item in enumerate(payload.lines, start=1):
+        line_key = item.line_key or item.provider_request_id or f"line-{index}"
+        if line_key in seen_keys:
+            raise HTTPException(status_code=422, detail=f"duplicate bill line key: {line_key}")
+        seen_keys.add(line_key)
+        usage = None
+        if item.provider_request_id:
+            usage = db.scalar(select(UsageRecord).where(UsageRecord.provider_request_id == item.provider_request_id).order_by(UsageRecord.id.desc()))
+        if usage is None and item.line_key:
+            usage = db.scalar(select(UsageRecord).where(UsageRecord.request_id == item.line_key))
+        recorded_cost = usage.provider_cost_micros if usage else 0
+        diff = item.billed_cost_micros - recorded_cost
+        token_match = bool(usage and usage.input_tokens == item.input_tokens and usage.output_tokens == item.output_tokens)
+        cost_match = bool(usage and abs(diff) <= tolerance)
+        status = "matched" if usage and token_match and cost_match else "mismatch" if usage else "unmatched"
+        db.add(ProviderBillLine(
+            import_id=record.id,
+            line_key=line_key,
+            provider_request_id=item.provider_request_id,
+            billed_input_tokens=item.input_tokens,
+            billed_output_tokens=item.output_tokens,
+            billed_cost_micros=item.billed_cost_micros,
+            recorded_cost_micros=recorded_cost,
+            usage_record_id=usage.id if usage else None,
+            status=status,
+            diff_micros=diff,
+            raw_json=json.dumps(item.raw or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            created_at=utcnow(),
+        ))
+        record.billed_cost_micros += item.billed_cost_micros
+        record.recorded_cost_micros += recorded_cost
+        if status == "matched":
+            record.matched_count += 1
+        elif status == "mismatch":
+            record.mismatch_count += 1
+        else:
+            record.unmatched_count += 1
+        details.append({"line_key": line_key, "provider_request_id": item.provider_request_id, "usage_record_id": usage.id if usage else None, "status": status, "diff_micros": diff, "recorded_input_tokens": usage.input_tokens if usage else None, "recorded_output_tokens": usage.output_tokens if usage else None})
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="provider_bill.imported", target_type="provider_bill_import", target_id=record.id, details={"provider": record.provider, "source_name": record.source_name, "line_count": record.line_count, "mismatch_count": record.mismatch_count, "unmatched_count": record.unmatched_count})
+    db.commit()
+    db.refresh(record)
+    return {"duplicate": False, "import": provider_bill_summary_data(record), "lines": details}
+
+
+@app.get("/admin/provider-bills", dependencies=[Depends(require_admin)])
+def list_provider_bills(db: Session = Depends(get_db)) -> dict[str, object]:
+    records = db.scalars(select(ProviderBillImport).order_by(ProviderBillImport.id.desc()).limit(100)).all()
+    return {"data": [provider_bill_summary_data(item) for item in records]}
+
+
+@app.get("/admin/provider-bills/{import_id}", dependencies=[Depends(require_admin)])
+def provider_bill_detail(import_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    record = db.get(ProviderBillImport, import_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="provider bill import not found")
+    lines = db.scalars(select(ProviderBillLine).where(ProviderBillLine.import_id == record.id).order_by(ProviderBillLine.id)).all()
+    return {"import": provider_bill_summary_data(record), "lines": [{"id": item.id, "line_key": item.line_key, "provider_request_id": item.provider_request_id, "billed_input_tokens": item.billed_input_tokens, "billed_output_tokens": item.billed_output_tokens, "billed_cost_micros": item.billed_cost_micros, "recorded_cost_micros": item.recorded_cost_micros, "usage_record_id": item.usage_record_id, "status": item.status, "diff_micros": item.diff_micros} for item in lines]}
+
+
+@app.post("/admin/payment-orders", dependencies=[Depends(require_finance_operator)])
 def create_payment_order(payload: PaymentOrderCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(BillingAccount, payload.account_id)
     if not account or not account.active:
@@ -154,9 +772,14 @@ def create_payment_order(payload: PaymentOrderCreate, db: Session = Depends(get_
         require_available_provider(payload.provider)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    project = db.get(Project, payload.project_id) if payload.project_id else None
+    if payload.project_id and not project:
+        raise HTTPException(status_code=404, detail="project not found")
     order = PaymentOrder(
         order_no="pay_" + uuid.uuid4().hex,
         account_id=account.id,
+        workspace_id=project.workspace_id if project else None,
+        project_id=project.id if project else None,
         amount_micros=payload.amount_micros,
         provider=payload.provider,
     )
@@ -184,7 +807,46 @@ def list_payment_orders(db: Session = Depends(get_db)) -> dict[str, object]:
     return {"data": [payment_order_data(order, account_name) for order, account_name in rows]}
 
 
-@app.post("/admin/redemption-codes", dependencies=[Depends(require_admin)])
+@app.get("/admin/reconciliation", dependencies=[Depends(require_admin)])
+def reconcile_ledger(db: Session = Depends(get_db)) -> dict[str, object]:
+    account_rows = db.execute(
+        select(
+            BillingAccount.id,
+            BillingAccount.name,
+            BillingAccount.balance_micros,
+            func.coalesce(func.sum(AccountBalanceTransaction.amount_micros), 0),
+        )
+        .outerjoin(AccountBalanceTransaction, AccountBalanceTransaction.account_id == BillingAccount.id)
+        .group_by(BillingAccount.id, BillingAccount.name, BillingAccount.balance_micros)
+        .order_by(BillingAccount.id)
+    ).all()
+    balance_mismatches = [
+        {"account_id": account_id, "account_name": name, "balance_micros": balance, "ledger_micros": ledger}
+        for account_id, name, balance, ledger in account_rows
+        if balance != ledger
+    ]
+    order_issues = []
+    for order in db.scalars(select(PaymentOrder).where(PaymentOrder.status.in_(("paid", "refunded"))).order_by(PaymentOrder.id)).all():
+        payment_exists = db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == f"payment:{order.order_no}")) is not None
+        refund_exists = db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == f"refund:{order.order_no}")) is not None
+        if not payment_exists or (order.status == "refunded" and not refund_exists):
+            order_issues.append({
+                "order_id": order.id,
+                "order_no": order.order_no,
+                "status": order.status,
+                "payment_recorded": payment_exists,
+                "refund_recorded": refund_exists,
+            })
+    return {
+        "ok": not balance_mismatches and not order_issues,
+        "balance_mismatch_count": len(balance_mismatches),
+        "order_issue_count": len(order_issues),
+        "balance_mismatches": balance_mismatches,
+        "order_issues": order_issues,
+    }
+
+
+@app.post("/admin/redemption-codes", dependencies=[Depends(require_operator)])
 def admin_create_redemption_code(payload: RedemptionCodeCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     expires_at = payload.expires_at
     if expires_at and expires_at.tzinfo is None:
@@ -240,7 +902,7 @@ def list_redemption_codes(db: Session = Depends(get_db)) -> dict[str, object]:
     } for item in codes]}
 
 
-@app.patch("/admin/redemption-codes/{code_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/redemption-codes/{code_id}", dependencies=[Depends(require_operator)])
 def update_redemption_code(code_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     record = db.get(RedemptionCode, code_id)
     if not record:
@@ -251,30 +913,44 @@ def update_redemption_code(code_id: int, payload: ActiveUpdate, db: Session = De
     return {"id": record.id, "active": record.active}
 
 
-@app.post("/admin/payment-orders/{order_id}/confirm", dependencies=[Depends(require_admin)])
-def confirm_payment_order(order_id: int, payload: PaymentConfirm, db: Session = Depends(get_db)) -> dict[str, object]:
+@app.post("/admin/payment-orders/{order_id}/confirm", dependencies=[Depends(require_finance_operator)])
+def confirm_payment_order(
+    order_id: int,
+    payload: PaymentConfirm,
+    context: AdminContext = Depends(require_finance_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
     order = db.get(PaymentOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="payment order not found")
     try:
         order = mark_order_paid(
             db, order, payload.provider_order_id or f"manual:{order.order_no}",
-            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+            reviewer_admin_id=context.user.id if context.user else None,
+            review_note=payload.review_note,
+            audit_event={"actor_type": "admin", "actor_id": context.actor_id, "action": "payment_order.confirmed", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return payment_order_data(order)
 
 
-@app.post("/admin/payment-orders/{order_id}/refund", dependencies=[Depends(require_admin)])
-def refund_payment_order(order_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+@app.post("/admin/payment-orders/{order_id}/refund", dependencies=[Depends(require_superadmin)])
+def refund_payment_order(
+    order_id: int,
+    payload: PaymentRefund | None = None,
+    context: AdminContext = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
     order = db.get(PaymentOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="payment order not found")
     try:
         order = refund_order(
             db, order,
-            audit_event={"actor_type": "admin", "actor_id": "token-admin", "action": "payment_order.refunded", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
+            reviewer_admin_id=context.user.id if context.user else None,
+            review_note=payload.review_note if payload else None,
+            audit_event={"actor_type": "admin", "actor_id": context.actor_id, "action": "payment_order.refunded", "target_type": "payment_order", "target_id": order.id, "details": {"order_no": order.order_no, "amount_micros": order.amount_micros}},
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -310,11 +986,14 @@ async def payment_webhook(
 @app.get("/admin/accounts", dependencies=[Depends(require_admin)])
 def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
+    source_labels = {"admin": "管理员发放", "self_registered": "用户注册", "loksystem": "LokSystem 接入", "oidc": "统一身份接入"}
     return {"data": [
         {
             "id": account.id,
             "external_user_id": account.external_user_id,
             "login_id": account.login_id,
+            "account_source": account.account_source or "admin",
+            "account_source_label": source_labels.get(account.account_source, "管理员发放"),
             "name": account.name,
             "balance_micros": account.balance_micros,
             "active": account.active,
@@ -325,7 +1004,7 @@ def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
-@app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_operator)])
 def update_account(account_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     account = db.get(BillingAccount, account_id)
     if not account:
@@ -362,7 +1041,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
-@app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_operator)])
 def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
@@ -373,18 +1052,20 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends
     return {"id": api_key.id, "active": api_key.active}
 
 
-@app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_admin)])
+@app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_operator)])
 def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiKeyResponse:
     account = db.get(BillingAccount, payload.account_id) if payload.account_id else None
     if payload.account_id and (not account or not account.active):
         raise HTTPException(status_code=404, detail="active account not found")
     if account is None:
-        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name)
+        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name, account_source="admin")
         db.add(account)
         db.flush()
+    project = ensure_default_project(db, ensure_personal_workspace(db, account))
     raw_key = create_key()
     record = ApiKey(
         account_id=account.id,
+        project_id=project.id,
         name=payload.name,
         key_prefix=raw_key[:12],
         key_hash=hash_key(raw_key),
@@ -399,20 +1080,21 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
     return ApiKeyResponse(id=record.id, account_id=record.account_id, name=record.name, key=raw_key, key_prefix=record.key_prefix)
 
 
-@app.post("/admin/accounts", dependencies=[Depends(require_admin)])
+@app.post("/admin/accounts", dependencies=[Depends(require_operator)])
 def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == payload.external_user_id)):
         raise HTTPException(status_code=409, detail="external user already has an account")
-    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name)
+    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name, account_source="admin")
     db.add(account)
     db.flush()
+    ensure_personal_workspace(db, account)
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.created", target_type="account", target_id=account.id, details={"external_user_id": account.external_user_id})
     db.commit()
     db.refresh(account)
     return {"id": account.id, "external_user_id": account.external_user_id, "name": account.name, "balance_micros": account.balance_micros}
 
 
-@app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_admin)])
+@app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_finance_operator)])
 def adjust_account_balance(account_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
     account = db.get(BillingAccount, account_id)
     if not account:
@@ -428,7 +1110,7 @@ def adjust_account_balance(account_id: int, payload: BalanceAdjust, db: Session 
     return {"account_id": account.id, "balance_micros": account.balance_micros}
 
 
-@app.post("/admin/api-keys/{api_key_id}/balance", dependencies=[Depends(require_admin)])
+@app.post("/admin/api-keys/{api_key_id}/balance", dependencies=[Depends(require_finance_operator)])
 def adjust_balance(api_key_id: int, payload: BalanceAdjust, db: Session = Depends(get_db)) -> dict[str, int]:
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
@@ -499,7 +1181,7 @@ def list_account_transactions(account_id: int, db: Session = Depends(get_db)) ->
     }
 
 
-@app.post("/admin/models", dependencies=[Depends(require_admin)])
+@app.post("/admin/models", dependencies=[Depends(require_operator)])
 def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.public_name)):
         raise HTTPException(status_code=409, detail="model already exists")
@@ -514,7 +1196,7 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
     )
     db.add(record)
     db.flush()
-    db.add(ModelChannel(
+    channel = ModelChannel(
         model_config_id=record.id,
         name="Primary",
         upstream_model=record.upstream_model,
@@ -522,10 +1204,375 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
         provider_api_key_env=record.provider_api_key_env,
         priority=100,
         weight=100,
-    ))
+    )
+    if payload.provider_api_key:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(payload.provider_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    db.add(channel)
     db.commit()
     db.refresh(record)
     return {"id": record.id, "public_name": record.public_name, "upstream_model": record.upstream_model}
+
+
+@app.get("/admin/provider-presets", dependencies=[Depends(require_admin)])
+def list_provider_presets() -> dict[str, object]:
+    return {"data": [provider_preset_data(item) for item in PROVIDER_PRESETS]}
+
+
+def provider_connection_data(connection: ProviderConnection | None, preset) -> dict[str, object]:
+    env_name = connection.provider_api_key_env if connection else preset.api_key_env
+    env_configured = bool(env_name and os.getenv(env_name, "").strip())
+    stored_secret = bool(connection and connection.encrypted_api_key)
+    return {
+        "id": connection.id if connection else None,
+        "preset_id": preset.id,
+        "name": preset.name,
+        "provider_base_url": connection.provider_base_url if connection else preset.base_url,
+        "provider_api_key_env": env_name,
+        "credentials_configured": stored_secret or env_configured,
+        "credential_source": "stored" if stored_secret else "environment" if env_configured else "none",
+        "active": connection.active if connection else False,
+        "status": connection.status if connection else "unconfigured",
+        "discovered_model_count": connection.discovered_model_count if connection else 0,
+        "synced_model_count": connection.synced_model_count if connection else 0,
+        "callable_model_count": connection.callable_model_count if connection else 0,
+        "default_input_price_micros_per_1k": connection.default_input_price_micros_per_1k if connection else 0,
+        "default_output_price_micros_per_1k": connection.default_output_price_micros_per_1k if connection else 0,
+        "last_checked_at": connection.last_checked_at.isoformat() if connection and connection.last_checked_at else None,
+        "last_error": connection.last_error if connection else None,
+        "balance_micros": connection.balance_micros if connection else None,
+        "balance_currency": connection.balance_currency if connection else None,
+        "balance_status": connection.balance_status if connection else "unknown",
+        "balance_source": connection.balance_source if connection else None,
+        "balance_checked_at": connection.balance_checked_at.isoformat() if connection and connection.balance_checked_at else None,
+        "balance_error": connection.balance_error if connection else None,
+        "balance_alert_threshold_micros": connection.balance_alert_threshold_micros if connection else 0,
+        "model_count": len(preset.models),
+        "note": preset.note,
+    }
+
+
+@app.get("/admin/provider-connections", dependencies=[Depends(require_admin)])
+def list_provider_connections(db: Session = Depends(get_db)) -> dict[str, object]:
+    connections = {item.preset_id: item for item in db.scalars(select(ProviderConnection)).all()}
+    return {"data": [provider_connection_data(connections.get(preset.id), preset) for preset in PROVIDER_PRESETS]}
+
+
+@app.post("/admin/provider-connections/{preset_id}/test", dependencies=[Depends(require_operator)])
+async def test_provider_connection(preset_id: str, payload: ProviderConnectionConfigure, db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
+    raw_secret = payload.provider_api_key
+    if not raw_secret and connection and connection.encrypted_api_key:
+        try:
+            raw_secret = decrypt_provider_secret(connection.encrypted_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    started = time.perf_counter()
+    try:
+        model_ids = await discover_upstream_models(base_url, env_name, raw_secret)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "provider": preset.name, "discovered_model_count": len(model_ids), "latency_ms": int((time.perf_counter() - started) * 1000), "sample_models": model_ids[:8]}
+
+
+def _record_provider_balance(db: Session, connection: ProviderConnection, result: dict[str, object], note: str | None = None) -> None:
+    status = str(result.get("status") or "error")
+    connection.balance_status = status
+    connection.balance_source = str(result.get("source") or "manual")
+    connection.balance_checked_at = utcnow()
+    connection.balance_error = str(result.get("detail") or "") or None
+    if result.get("amount_micros") is not None:
+        connection.balance_micros = int(result["amount_micros"])
+        connection.balance_currency = str(result.get("currency") or "CNY").upper()
+    db.add(ProviderBalanceSnapshot(
+        provider_connection_id=connection.id,
+        amount_micros=connection.balance_micros,
+        currency=connection.balance_currency,
+        status=status,
+        source=connection.balance_source,
+        raw_json=json.dumps(result.get("raw") or {"note": note} if isinstance(result.get("raw") or {"note": note}, dict) else {}, ensure_ascii=False, separators=(",", ":")),
+        error_message=connection.balance_error,
+        checked_at=connection.balance_checked_at,
+    ))
+
+
+@app.post("/admin/provider-connections/{preset_id}/balance/refresh", dependencies=[Depends(require_operator)])
+async def refresh_provider_balance(preset_id: str, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset or not connection:
+        raise HTTPException(status_code=404, detail="provider connection not found")
+    raw_secret = None
+    if connection.encrypted_api_key:
+        try:
+            raw_secret = decrypt_provider_secret(connection.encrypted_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        result = await fetch_provider_balance(preset_id, connection.provider_base_url, connection.provider_api_key_env, raw_secret)
+    except ValueError as exc:
+        result = {"status": "error", "source": "api", "detail": str(exc)}
+    _record_provider_balance(db, connection, result)
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_refreshed", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "status": result.get("status"), "source": result.get("source")})
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset)}
+
+
+@app.post("/admin/provider-connections/{preset_id}/balance/manual", dependencies=[Depends(require_operator)])
+def record_manual_provider_balance(preset_id: str, payload: ProviderBalanceManual, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
+    if not preset or not connection:
+        raise HTTPException(status_code=404, detail="provider connection not found")
+    result = {"status": "available", "source": "manual", "amount_micros": round(payload.amount * 1_000_000), "currency": payload.currency.upper(), "raw": {"note": payload.note} if payload.note else {}}
+    _record_provider_balance(db, connection, result, payload.note)
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_recorded", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "currency": payload.currency.upper()})
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset)}
+
+
+@app.put("/admin/provider-connections/{preset_id}", dependencies=[Depends(require_operator)])
+async def configure_provider_connection(
+    preset_id: str,
+    payload: ProviderConnectionConfigure,
+    context: AdminContext = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    selected_ids = list(payload.model_ids or preset.model_ids)
+    invalid = sorted(set(selected_ids) - set(preset.model_ids))
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"model is not included in provider preset: {invalid[0]}")
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id))
+    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
+    encrypted_secret = None if payload.clear_provider_api_key else (connection.encrypted_api_key if connection else None)
+    if not encrypted_secret and not payload.clear_provider_api_key:
+        # Migrate the first existing model-scoped secret into the provider-level
+        # connection so current single-model deployments upgrade seamlessly.
+        legacy_channel = db.scalar(select(ModelChannel).where(
+            ModelChannel.provider_api_key_env == env_name,
+            ModelChannel.encrypted_api_key.is_not(None),
+        ).order_by(ModelChannel.id))
+        if legacy_channel:
+            encrypted_secret = legacy_channel.encrypted_api_key
+    if payload.provider_api_key:
+        try:
+            encrypted_secret = encrypt_provider_secret(payload.provider_api_key)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    raw_secret = payload.provider_api_key
+    if not raw_secret and encrypted_secret:
+        try:
+            raw_secret = decrypt_provider_secret(encrypted_secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not raw_secret and not (env_name and os.getenv(env_name, "").strip()):
+        raise HTTPException(status_code=422, detail="请填写供应商 API Key，或先在服务环境中配置对应密钥变量")
+    try:
+        discovered_ids = set(await discover_upstream_models(base_url, env_name, raw_secret))
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if connection is None:
+        connection = ProviderConnection(
+            preset_id=preset.id,
+            name=preset.name,
+            provider_base_url=base_url,
+        )
+        db.add(connection)
+        db.flush()
+    default_input_price = (
+        payload.default_input_price_micros_per_1k
+        if "default_input_price_micros_per_1k" in payload.model_fields_set
+        else connection.default_input_price_micros_per_1k
+    )
+    default_output_price = (
+        payload.default_output_price_micros_per_1k
+        if "default_output_price_micros_per_1k" in payload.model_fields_set
+        else connection.default_output_price_micros_per_1k
+    )
+    connection.name = preset.name
+    connection.provider_base_url = base_url
+    connection.provider_api_key_env = env_name
+    connection.encrypted_api_key = encrypted_secret
+    if "default_input_price_micros_per_1k" in payload.model_fields_set:
+        connection.default_input_price_micros_per_1k = default_input_price
+    if "default_output_price_micros_per_1k" in payload.model_fields_set:
+        connection.default_output_price_micros_per_1k = default_output_price
+    connection.balance_alert_threshold_micros = payload.balance_alert_threshold_micros
+    connection.active = True
+    connection.discovered_model_count = len(discovered_ids)
+    connection.last_checked_at = utcnow()
+    connection.updated_at = utcnow()
+    connection.last_error = None
+    # Older API clients used the legacy default-price fields as an implicit
+    # request to publish callable text models. Preserve that contract only
+    # for those explicit legacy payloads; the current UI never auto-publishes.
+    legacy_auto_publish = (
+        "auto_publish" not in payload.model_fields_set
+        and (
+            "default_input_price_micros_per_1k" in payload.model_fields_set
+            or "default_output_price_micros_per_1k" in payload.model_fields_set
+        )
+    )
+    should_auto_publish = payload.auto_publish or legacy_auto_publish
+    synced: list[dict[str, object]] = []
+    for model_id in selected_ids:
+        preset_model = preset.get_model(model_id)
+        if preset_model is None:
+            continue
+        model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == preset_model.public_name))
+        if model is None:
+            model = ModelConfig(
+                public_name=preset_model.public_name,
+                upstream_model=preset_model.model_id,
+                provider_base_url=base_url,
+                provider_api_key_env=env_name,
+                input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k or default_input_price,
+                output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k or default_output_price,
+                catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
+                official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
+                active=False,
+            )
+            db.add(model)
+            db.flush()
+        else:
+            model.upstream_model = preset_model.model_id
+            model.provider_base_url = base_url
+            model.provider_api_key_env = env_name
+            model.catalog_metadata_json = json.dumps(preset_model.catalog_metadata, ensure_ascii=False)
+            if preset_model.official_pricing:
+                model.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
+            if model.input_price_micros_per_1k <= 0:
+                model.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k or default_input_price
+            if model.output_price_micros_per_1k <= 0:
+                model.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k or default_output_price
+        channel = db.scalar(select(ModelChannel).where(
+            ModelChannel.model_config_id == model.id,
+            ModelChannel.provider_connection_id == connection.id,
+        ))
+        if channel is None:
+            channel = db.scalar(select(ModelChannel).where(
+                ModelChannel.model_config_id == model.id,
+                ModelChannel.upstream_model == preset_model.model_id,
+            ).order_by(ModelChannel.id))
+        if channel is None:
+            channel = ModelChannel(
+                model_config_id=model.id,
+                name=f"{preset.name} 主渠道",
+                provider_base_url=base_url,
+                upstream_model=preset_model.model_id,
+            )
+            db.add(channel)
+        channel.provider_connection_id = connection.id
+        channel.name = f"{preset.name} 主渠道"
+        channel.provider_base_url = base_url
+        channel.upstream_model = preset_model.model_id
+        channel.provider_api_key_env = env_name
+        channel.encrypted_api_key = encrypted_secret
+        available = preset_model.model_id in discovered_ids
+        metadata_api_type = preset_model.catalog_metadata.get("api_type", "chat_completions")
+        channel.active = available and metadata_api_type == "chat_completions"
+        channel.status = "healthy" if channel.active else "unhealthy" if metadata_api_type == "chat_completions" else "unknown"
+        channel.health_source = "provider" if available else "unknown"
+        channel.consecutive_failures = 0 if available else channel.consecutive_failures
+        channel.last_checked_at = connection.last_checked_at
+        channel.last_error = None if available else f"供应商模型目录不包含上游模型: {preset_model.model_id}"
+        price_ready = model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0
+        callable_now = channel.active and price_ready
+        if not available:
+            model.active = False
+        elif should_auto_publish and callable_now:
+            model.active = True
+        synced.append({
+            "id": model.id,
+            "public_name": model.public_name,
+            "upstream_model": model.upstream_model,
+            "input_price_micros_per_1k": model.input_price_micros_per_1k,
+            "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "pricing_margin_bps": model.pricing_margin_bps,
+            "available": available,
+            "callable": bool(model.active and callable_now),
+            "reason": None if callable_now else "等待统一调用适配器" if metadata_api_type != "chat_completions" else "请配置平台价格" if not price_ready else "尚未发布",
+        })
+    connection.synced_model_count = len(synced)
+    connection.callable_model_count = sum(1 for item in synced if item["callable"])
+    connection.status = "healthy" if connection.callable_model_count else "degraded"
+    if connection.callable_model_count < len(synced):
+        connection.last_error = f"{len(synced) - connection.callable_model_count} 个模型尚未达到可调用条件"
+    record_audit_event(
+        db,
+        actor_type="admin",
+        actor_id=context.actor_id,
+        action="provider.connection_synced",
+        target_type="provider_connection",
+        target_id=connection.id,
+        details={
+            "preset_id": preset.id,
+            "discovered": len(discovered_ids),
+            "synced": len(synced),
+            "callable": connection.callable_model_count,
+        },
+    )
+    db.commit()
+    db.refresh(connection)
+    return {"connection": provider_connection_data(connection, preset), "models": synced}
+
+
+@app.post("/admin/provider-presets/{preset_id}/install", dependencies=[Depends(require_operator)])
+def install_provider_preset(preset_id: str, payload: ProviderPresetInstall, db: Session = Depends(get_db)) -> dict[str, object]:
+    preset = get_provider_preset(preset_id)
+    if not preset:
+        raise HTTPException(status_code=404, detail="provider preset not found")
+    invalid = sorted(set(payload.model_ids) - set(preset.model_ids))
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"model is not included in provider preset: {invalid[0]}")
+    preset_models = [preset.get_model(model_id) for model_id in payload.model_ids]
+    if any(model is None for model in preset_models):
+        raise HTTPException(status_code=422, detail="model is not included in provider preset")
+    selected_models = [model for model in preset_models if model is not None]
+    public_names = [model.public_name for model in selected_models]
+    existing = set(db.scalars(select(ModelConfig.public_name).where(ModelConfig.public_name.in_(public_names))).all())
+    if existing:
+        raise HTTPException(status_code=409, detail=f"model already exists: {sorted(existing)[0]}")
+    created: list[ModelConfig] = []
+    for preset_model in selected_models:
+        record = ModelConfig(
+            public_name=preset_model.public_name,
+            upstream_model=preset_model.model_id,
+            provider_base_url=preset.base_url,
+            provider_api_key_env=preset.api_key_env,
+            input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k,
+            output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k,
+            catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
+            official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
+            active=False,
+        )
+        db.add(record)
+        db.flush()
+        db.add(ModelChannel(
+            model_config_id=record.id,
+            name=preset.name,
+            upstream_model=preset_model.model_id,
+            provider_base_url=preset.base_url,
+            provider_api_key_env=preset.api_key_env,
+            active=False,
+        ))
+        created.append(record)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.provider_preset_installed", target_type="provider_preset", target_id=preset.id, details={"models": payload.model_ids})
+    db.commit()
+    return {"preset": provider_preset_data(preset), "data": [{"id": item.id, "public_name": item.public_name, "active": item.active} for item in created]}
 
 
 @app.get("/admin/upstream-models", dependencies=[Depends(require_admin)])
@@ -540,7 +1587,7 @@ async def list_upstream_models(
     return {"data": [{"id": model_id} for model_id in model_ids]}
 
 
-@app.post("/admin/models/batch", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/batch", dependencies=[Depends(require_operator)])
 def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> dict[str, object]:
     names = [item.public_name for item in payload.models]
     if len(set(names)) != len(names):
@@ -581,6 +1628,7 @@ def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> d
 
 @app.get("/admin/models", dependencies=[Depends(require_admin)])
 def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
+    settings = get_settings()
     models = db.scalars(select(ModelConfig).order_by(ModelConfig.id.desc())).all()
     return {"data": [
         {
@@ -591,7 +1639,13 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "provider_api_key_env": model.provider_api_key_env,
             "input_price_micros_per_1k": model.input_price_micros_per_1k,
             "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "pricing_margin_bps": model.pricing_margin_bps,
+            "catalog_metadata": parse_model_json(model.catalog_metadata_json),
+            "official_pricing": parse_model_json(model.official_pricing_json),
             "active": model.active,
+            "publication_state": publication_state,
+            "publication_reasons": publication_reasons,
+            "mock_mode": settings.mock_mode,
             "channel_count": db.scalar(select(func.count(ModelChannel.id)).where(ModelChannel.model_config_id == model.id)) or 0,
             "healthy_channel_count": db.scalar(select(func.count(ModelChannel.id)).where(
                 ModelChannel.model_config_id == model.id,
@@ -601,10 +1655,12 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
             "created_at": model.created_at.isoformat(),
         }
         for model in models
+        for channels in [db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()]
+        for publication_state, publication_reasons in [_model_publication_state(model, channels, settings)]
     ]}
 
 
-@app.patch("/admin/models/{model_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/models/{model_id}", dependencies=[Depends(require_operator)])
 def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     model = db.get(ModelConfig, model_id)
     if not model:
@@ -612,6 +1668,30 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="no model changes provided")
+    if "pricing_margin_bps" in changes and changes["pricing_margin_bps"]:
+        input_price, output_price = prices_from_margin(model, changes["pricing_margin_bps"])
+        changes["input_price_micros_per_1k"] = input_price
+        changes["output_price_micros_per_1k"] = output_price
+    elif "pricing_margin_bps" not in changes and ({"input_price_micros_per_1k", "output_price_micros_per_1k"} & changes.keys()):
+        # A direct price edit is an explicit manual override of the margin strategy.
+        changes["pricing_margin_bps"] = 0
+    if changes.get("active"):
+        settings = get_settings()
+        input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
+        output_price = changes.get("output_price_micros_per_1k", model.output_price_micros_per_1k)
+        if input_price <= 0 or output_price <= 0:
+            raise HTTPException(status_code=422, detail="configure positive platform input and output prices before publishing a model")
+        channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
+        if settings.mock_mode:
+            healthy_channel = any(channel.active and channel.status == "healthy" for channel in channels)
+        else:
+            healthy_channel = any(
+                channel.active and channel.status == "healthy" and channel.health_source == "provider"
+                and _channel_credentials_configured(channel)
+                for channel in channels
+            )
+        if not healthy_channel:
+            raise HTTPException(status_code=422, detail="run a successful real provider health check with configured credentials before publishing a model")
     for field, value in changes.items():
         setattr(model, field, value)
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.updated", target_type="model", target_id=model.id, details=changes)
@@ -621,17 +1701,75 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
         "active": model.active,
         "input_price_micros_per_1k": model.input_price_micros_per_1k,
         "output_price_micros_per_1k": model.output_price_micros_per_1k,
+        "pricing_margin_bps": model.pricing_margin_bps,
     }
 
 
+@app.delete("/admin/models/{model_id}", dependencies=[Depends(require_superadmin)])
+def delete_model(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    if model.active:
+        raise HTTPException(status_code=409, detail="请先下架模型后再删除")
+    usage_count = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.model == model.public_name)) or 0
+    if usage_count:
+        raise HTTPException(status_code=409, detail="该模型已有调用记录，不能删除；请保留下架状态以便审计")
+    model_id_value = model.id
+    public_name = model.public_name
+    db.execute(delete(ModelChannel).where(ModelChannel.model_config_id == model.id))
+    db.delete(model)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.deleted", target_type="model", target_id=model_id_value, details={"public_name": public_name})
+    db.commit()
+    return {"id": model_id_value, "public_name": public_name, "deleted": True}
+
+
+def parse_model_json(value: str | None) -> dict[str, object] | None:
+    if not value:
+        return None
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def official_reference_prices(model: ModelConfig) -> tuple[int, int] | None:
+    """Return official input/output costs in the ledger's /1K micros unit."""
+    pricing = parse_model_json(model.official_pricing_json) or {}
+    off_peak = pricing.get("off_peak")
+    if not isinstance(off_peak, dict):
+        return None
+    input_per_million = off_peak.get("input_cache_miss_micros")
+    output_per_million = off_peak.get("output_micros")
+    if not isinstance(input_per_million, (int, float)) or not isinstance(output_per_million, (int, float)):
+        return None
+    if input_per_million <= 0 or output_per_million <= 0:
+        return None
+    return round(input_per_million / 1000), round(output_per_million / 1000)
+
+
+def prices_from_margin(model: ModelConfig, margin_bps: int) -> tuple[int, int]:
+    reference = official_reference_prices(model)
+    if not reference:
+        raise HTTPException(status_code=422, detail="该模型没有可核验的官方价格，无法按利润率自动定价")
+    denominator = 10_000 - margin_bps
+    return tuple((price * 10_000 + denominator - 1) // denominator for price in reference)
+
+
 def channel_data(channel: ModelChannel) -> dict[str, object]:
+    credential_source = "console" if channel.encrypted_api_key else "environment" if channel.provider_api_key_env else "default"
     return {
         "id": channel.id,
         "model_config_id": channel.model_config_id,
+        "provider_connection_id": channel.provider_connection_id,
         "name": channel.name,
         "provider_base_url": channel.provider_base_url,
         "upstream_model": channel.upstream_model,
         "provider_api_key_env": channel.provider_api_key_env,
+        "credentials_configured": _channel_credentials_configured(channel),
+        "credential_source": credential_source,
+        "health_source": channel.health_source,
         "priority": channel.priority,
         "weight": channel.weight,
         "active": channel.active,
@@ -640,6 +1778,8 @@ def channel_data(channel: ModelChannel) -> dict[str, object]:
         "circuit_open_until": channel.circuit_open_until.isoformat() if channel.circuit_open_until else None,
         "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None,
         "last_error": channel.last_error,
+        "provider_input_cost_micros_per_1k": channel.provider_input_cost_micros_per_1k,
+        "provider_output_cost_micros_per_1k": channel.provider_output_cost_micros_per_1k,
         "created_at": channel.created_at.isoformat(),
     }
 
@@ -656,7 +1796,7 @@ def list_model_channels(model_id: int, db: Session = Depends(get_db)) -> dict[st
     return {"data": [channel_data(channel) for channel in channels]}
 
 
-@app.post("/admin/models/{model_id}/channels", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/{model_id}/channels", dependencies=[Depends(require_operator)])
 def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
     if not db.get(ModelConfig, model_id):
         raise HTTPException(status_code=404, detail="model not found")
@@ -665,19 +1805,27 @@ def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session
         ModelChannel.name == payload.name,
     )):
         raise HTTPException(status_code=409, detail="channel name already exists for model")
-    channel = ModelChannel(model_config_id=model_id, **payload.model_dump())
+    secret = payload.provider_api_key
+    channel = ModelChannel(model_config_id=model_id, **payload.model_dump(exclude={"provider_api_key"}))
+    if secret:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.add(channel)
     db.commit()
     db.refresh(channel)
     return channel_data(channel)
 
 
-@app.patch("/admin/channels/{channel_id}", dependencies=[Depends(require_admin)])
+@app.patch("/admin/channels/{channel_id}", dependencies=[Depends(require_operator)])
 def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     channel = db.get(ModelChannel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="channel not found")
-    changes = payload.model_dump(exclude_unset=True)
+    secret = payload.provider_api_key
+    clear_secret = payload.clear_provider_api_key
+    changes = payload.model_dump(exclude_unset=True, exclude={"provider_api_key", "clear_provider_api_key"})
     if "name" in changes and db.scalar(select(ModelChannel).where(
         ModelChannel.model_config_id == channel.model_config_id,
         ModelChannel.name == changes["name"],
@@ -686,12 +1834,19 @@ def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Sessi
         raise HTTPException(status_code=409, detail="channel name already exists for model")
     for field, value in changes.items():
         setattr(channel, field, value)
+    if clear_secret:
+        channel.encrypted_api_key = None
+    elif secret:
+        try:
+            channel.encrypted_api_key = encrypt_provider_secret(secret)
+        except ProviderSecretError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
     db.commit()
     db.refresh(channel)
     return channel_data(channel)
 
 
-@app.post("/admin/channels/{channel_id}/check", dependencies=[Depends(require_admin)])
+@app.post("/admin/channels/{channel_id}/check", dependencies=[Depends(require_operator)])
 async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
     channel = db.get(ModelChannel, channel_id)
     if not channel:
@@ -701,7 +1856,7 @@ async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db
     return {**channel_data(channel), **result}
 
 
-@app.post("/admin/models/health-check", dependencies=[Depends(require_admin)])
+@app.post("/admin/models/health-check", dependencies=[Depends(require_operator)])
 async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[str, object]:
     channels = db.scalars(select(ModelChannel).where(ModelChannel.active.is_(True)).order_by(ModelChannel.priority, ModelChannel.id)).all()
     results = []
@@ -716,11 +1871,111 @@ async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[s
     }
 
 
+@app.post("/admin/models/{model_id}/preflight", dependencies=[Depends(require_superadmin)])
+async def preflight_model(
+    model_id: int,
+    payload: ModelPreflightRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Run explicit pre-release checks. Chat and stream probes may incur provider charges."""
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id, ModelChannel.active.is_(True))).all()
+    health = []
+    for channel in channels:
+        result = await check_channel_health(db, channel)
+        health.append({"channel_id": channel.id, "name": channel.name, **result})
+    report: dict[str, object] = {
+        "model": model.public_name,
+        "price_configured": model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0,
+        "channel_health": health,
+        "chat_probe": None,
+        "stream_probe": None,
+    }
+    publication_state, publication_reasons = _model_publication_state(model, channels)
+    report["publication_state"] = publication_state
+    report["publication_reasons"] = publication_reasons
+    report["ready_to_publish"] = publication_state in {"published", "mock_published", "candidate"} and not publication_reasons
+    probe = ChatCompletionRequest(model=model.public_name, messages=[{"role": "user", "content": payload.prompt}], max_tokens=32)
+    if payload.chat_probe:
+        try:
+            _, input_tokens, output_tokens = await call_provider(db, model, probe)
+            report["chat_probe"] = {
+                "ok": True,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "estimated_amount_micros": calculate_amount(model, input_tokens, output_tokens),
+            }
+        except Exception as exc:
+            report["chat_probe"] = {"ok": False, "detail": str(exc)}
+    if payload.stream_probe:
+        stream_chunks = 0
+        stream_usage: dict[str, int] | None = None
+        try:
+            streaming_probe = probe.model_copy(update={"stream": True})
+            async for raw_chunk in stream_provider(db, model, streaming_probe):
+                stream_chunks += 1
+                text = raw_chunk.decode("utf-8", errors="replace").strip()
+                if not text.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(text[6:])
+                    usage = event.get("usage") if isinstance(event, dict) else None
+                    if isinstance(usage, dict) and "prompt_tokens" in usage and "completion_tokens" in usage:
+                        stream_usage = {
+                            "input_tokens": int(usage["prompt_tokens"]),
+                            "output_tokens": int(usage["completion_tokens"]),
+                        }
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+            report["stream_probe"] = {
+                "ok": stream_chunks > 0,
+                "chunk_count": stream_chunks,
+                "token_usage_reported": stream_usage is not None,
+                **(stream_usage or {}),
+                **({"estimated_amount_micros": calculate_amount(model, stream_usage["input_tokens"], stream_usage["output_tokens"])} if stream_usage else {}),
+            }
+        except Exception as exc:
+            report["stream_probe"] = {"ok": False, "chunk_count": stream_chunks, "detail": str(exc)}
+    return report
+
+
 @app.get("/v1/models")
 def list_models(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
     require_api_key(authorization, db)
-    models = db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all()
-    return {"object": "list", "data": [{"id": item.public_name, "object": "model", "owned_by": "token"} for item in models]}
+    models = [model for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all() if model_is_callable(db, model)]
+    data = []
+    for item in models:
+        metadata = parse_model_json(item.catalog_metadata_json) or {}
+        data.append({
+            "id": item.public_name,
+            "object": "model",
+            "owned_by": metadata.get("provider", "token"),
+            "created": int(item.created_at.timestamp()),
+            "context_length": metadata.get("context_window"),
+            "architecture": {
+                "input_modalities": metadata.get("modalities", ["text"]),
+                "output_modalities": ["text"],
+            },
+            "pricing": {
+                "input_cny_per_1k": item.input_price_micros_per_1k,
+                "output_cny_per_1k": item.output_price_micros_per_1k,
+            },
+            "supported_parameters": metadata.get("supported_parameters", ["messages", "stream", "temperature", "max_tokens"]),
+        })
+    return {"object": "list", "data": data}
+
+
+@app.get("/v1/models/{model_id:path}")
+def retrieve_model(model_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, str]:
+    require_api_key(authorization, db)
+    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_id, ModelConfig.active.is_(True)))
+    if not model:
+        raise HTTPException(status_code=404, detail=f"unknown model: {model_id}")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail=f"model unavailable: {model_id}")
+    return {"id": model.public_name, "object": "model", "owned_by": "token"}
 
 
 @app.get("/v1/account", response_model=AccountBalance)
@@ -749,6 +2004,8 @@ async def chat_completions(
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
     if not model:
         raise HTTPException(status_code=404, detail=f"unknown model: {payload.model}")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail=f"model unavailable: {payload.model}")
     request_id = x_request_id or "req_" + uuid.uuid4().hex
     trace_id = x_trace_id or request_id
     if not _request_id_pattern.fullmatch(request_id) or not _request_id_pattern.fullmatch(trace_id):
@@ -756,7 +2013,7 @@ async def chat_completions(
     if db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
         raise HTTPException(status_code=409, detail="request id already used")
     estimated_input = estimate_tokens(payload.messages)
-    reservation = calculate_amount(model, estimated_input, payload.max_tokens or settings.reservation_output_tokens)
+    reservation = calculate_amount(model, estimated_input, payload.max_tokens or payload.max_completion_tokens or settings.reservation_output_tokens)
     try:
         reserve_balance(db, account, api_key, reservation, request_id)
     except ValueError as exc:
@@ -772,8 +2029,9 @@ async def chat_completions(
             saw_provider_data = False
             completed = False
             error_message: str | None = None
+            route_meta: dict[str, object] = {}
             try:
-                async for chunk in stream_provider(db, model, payload):
+                async for chunk in stream_provider(db, model, payload, route_meta):
                     text = chunk.decode("utf-8", errors="replace")
                     if text.startswith("data: ") and "[DONE]" not in text:
                         try:
@@ -804,6 +2062,7 @@ async def chat_completions(
                 if not input_tokens and (completed or saw_provider_data):
                     input_tokens = estimated_input
                 actual_amount = calculate_amount(model, input_tokens, output_tokens)
+                provider_channel = db.get(ModelChannel, route_meta.get("provider_channel_id")) if route_meta.get("provider_channel_id") else None
                 settle_balance(db, account, api_key, reservation, actual_amount, request_id)
                 save_usage(
                     db,
@@ -816,6 +2075,12 @@ async def chat_completions(
                     "success" if completed else "error",
                     int((time.perf_counter() - started) * 1000),
                     error_message,
+                    provider_cost_micros=provider_cost(provider_channel, input_tokens, output_tokens, route_meta.get("usage_details")) if provider_channel else 0,
+                    provider_channel_id=provider_channel.id if provider_channel else None,
+                    provider_request_id=route_meta.get("provider_request_id"),
+                    usage_details=route_meta.get("usage_details"),
+                    raw_usage=route_meta.get("raw_usage"),
+                    route_attempts=route_meta.get("route_attempts"),
                 )
 
         return StreamingResponse(
@@ -825,10 +2090,22 @@ async def chat_completions(
         )
     started = time.perf_counter()
     try:
-        response, input_tokens, output_tokens = await call_provider(db, model, payload)
+        provider_result = await call_provider_details(db, model, payload)
+        response = provider_result.response
+        input_tokens = provider_result.input_tokens
+        output_tokens = provider_result.output_tokens
         actual_amount = calculate_amount(model, input_tokens, output_tokens)
         settle_balance(db, account, api_key, reservation, actual_amount, request_id)
-        save_usage(db, api_key, model, request_id, trace_id, input_tokens, output_tokens, "success", int((time.perf_counter() - started) * 1000))
+        save_usage(
+            db, api_key, model, request_id, trace_id, input_tokens, output_tokens, "success",
+            int((time.perf_counter() - started) * 1000),
+            provider_cost_micros=provider_result.provider_cost_micros,
+            provider_channel_id=provider_result.channel_id,
+            provider_request_id=provider_result.provider_request_id,
+            usage_details=provider_result.usage_details,
+            raw_usage=provider_result.raw_usage,
+            route_attempts=provider_result.route_attempts,
+        )
         response.setdefault("model", model.public_name)
         return JSONResponse(response, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
     except HTTPException as exc:
@@ -878,6 +2155,13 @@ def usage_records(db: Session = Depends(get_db)) -> dict[str, object]:
             "output_tokens": record.output_tokens,
             "total_tokens": record.total_tokens,
             "amount_micros": record.amount_micros,
+            "provider_cost_micros": record.provider_cost_micros,
+            "provider_channel_id": record.provider_channel_id,
+            "provider_request_id": record.provider_request_id,
+            "input_cache_hit_tokens": record.input_cache_hit_tokens,
+            "input_cache_miss_tokens": record.input_cache_miss_tokens,
+            "reasoning_tokens": record.reasoning_tokens,
+            "route_attempts": json.loads(record.route_attempts_json or "[]"),
             "status": record.status,
             "latency_ms": record.latency_ms,
             "error_message": record.error_message,

@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken用户中心</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css">
-  <link rel="stylesheet" href="/static/portal.css">
+  <link rel="stylesheet" href="/static/styles.css?v=portal-20260821-1">
+  <link rel="stylesheet" href="/static/portal.css?v=portal-20260821-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/portal.js" defer></script>
+  <script src="/static/portal.js?v=portal-20260821-1" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
@@ -21,11 +21,10 @@
       <div class="auth-panel auth-panel-form">
         <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / USER</p><h2>用户中心</h2><span>登录或注册后管理模型调用与账户额度。</span></div>
         <div class="auth-mode-tabs" role="tablist" aria-label="用户中心登录方式">
-          <button type="button" class="active" data-auth-mode="trial">试用链接</button>
-          <button type="button" data-auth-mode="login">账号登录</button>
-          <button type="button" data-auth-mode="register">注册账号</button>
+          <button type="button" class="active" data-auth-mode="login">账号登录</button>
+          <button type="button" data-auth-mode="trial">试用入口</button>
         </div>
-        <form id="portal-auth-form">
+        <form id="portal-auth-form" hidden>
           <label for="portal-token">试用令牌（trl_ 开头）</label>
           <div class="password-row">
             <input id="portal-token" name="token" type="password" autocomplete="off" placeholder="trl_..." required autofocus>
@@ -33,24 +32,28 @@
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入用户中心</span></button>
         </form>
-        <form id="portal-login-form" hidden>
+        <form id="portal-login-form">
           <label for="portal-login-id">账号</label>
           <input id="portal-login-id" name="login_id" autocomplete="username" placeholder="用户名" required minlength="3">
           <label for="portal-login-password">密码</label>
           <div class="password-row"><input id="portal-login-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-login-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+          <button class="secondary-button full-button" id="loksystem-login-button" type="button" hidden><i data-lucide="monitor-up"></i><span>LokSystem 一键注册 / 登录</span></button>
+          <button class="secondary-button full-button" id="oidc-login-button" type="button" hidden><i data-lucide="shield-check"></i><span>统一身份登录</span></button>
+          <div class="auth-login-support"><button class="text-button" id="portal-register-link" type="button"><i data-lucide="user-plus"></i><span>注册账号</span></button><button class="text-button" id="portal-forgot-password" type="button">忘记密码？</button></div>
         </form>
         <form id="portal-register-form" hidden>
           <label for="portal-register-name">显示名称</label>
           <input id="portal-register-name" name="name" autocomplete="name" placeholder="你的名称" required maxlength="120">
           <label for="portal-register-id">账号</label>
           <input id="portal-register-id" name="login_id" autocomplete="username" placeholder="3-160 位字母、数字或 _.-" required minlength="3" maxlength="160">
+          <label for="portal-register-contact">安全联系方式</label>
+          <input id="portal-register-contact" name="security_contact" autocomplete="email" placeholder="邮箱或手机号，用于找回密码" required minlength="3" maxlength="160">
           <label for="portal-register-password">密码</label>
           <div class="password-row"><input id="portal-register-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8"><button class="icon-button" type="button" data-toggle-password="portal-register-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button></div>
           <button class="primary-button full-button" type="submit"><i data-lucide="user-plus"></i><span>注册并进入</span></button>
         </form>
         <p class="auth-error" id="portal-auth-error" role="alert"></p>
-        <a class="auth-doc-link" href="/guide/user"><i data-lucide="book-open"></i><span>查看用户文档</span></a>
       </div>
     </div>
   </section>
@@ -59,38 +62,48 @@
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
-        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+        <span class="brand-copy"><strong>LokToken</strong><small>MODEL SERVICE</small></span>
       </div>
       <p class="nav-label">用户中心</p>
       <nav aria-label="用户导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>用户概览</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="store"></i><span>模型广场</span></button>
         <button class="nav-item" data-view="quota"><i data-lucide="wallet-cards"></i><span>额度管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
+        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="chart-no-axes-combined"></i><span>请求记录</span></button>
         <button class="nav-item" data-view="orders"><i data-lucide="scroll-text"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redeem"><i data-lucide="gift"></i><span>兑换福利</span></button>
       </nav>
       <div class="sidebar-footer">
-        <a href="/guide/user" target="_blank"><i data-lucide="book-open"></i><span>用户文档</span></a>
-        <button id="portal-logout"><i data-lucide="log-out"></i><span>退出</span></button>
+        <div class="account-menu">
+          <button class="account-menu-trigger" id="portal-account-trigger" type="button" aria-expanded="false" aria-controls="portal-account-menu">
+            <span class="account-avatar" id="portal-user-avatar">用</span>
+            <span class="account-summary"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>
+            <i data-lucide="chevron-up"></i>
+          </button>
+          <div class="account-menu-panel account-menu-panel-wide" id="portal-account-menu" hidden>
+            <button id="portal-workspace-manager" type="button"><i data-lucide="building-2"></i><span>空间与项目</span></button>
+            <button id="portal-security" type="button"><i data-lucide="shield-check"></i><span>账号安全</span></button>
+            <div class="account-menu-divider"></div>
+            <button id="portal-logout" type="button"><i data-lucide="log-out"></i><span>退出</span></button>
+          </div>
+        </div>
       </div>
     </aside>
 
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">LOKSYSTEM / TOKEN</p>
+          <p class="eyebrow">LOKTOKEN / USER</p>
           <h1 id="portal-page-title">用户概览</h1>
         </div>
-        <div class="topbar-actions">
-          <span class="portal-identity"><strong id="portal-user-name"></strong><small id="portal-user-id"></small></span>
-          <button class="icon-button" id="portal-refresh" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
-        </div>
+        <div class="topbar-actions"><button class="icon-button" id="portal-back-button" type="button" title="返回上一页" aria-label="返回上一页"><i data-lucide="arrow-left"></i></button><a class="secondary-button topbar-doc-link" id="portal-guide-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
       </header>
 
       <div class="content">
         <section class="view active" id="portal-view-overview">
+          <section class="panel integration-guide" id="portal-integration-guide" aria-label="应用接入指引" hidden></section>
+
           <section class="overview-quickbar panel" aria-label="账户摘要">
             <div><span>账户余额</span><strong id="overview-balance">-</strong></div>
             <div><span>有效 Key</span><strong id="overview-key-count">-</strong></div>
@@ -136,7 +149,7 @@
         </section>
 
         <section class="view" id="portal-view-keys">
-          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="icon-button" id="keys-refresh" type="button" title="刷新 Key" aria-label="刷新 Key"><i data-lucide="refresh-cw"></i></button><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
+          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
           <div class="metric-grid compact key-metrics" id="portal-keys-metrics"></div>
           <section class="panel key-workspace">
             <div class="key-toolbar">
@@ -150,9 +163,9 @@
         </section>
 
         <section class="view" id="portal-view-models">
-          <div class="section-header page-section-header"><div><h2>模型广场</h2><p>浏览可用模型、比较能力与价格，并获取调用示例</p></div><button class="secondary-button" data-go="keys"><i data-lucide="key-round"></i><span>管理 API Key</span></button></div>
+          <div class="section-header page-section-header"><div><h2>模型广场</h2><p>浏览可用模型、比较能力与价格，并获取调用示例</p></div><button class="secondary-button" data-go="keys"><i data-lucide="key-round"></i><span>管理密钥</span></button></div>
           <section class="model-callout"><i data-lucide="sparkles"></i><div><strong>选择模型后直接接入</strong><span>在详情中复制模型 ID 或调用示例；每个已上架模型都可通过统一的 OpenAI 兼容接口访问。</span></div></section>
-          <div class="marketplace-toolbar"><div class="input-with-icon"><i data-lucide="search"></i><input id="model-marketplace-search" type="search" placeholder="搜索模型名称、厂商或能力" aria-label="搜索模型"></div><div class="marketplace-tabs" id="model-marketplace-tabs" aria-label="模型能力筛选"></div><span id="model-marketplace-count"></span></div>
+          <div class="marketplace-toolbar"><div class="input-with-icon"><i data-lucide="search"></i><input id="model-marketplace-search" type="search" placeholder="搜索模型名称、厂商或能力" aria-label="搜索模型"></div><div class="marketplace-tabs" id="model-marketplace-tabs" aria-label="模型能力筛选"></div><span id="model-marketplace-count"></span><button class="secondary-button compact-model-back" id="model-marketplace-provider-back" type="button" data-model-provider-back hidden><i data-lucide="arrow-left"></i><span>返回供应商</span></button></div>
           <div class="model-catalog-grid" id="portal-models-table"></div>
         </section>
 
@@ -169,7 +182,7 @@
               <div class="field"><label for="usage-from-filter">开始时间</label><input id="usage-from-filter" name="from" type="datetime-local"></div>
               <div class="field"><label for="usage-to-filter">结束时间</label><input id="usage-to-filter" name="to" type="datetime-local"></div>
             </div>
-            <div class="usage-filter-actions"><button class="primary-button" type="submit"><i data-lucide="search"></i><span>查询</span></button><button class="secondary-button" id="usage-reset" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button><button class="icon-button" id="usage-refresh" type="button" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button><button class="icon-button" id="usage-export" type="button" title="导出 CSV" aria-label="导出 CSV"><i data-lucide="download"></i></button></div>
+            <div class="usage-filter-actions"><button class="primary-button" type="submit"><i data-lucide="search"></i><span>查询</span></button><button class="secondary-button" id="usage-reset" type="button"><i data-lucide="rotate-ccw"></i><span>重置</span></button><button class="icon-button" id="usage-export" type="button" title="导出 CSV" aria-label="导出 CSV"><i data-lucide="download"></i></button></div>
           </form>
 
           <div class="request-analytics-grid">
@@ -208,11 +221,11 @@
             <section class="panel quota-action-panel"><div><div class="quota-action-icon blue"><i data-lucide="circle-plus"></i></div><h2>充值额度</h2><p>创建充值申请，到账后自动计入账户余额。</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建充值申请</span></button></section>
             <section class="panel quota-action-panel"><div><div class="quota-action-icon green"><i data-lucide="gift"></i></div><h2>兑换福利</h2><p>使用兑换码领取可用额度，核销成功后即时到账。</p></div><button class="secondary-button" data-go="redeem"><i data-lucide="arrow-right"></i><span>前往兑换</span></button></section>
           </div>
-          <section class="panel quota-history-panel"><div class="section-header"><div><h2>余额变动</h2><p id="quota-history-count">最近 0 条记录</p></div><button class="icon-button" id="quota-refresh" type="button" title="刷新余额记录" aria-label="刷新余额记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table class="quota-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>参考编号</th><th class="align-right">金额</th></tr></thead><tbody id="portal-transactions-table"></tbody></table></div></section>
+          <section class="panel quota-history-panel"><div class="section-header"><div><h2>余额变动</h2><p id="quota-history-count">最近 0 条记录</p></div></div><div class="table-wrap"><table class="quota-table"><thead><tr><th>时间</th><th>类型</th><th>说明</th><th>参考编号</th><th class="align-right">金额</th></tr></thead><tbody id="portal-transactions-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="portal-view-orders">
-          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="icon-button" id="orders-refresh" type="button" title="刷新订单" aria-label="刷新订单"><i data-lucide="refresh-cw"></i></button><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
+          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
           <section class="panel orders-workspace"><div class="orders-toolbar"><div class="field"><label for="order-status-filter">订单状态</label><select id="order-status-filter"><option value="">全部订单</option><option value="pending">待处理</option><option value="paid">已入账</option><option value="refunded">已退款</option></select></div><span id="order-result-count">共 0 个订单</span></div><div class="table-wrap"><table class="orders-table"><thead><tr><th>订单号</th><th>支付方式</th><th>金额</th><th>状态</th><th>创建时间</th><th>到账时间</th></tr></thead><tbody id="portal-orders-table"></tbody></table></div></section>
         </section>
 
@@ -222,7 +235,7 @@
             <section class="redeem-balance-panel"><i data-lucide="wallet-cards"></i><span>当前可用余额</span><strong id="redeem-balance">-</strong><small id="redeem-claim-count">暂无兑换记录</small></section>
             <section class="panel redeem-form-panel"><div class="section-header"><div><h2>兑换码</h2><p>兑换码区分大小写</p></div></div><form id="portal-redeem-form"><div class="input-with-icon"><i data-lucide="gift"></i><input id="redeem-code" name="code" autocomplete="off" required minlength="8" maxlength="120" placeholder="请输入兑换码"></div><button class="primary-button" type="submit"><i data-lucide="circle-check-big"></i><span>立即兑换</span></button></form></section>
             <section class="redeem-notice"><i data-lucide="info"></i><div><strong>关于兑换福利</strong><ul><li>每个账户对同一兑换码仅可领取一次。</li><li>兑换成功后，额度会即时计入当前账户。</li><li>无效、过期或已用尽的兑换码无法重复核销。</li></ul></div></section>
-            <section class="panel redeem-history-panel"><div class="section-header"><div><h2>兑换记录</h2><p id="redeem-history-count">最近 0 条记录</p></div><button class="icon-button" id="redeem-refresh" type="button" title="刷新兑换记录" aria-label="刷新兑换记录"><i data-lucide="refresh-cw"></i></button></div><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换时间</th><th class="align-right">到账额度</th></tr></thead><tbody id="portal-redemptions-table"></tbody></table></div></section>
+            <section class="panel redeem-history-panel"><div class="section-header"><div><h2>兑换记录</h2><p id="redeem-history-count">最近 0 条记录</p></div></div><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换时间</th><th class="align-right">到账额度</th></tr></thead><tbody id="portal-redemptions-table"></tbody></table></div></section>
           </div>
         </section>
       </div>
@@ -230,7 +243,7 @@
   </div>
 
   <dialog id="portal-dialog">
-    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="portal-dialog-title"></h2></div><button class="icon-button" id="portal-dialog-close" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div class="dialog-header"><div><p class="eyebrow">LokToken</p><h2 id="portal-dialog-title"></h2></div><button class="icon-button" id="portal-dialog-close" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
     <div id="portal-dialog-content"></div>
   </dialog>
   <div class="toast" id="portal-toast" role="status"></div>

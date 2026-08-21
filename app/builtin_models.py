@@ -6,7 +6,9 @@ production model.  A production operator must explicitly configure a real
 upstream channel before exposing models to customers.
 """
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -63,8 +65,15 @@ BUILTIN_MODELS = (
 )
 
 
-def model_metadata(public_name: str) -> dict[str, object]:
+def model_metadata(public_name: str, catalog_metadata_json: str | None = None) -> dict[str, object]:
     """Return presentation metadata while keeping routing data in the database."""
+    if catalog_metadata_json:
+        try:
+            metadata = json.loads(catalog_metadata_json)
+        except json.JSONDecodeError:
+            metadata = None
+        if isinstance(metadata, dict):
+            return _normalize_catalog_metadata(public_name, metadata)
     for model in BUILTIN_MODELS:
         if model.public_name == public_name:
             return {
@@ -85,5 +94,24 @@ def model_metadata(public_name: str) -> dict[str, object]:
         "modalities": ["text"],
         "supported_parameters": ["stream", "temperature", "max_tokens"],
         "context_window": None,
+        "builtin": False,
+    }
+
+
+def _normalize_catalog_metadata(public_name: str, metadata: dict[str, Any]) -> dict[str, object]:
+    """Keep database-backed catalogue data safe for portal serialization."""
+    def string_list(value: object) -> list[str]:
+        return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+    return {
+        "display_name": metadata.get("display_name") if isinstance(metadata.get("display_name"), str) else public_name,
+        "provider": metadata.get("provider") if isinstance(metadata.get("provider"), str) else "第三方模型",
+        "summary": metadata.get("summary") if isinstance(metadata.get("summary"), str) else "通过 LokToken 统一调用的 OpenAI 兼容模型。",
+        "capabilities": string_list(metadata.get("capabilities")),
+        "modalities": string_list(metadata.get("modalities")),
+        "supported_parameters": string_list(metadata.get("supported_parameters")),
+        "context_window": metadata.get("context_window") if isinstance(metadata.get("context_window"), str) else None,
+        "model_version": metadata.get("model_version") if isinstance(metadata.get("model_version"), str) else None,
+        "max_output_tokens": metadata.get("max_output_tokens") if isinstance(metadata.get("max_output_tokens"), int) else None,
         "builtin": False,
     }

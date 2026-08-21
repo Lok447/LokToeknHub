@@ -6,14 +6,16 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .models import ApiKey, BillingAccount, utcnow
+from .db import get_db
+from .models import AdminSession, AdminUser, ApiKey, BillingAccount, utcnow
 
 
 def hash_key(value: str) -> str:
@@ -22,6 +24,14 @@ def hash_key(value: str) -> str:
 
 def create_key() -> str:
     return "tok_" + secrets.token_urlsafe(32)
+
+
+def create_admin_session_token() -> str:
+    return "adm_" + secrets.token_urlsafe(32)
+
+
+def create_password_reset_token() -> str:
+    return "rst_" + secrets.token_urlsafe(32)
 
 
 def create_redemption_code() -> str:
@@ -81,6 +91,15 @@ class PortalContext:
     expires_at: datetime | None
 
 
+@dataclass(frozen=True)
+class AdminContext:
+    user: AdminUser | None
+    role: str
+    actor_id: str
+    session: AdminSession | None
+    bootstrap: bool = False
+
+
 def create_portal_session_token(account: BillingAccount, expires_in_seconds: int | None = None) -> tuple[str, int]:
     settings = get_settings()
     expires_at = int(time.time()) + (expires_in_seconds or settings.portal_session_ttl_seconds)
@@ -89,6 +108,7 @@ def create_portal_session_token(account: BillingAccount, expires_in_seconds: int
         "typ": "session",
         "sub": account.external_user_id,
         "account_id": account.id,
+        "sv": account.session_version,
         "exp": expires_at,
     }, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     signature = hmac.new(settings.trial_signing_secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
@@ -112,8 +132,8 @@ def require_portal_context(authorization: str | None, db: Session) -> PortalCont
         if not isinstance(claims, dict):
             raise ValueError("trial token claims must be an object")
         valid_claims = claims.get("aud") == "token-portal" and int(claims.get("exp", 0)) > int(time.time())
-        if token_type == "session" and claims.get("typ") != "session":
-            valid_claims = False
+        if token_type == "session":
+            valid_claims = valid_claims and claims.get("typ") == "session"
     except (ValueError, TypeError, UnicodeDecodeError, binascii.Error):
         valid_signature = False
         claims = {}
@@ -123,6 +143,8 @@ def require_portal_context(authorization: str | None, db: Session) -> PortalCont
     account = db.get(BillingAccount, claims.get("account_id"))
     if not account or not account.active or account.external_user_id != claims.get("sub"):
         raise HTTPException(status_code=403, detail="billing account is inactive")
+    if token_type == "session" and int(claims.get("sv", 0)) != account.session_version:
+        raise HTTPException(status_code=401, detail="portal session has been revoked")
     return PortalContext(
         account=account,
         token_type=token_type,
@@ -149,10 +171,65 @@ def verify_webhook_signature(body: bytes, signature: str | None) -> bool:
     return secrets.compare_digest(supplied, expected)
 
 
-def require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+def create_admin_session(db: Session, user: AdminUser) -> tuple[str, AdminSession]:
+    raw_token = create_admin_session_token()
+    session = AdminSession(
+        admin_user_id=user.id,
+        token_hash=hash_key(raw_token),
+        expires_at=utcnow() + timedelta(seconds=get_settings().admin_session_ttl_seconds),
+    )
+    db.add(session)
+    return raw_token, session
+
+
+def _is_expired(value: datetime) -> bool:
+    now = utcnow()
+    if value.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    return value <= now
+
+
+def require_bootstrap_admin_token(x_admin_token: str | None = Header(default=None)) -> None:
     expected = get_settings().admin_token
     if not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid admin token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid bootstrap admin token")
+
+
+def require_admin(
+    authorization: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> AdminContext:
+    if authorization and authorization.lower().startswith("bearer "):
+        raw_token = authorization[7:].strip()
+        if raw_token.startswith("adm_"):
+            session = db.scalar(select(AdminSession).where(
+                AdminSession.token_hash == hash_key(raw_token),
+                AdminSession.revoked_at.is_(None),
+            ))
+            if session and not _is_expired(session.expires_at):
+                user = db.get(AdminUser, session.admin_user_id)
+                if user and user.active:
+                    return AdminContext(user=user, role=user.role, actor_id=user.login_id, session=session)
+
+    expected = get_settings().admin_token
+    admin_exists = db.scalar(select(AdminUser.id).limit(1)) is not None
+    if not admin_exists and x_admin_token and secrets.compare_digest(x_admin_token, expected):
+        return AdminContext(user=None, role="superadmin", actor_id="bootstrap-admin", session=None, bootstrap=True)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid administrator session")
+
+
+def require_admin_roles(*roles: str) -> Callable[..., AdminContext]:
+    def dependency(context: AdminContext = Depends(require_admin)) -> AdminContext:
+        if context.role not in roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="administrator role is not permitted for this action")
+        return context
+    return dependency
+
+
+require_operator = require_admin_roles("superadmin", "operator")
+require_finance_operator = require_admin_roles("superadmin", "operator")
+require_superadmin = require_admin_roles("superadmin")
 
 
 def require_api_key(
