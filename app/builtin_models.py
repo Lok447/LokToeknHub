@@ -113,5 +113,7 @@ def _normalize_catalog_metadata(public_name: str, metadata: dict[str, Any]) -> d
         "context_window": metadata.get("context_window") if isinstance(metadata.get("context_window"), str) else None,
         "model_version": metadata.get("model_version") if isinstance(metadata.get("model_version"), str) else None,
         "max_output_tokens": metadata.get("max_output_tokens") if isinstance(metadata.get("max_output_tokens"), int) else None,
+        "gateway_profile": metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else None,
+        "pricing_source_url": metadata.get("pricing_source_url") if isinstance(metadata.get("pricing_source_url"), str) else None,
         "builtin": False,
     }

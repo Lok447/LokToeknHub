@@ -27,7 +27,7 @@
 ## 模型与账本
 
 1. 对每个拟上架模型执行预检：定价已配置、渠道健康、非流式成功、流式至少收到一个数据块。
-2. 对 DeepSeek、Qwen / DashScope、Kimi / Moonshot、MiniMax 分别安装渠道模板，注入服务器密钥环境变量，核对模型目录和价格后再启用候选模型。
+2. 对 DeepSeek、Qwen / DashScope、Kimi / Moonshot、MiniMax 分别安装渠道模板，注入服务器密钥环境变量，核对模型目录和价格后再启用候选模型。Qwen 首批重点验证目录真实存在的 Qwen3.8 Max、2.4T A95B、27B、Qwen3.7 Plus、Qwen3 Coder Next/Plus、Qwen3-VL Flash/Plus；Qwen Image 3.0 与 Wan 视频只核对任务目录和候选状态，待图片/视频适配器与独立计费 Gate 完成后再上架。
 3. 主渠道模拟失败，确认备用渠道接管且熔断状态、请求记录、Token 与实际费用一致。
 4. 用真实测试 Key 执行一次非流式和一次流式调用，核对供应商用量、LokToken 用量记录、账户余额和账本流水。
 5. 创建、确认和退款一笔支付沙箱订单；验证角色限制、状态只能按 `pending -> paid -> refunded` 迁移，并执行账本对账至“无差异”。

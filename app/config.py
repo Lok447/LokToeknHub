@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     oidc_scopes: str = "openid profile email lok_user_id"
     oidc_account_id_claim: str = "lok_user_id"
     oidc_allow_account_creation: bool = True
-    loksystem_sso_enabled: bool = True
+    loksystem_sso_enabled: bool = False
     loksystem_sso_base_url: str = "http://127.0.0.1:25809"
     loksystem_sso_issuer: str = "loksystem://desktop"
 

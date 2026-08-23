@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ApiKeyCreate(BaseModel):
@@ -69,8 +69,13 @@ class AdminUserUpdate(BaseModel):
 
 
 class AccountCreate(BaseModel):
-    external_user_id: str = Field(min_length=1, max_length=120)
+    external_user_id: str | None = Field(default=None, min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("external_user_id", "name", mode="before")
+    @classmethod
+    def strip_text_fields(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class OrganizationCreate(BaseModel):

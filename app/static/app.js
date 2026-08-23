@@ -43,7 +43,7 @@ function applyRoleUi() {
     "refund-payment", "toggle-redemption", "edit-model-pricing", "manage-channels",
     "preflight-model", "delete-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
   ] : [
-    "manage-admins", "refund-payment", "preflight-model", "delete-model",
+    "manage-admins", "refund-payment", "preflight-model", "delete-model", "delete-account",
   ]);
   document.querySelectorAll("[data-action]").forEach((element) => {
     element.hidden = hiddenActions.has(element.dataset.action);
@@ -145,10 +145,29 @@ function microsPerThousandToYuanPerMillion(value) {
 
 function officialPriceSummary(item) {
   const pricing = item.official_pricing;
-  if (!pricing?.off_peak) return "-";
-  const input = pricing.off_peak.input_cache_miss_micros;
-  const output = pricing.off_peak.output_micros;
+  const reference = pricing?.default_reference || (pricing?.off_peak ? {
+    input_micros: pricing.off_peak.input_cache_miss_micros,
+    output_micros: pricing.off_peak.output_micros,
+  } : null);
+  if (!reference) return "-";
+  const input = reference.input_micros;
+  const output = reference.output_micros;
   return `${formatMoney(input)} / ${formatMoney(output)}`;
+}
+
+function officialTokenReference(pricing) {
+  if (pricing?.default_reference?.input_micros > 0 && pricing?.default_reference?.output_micros > 0) return pricing.default_reference;
+  if (pricing?.off_peak?.input_cache_miss_micros > 0 && pricing?.off_peak?.output_micros > 0) {
+    return { input_micros: pricing.off_peak.input_cache_miss_micros, output_micros: pricing.off_peak.output_micros };
+  }
+  return null;
+}
+
+function formatTokenBound(value) {
+  const tokens = Number(value || 0);
+  if (tokens >= 1_000_000) return `${tokens / 1_000_000}M`;
+  if (tokens >= 1_000) return `${tokens / 1_000}K`;
+  return String(tokens);
 }
 
 function formatDate(value) {
@@ -178,8 +197,12 @@ function activeBadge(active) {
 function accountSourceBadge(item) {
   const source = item.account_source || "admin";
   const kind = source === "self_registered" ? "success" : source === "loksystem" || source === "oidc" ? "warning" : "neutral";
-  const label = item.account_source_label || ({ self_registered: "用户注册", loksystem: "LokSystem 接入", oidc: "统一身份接入", admin: "管理员发放" }[source] || "管理员发放");
+  const label = item.account_source_label || ({ self_registered: "用户注册", loksystem: "外部身份接入", oidc: "统一身份接入", admin: "管理员创建" }[source] || "管理员创建");
   return `<span class="badge ${kind}" title="${escapeHtml(source)}">${escapeHtml(label)}</span>`;
+}
+
+function accountTypeBadge(item) {
+  return `<span class="badge neutral">${escapeHtml(item.account_type || "客户账户")}</span>`;
 }
 
 function paymentBadge(status) {
@@ -196,6 +219,9 @@ function channelStatusBadge(status) {
   const map = {
     healthy: ["success", "健康"],
     unhealthy: ["error", "异常"],
+    unavailable: ["warning", "未开放"],
+    pending_adapter: ["neutral", "待适配"],
+    misconfigured: ["error", "配置错误"],
     unknown: ["neutral", "未检测"],
   };
   const [kind, label] = map[status] || ["neutral", status || "未知"];
@@ -353,18 +379,49 @@ async function loadAccounts() {
   document.getElementById("accounts-table").innerHTML = result.data.length ? result.data.map((item) => `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
-      <td>${accountSourceBadge(item)}</td>
-      <td class="mono">${escapeHtml(item.external_user_id)}</td>
+      <td>${accountTypeBadge(item)}</td>
+      <td>${formatNumber(item.project_count)}</td>
       <td>${formatNumber(item.api_key_count)}</td>
       <td><strong>${formatMoney(item.balance_micros)}</strong></td>
+      <td>${formatMoney(item.recent_spend_micros)}</td>
+      <td class="secondary">${formatDate(item.last_activity_at)}</td>
       <td>${activeBadge(item.active)}</td>
-      <td class="align-right"><div class="table-actions">
-        ${canOperate() ? `<button class="table-button" data-action="trial-link" data-id="${item.id}" data-name="${escapeHtml(item.name)}">试用链接</button>
-        <button class="table-button" data-action="topup" data-id="${item.id}" data-name="${escapeHtml(item.name)}">充值</button>
-        <button class="table-button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}
-      </div></td>
+      <td class="align-right"><button class="table-button" data-action="account-detail" data-id="${item.id}"><i data-lucide="arrow-up-right"></i><span>详情</span></button></td>
     </tr>
-  `).join("") : emptyRow(7);
+  `).join("") : emptyRow(9);
+  icons();
+}
+
+function accountDetailDialog(accountId) {
+  const item = state.accounts.find((account) => String(account.id) === String(accountId));
+  if (!item) { toast("账户信息已更新，请刷新后重试", true); return; }
+  const safeName = escapeHtml(item.name);
+  const operations = canOperate() ? `
+    <button class="secondary-button" type="button" data-action="trial-link" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="link"></i><span>试用链接</span></button>
+    <button class="secondary-button" type="button" data-action="topup" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="wallet-cards"></i><span>充值</span></button>
+    <button class="secondary-button" type="button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}" data-close><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "停用" : "启用"}</span></button>
+    ${isSuperadmin() && !item.active ? `<button class="danger-button" type="button" data-action="delete-account" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="trash-2"></i><span>删除账户</span></button>` : ""}
+  ` : '<span class="secondary">当前角色仅可查看账户信息</span>';
+  openDialog(`账户详情 · ${safeName}`, `
+    <div class="dialog-body account-detail-dialog">
+      <div class="account-detail-heading"><div><strong>${safeName}</strong><span>账户 ID ${item.id}</span></div>${activeBadge(item.active)}</div>
+      <div class="account-detail-stats">
+        <div><span>项目数</span><strong>${formatNumber(item.project_count)}</strong></div>
+        <div><span>API Key</span><strong>${formatNumber(item.api_key_count)}</strong></div>
+        <div><span>账户余额</span><strong>${formatMoney(item.balance_micros)}</strong></div>
+        <div><span>近 30 天消费</span><strong>${formatMoney(item.recent_spend_micros)}</strong></div>
+      </div>
+      <div class="account-profile-grid">
+        <div><span>账户类型</span><strong>${escapeHtml(item.account_type || "客户账户")}</strong></div>
+        <div><span>账户来源</span><strong>${accountSourceBadge(item)}</strong></div>
+        <div><span>外部用户 ID</span><strong class="mono" title="${escapeHtml(item.external_user_id)}">${escapeHtml(item.external_user_id || "-")}</strong></div>
+        <div><span>登录标识</span><strong>${escapeHtml(item.login_id || "未绑定用户中心登录")}</strong></div>
+        <div><span>最近活动</span><strong>${formatDate(item.last_activity_at)}</strong></div>
+        <div><span>创建时间</span><strong>${formatDate(item.created_at)}</strong></div>
+      </div>
+    </div>
+    <div class="dialog-actions">${operations}<button class="primary-button" type="button" data-close>完成</button></div>
+  `);
 }
 
 async function loadKeys() {
@@ -392,9 +449,11 @@ async function loadModels() {
   state.providerPresets = presets.data || [];
   const providerSelect = document.getElementById("model-provider-filter");
   const selectedProvider = providerSelect.value;
-  const providers = [...new Set(state.models.map((item) => item.catalog_metadata?.provider || "自定义").filter(Boolean))].sort();
+  const presetProviders = state.providerPresets.map(providerPresetDisplayName).filter(Boolean);
+  const modelProviders = state.models.map((item) => item.catalog_metadata?.provider || "自定义").filter(Boolean);
+  const providers = [...new Set([...presetProviders, ...modelProviders])].sort((a, b) => featuredProviderRank(a) - featuredProviderRank(b) || a.localeCompare(b));
   providerSelect.innerHTML = '<option value="">全部服务商</option>' + providers.map((provider) => `<option value="${escapeHtml(provider)}">${escapeHtml(provider)}</option>`).join("");
-  providerSelect.value = selectedProvider;
+  providerSelect.value = providers.includes(selectedProvider) ? selectedProvider : "";
   if (state.modelProviderDetail && state.modelProviderDetail !== "__more__" && !providers.includes(state.modelProviderDetail)) state.modelProviderDetail = "";
   renderModels();
 }
@@ -457,6 +516,10 @@ function providerPresetId(provider) {
   return "";
 }
 
+function providerPresetDisplayName(preset) {
+  return preset?.models?.[0]?.catalog_metadata?.provider || preset?.name || preset?.id || "";
+}
+
 function providerConnection(provider) {
   const presetId = providerPresetId(provider);
   return state.providerConnections.find((item) => item.preset_id === presetId) || null;
@@ -466,6 +529,7 @@ function providerConnectionBadge(connection) {
   if (!connection || !connection.credentials_configured) return '<span class="badge neutral">未配置服务商</span>';
   if (connection.status === "healthy") return `<span class="badge success">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
   if (connection.status === "degraded") return `<span class="badge warning">已连接 · ${formatNumber(connection.callable_model_count)} 个可调用</span>`;
+  if (connection.status === "misconfigured") return '<span class="badge error">配置错误</span>';
   return '<span class="badge error">连接异常</span>';
 }
 
@@ -478,33 +542,72 @@ function providerBalanceSummary(connection) {
   return `<span class="provider-balance-summary ${low ? "warning" : "success"}">上游余额 ${escapeHtml(amount)} ${escapeHtml(connection.balance_currency || "CNY")}</span>`;
 }
 
+function emptyProviderPresetVisible(preset) {
+  const filters = state.modelFilters;
+  const query = filters.query.trim().toLocaleLowerCase();
+  const displayName = providerPresetDisplayName(preset);
+  const presetText = [displayName, preset.name, preset.id, providerDescription(displayName)].join(" ").toLocaleLowerCase();
+  const providerMatches = !filters.provider || providerPresetId(filters.provider) === preset.id;
+  return providerMatches && (!query || presetText.includes(query));
+}
+
+function adminProviderCardData(models) {
+  const groups = new Map();
+  models.forEach((item) => {
+    const provider = item.catalog_metadata?.provider || "自定义";
+    if (!groups.has(provider)) groups.set(provider, []);
+    groups.get(provider).push(item);
+  });
+
+  const featured = [];
+  state.providerPresets.filter((preset) => isFeaturedProvider(providerPresetDisplayName(preset))).forEach((preset) => {
+    const matchingProviders = [...groups.keys()].filter((provider) => providerPresetId(provider) === preset.id);
+    const items = matchingProviders.flatMap((provider) => groups.get(provider) || []);
+    matchingProviders.forEach((provider) => groups.delete(provider));
+    const hasStoredModels = state.models.some((item) => providerPresetId(item.catalog_metadata?.provider || "") === preset.id);
+    if (items.length || (!hasStoredModels && emptyProviderPresetVisible(preset))) {
+      featured.push({ provider: providerPresetDisplayName(preset), presetId: preset.id, items });
+    }
+  });
+
+  groups.forEach((items, provider) => {
+    if (isFeaturedProvider(provider)) featured.push({ provider, presetId: providerPresetId(provider), items });
+  });
+  featured.sort((a, b) => featuredProviderRank(a.provider) - featuredProviderRank(b.provider));
+  const otherModels = [...groups.entries()].filter(([provider]) => !isFeaturedProvider(provider)).flatMap(([, items]) => items);
+  return { featured, otherModels };
+}
+
 function renderAdminProviderCards(models) {
   const grid = document.getElementById("admin-provider-grid");
   const list = document.getElementById("admin-model-list");
-  const back = document.getElementById("admin-model-provider-back");
+  const overview = document.getElementById("model-provider-overview");
+  const pageBack = document.getElementById("admin-model-page-back");
+  const inlineCreate = document.getElementById("admin-model-create-inline");
   if (state.modelProviderDetail) {
     grid.hidden = true;
     list.hidden = false;
-    back.hidden = false;
+    overview.hidden = false;
+    pageBack.hidden = false;
+    inlineCreate.hidden = false;
     return;
   }
   list.hidden = true;
   grid.hidden = false;
-  back.hidden = true;
-  const grouped = [...new Map(models.map((item) => [item.catalog_metadata?.provider || "自定义", models.filter((candidate) => (candidate.catalog_metadata?.provider || "自定义") === (item.catalog_metadata?.provider || "自定义"))])).values()];
-  const featured = grouped.filter((items) => isFeaturedProvider(items[0].catalog_metadata?.provider || "")).sort((a, b) => featuredProviderRank(a[0].catalog_metadata?.provider) - featuredProviderRank(b[0].catalog_metadata?.provider));
-  const otherModels = grouped.filter((items) => !isFeaturedProvider(items[0].catalog_metadata?.provider || "")).flat();
-  grid.innerHTML = featured.length || otherModels.length ? featured.map((items, index) => {
-    const provider = items[0].catalog_metadata?.provider || "自定义";
+  overview.hidden = true;
+  pageBack.hidden = true;
+  inlineCreate.hidden = true;
+  const { featured, otherModels } = adminProviderCardData(models);
+  grid.innerHTML = featured.length || otherModels.length ? featured.map(({ provider, presetId, items }, index) => {
     const typeCounts = [...new Set(items.map(modelCategory))].map((type) => `${type === "text" ? "文本" : type === "image" ? "图像" : type === "video" ? "视频" : "语音"} ${items.filter((item) => modelCategory(item) === type).length}`).join(" · ");
     const healthy = items.reduce((sum, item) => sum + Number(item.healthy_channel_count || 0), 0);
     const channels = items.reduce((sum, item) => sum + Number(item.channel_count || 0), 0);
-    const chips = items.slice(0, 3).map((item) => `<span>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</span>`).join("");
+    const chips = items.length ? items.slice(0, 3).map((item) => `<span>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</span>`).join("") : "<span>尚未同步模型</span>";
     const connection = providerConnection(provider);
-    const presetId = providerPresetId(provider);
-    return `<article class="admin-provider-card tone-${index % 5}"><span class="admin-provider-logo">${providerLogo(provider)}</span><span class="admin-provider-copy"><span class="provider-card-title"><strong>${escapeHtml(provider)}</strong>${providerConnectionBadge(connection)}</span><p>${escapeHtml(providerDescription(provider))}</p><span class="provider-model-chips">${chips}</span><small>${items.length} 个模型 · ${typeCounts || "待分类"} · ${healthy}/${channels} 渠道健康</small>${providerBalanceSummary(connection)}<span class="provider-card-actions"><button class="table-button" type="button" data-model-provider="${escapeHtml(provider)}"><i data-lucide="list"></i><span>查看系列</span></button>${canOperate() && presetId ? `<button class="primary-button compact-provider-button" type="button" data-action="configure-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>${connection?.credentials_configured ? "管理接入" : "配置接入"}</span></button>` : ""}</span></span></article>`;
+    return `<article class="admin-provider-card tone-${index % 5}"><span class="admin-provider-logo">${providerLogo(provider)}</span><span class="admin-provider-copy"><span class="provider-card-title"><strong>${escapeHtml(provider)}</strong>${providerConnectionBadge(connection)}</span><p>${escapeHtml(providerDescription(provider))}</p><span class="provider-model-chips">${chips}</span><small>${items.length} 个模型 · ${typeCounts || (items.length ? "待分类" : "待同步")} · ${healthy}/${channels} 渠道健康</small>${providerBalanceSummary(connection)}<span class="provider-card-actions"><button class="table-button" type="button" data-model-provider="${escapeHtml(provider)}"><i data-lucide="list"></i><span>查看系列</span></button>${canOperate() && presetId ? `<button class="primary-button compact-provider-button" type="button" data-action="configure-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>${connection?.credentials_configured ? "管理接入" : "配置接入"}</span></button>` : ""}</span></span></article>`;
   }).join("") + `<button class="admin-provider-card provider-more-card" type="button" data-model-provider-more><span class="admin-provider-more-icon"><i data-lucide="search"></i></span><span class="admin-provider-copy"><strong>更多系列 / 厂商查询</strong><p>${otherModels.length ? "浏览其他第三方及新增模型" : "接入更多第三方模型"}</p><b>进入查询 <i data-lucide="arrow-right"></i></b></span></button>` : '<div class="empty-state compact"><i data-lucide="boxes"></i><span>没有符合筛选条件的供应商</span></div>';
   icons();
+  return featured.length + new Set(otherModels.map((item) => item.catalog_metadata?.provider || "自定义")).size;
 }
 
 function providerConnectionDialog(presetId) {
@@ -602,9 +705,18 @@ function renderModels() {
       && (!filters.publicationState || item.publication_state === filters.publicationState);
   });
   const detailModels = state.modelProviderDetail === "__more__" ? models.filter((item) => !isFeaturedProvider(item.catalog_metadata?.provider || "")) : state.modelProviderDetail ? models.filter((item) => (item.catalog_metadata?.provider || "自定义") === state.modelProviderDetail) : models;
-  document.getElementById("model-result-count").textContent = state.modelProviderDetail ? `${state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail} · ${detailModels.length} 个模型` : `${new Set(models.map((item) => item.catalog_metadata?.provider || "自定义")).size} 家供应商 · ${models.length} 个模型`;
-  renderAdminProviderCards(models);
+  const providerCount = renderAdminProviderCards(models);
+  document.getElementById("model-result-count").textContent = state.modelProviderDetail ? `${state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail} · ${detailModels.length} 个模型` : `${providerCount} 家供应商 · ${models.length} 个模型`;
   if (!state.modelProviderDetail) return;
+  const detailProvider = state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail;
+  const providerPreset = state.providerPresets.find((preset) => providerPresetDisplayName(preset) === detailProvider);
+  const pricedModel = providerPreset?.models?.find((item) => item.official_pricing?.source_url);
+  const sourceUrl = pricedModel?.official_pricing?.source_url || "";
+  const sourceLabel = pricedModel?.official_pricing?.source || "服务商官方文档";
+  const detailTypes = [...new Set(detailModels.map(modelCategory))].map((type) => type === "text" ? "文本" : type === "image" ? "图像" : type === "video" ? "视频" : "语音");
+  const maxOutput = detailModels.reduce((max, item) => Math.max(max, Number(item.catalog_metadata?.max_output_tokens || 0)), 0);
+  const context = detailModels.find((item) => item.catalog_metadata?.context_window)?.catalog_metadata?.context_window || "按上游配置";
+  document.getElementById("model-provider-overview").innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${providerLogo(detailProvider)}</span><div><span class="eyebrow">MODEL & PRICING</span><h3>${escapeHtml(detailProvider)}</h3><p>${escapeHtml(providerDescription(detailProvider))}</p></div></div><div class="model-provider-overview-source">${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>查看${escapeHtml(sourceLabel)}</span></a>` : "<span>官方价格来源待配置</span>"}</div></div><div class="model-provider-overview-stats"><div><span>模型版本</span><strong>${detailModels.length} 个</strong></div><div><span>模型类型</span><strong>${escapeHtml(detailTypes.join(" · ") || "待分类")}</strong></div><div><span>上下文长度</span><strong>${escapeHtml(context)}</strong></div><div><span>最大输出</span><strong>${maxOutput ? `${formatNumber(maxOutput)} Token` : "按模型配置"}</strong></div></div>`;
   document.getElementById("models-table").innerHTML = detailModels.length ? detailModels.map((item) => {
     const publishBlocked = item.publication_state === "blocked" && !item.active;
     const publishLabel = item.active ? "下架" : publishBlocked ? "完善后上架" : "上架";
@@ -635,7 +747,12 @@ function renderModels() {
 
 async function checkAllChannels() {
   const result = await api("/admin/models/health-check", { method: "POST", body: "{}" });
-  toast(`已检测 ${result.checked} 个渠道：${result.healthy} 个健康，${result.unhealthy} 个异常`, result.unhealthy > 0);
+  const details = [`${result.healthy} 个健康`];
+  if (result.unavailable) details.push(`${result.unavailable} 个未开放`);
+  if (result.pending_adapter) details.push(`${result.pending_adapter} 个待适配`);
+  if (result.misconfigured) details.push(`${result.misconfigured} 个配置错误`);
+  if (result.unhealthy) details.push(`${result.unhealthy} 个异常`);
+  toast(`已检测 ${result.checked} 个渠道：${details.join("，")}`, result.unhealthy + result.misconfigured > 0);
   await loadModels();
 }
 
@@ -785,14 +902,16 @@ function accountDialog() {
   openDialog("新建账户", `
     <form id="dialog-form">
       <div class="dialog-body">
-        <div class="field"><label for="account-name">账户名称</label><input id="account-name" name="name" required maxlength="120"></div>
-        <div class="field"><label for="external-user-id">loksystem 用户 ID</label><input id="external-user-id" name="external_user_id" required maxlength="120"></div>
+        <div class="field"><label for="account-name">账户名称</label><input id="account-name" name="name" required maxlength="120" placeholder="例如：研发团队或 API 应用"></div>
+        <div class="field"><label for="external-user-id">外部用户 ID（可选）</label><input id="external-user-id" name="external_user_id" maxlength="120" placeholder="例如：customer-user-001"><small class="field-hint">用于绑定客户已有的登录系统；独立 API 账户可留空，系统会自动生成内部标识。</small></div>
       </div>
       <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">创建账户</button></div>
     </form>`);
   document.getElementById("dialog-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const data = Object.fromEntries(new FormData(event.currentTarget));
+    const rawData = Object.fromEntries(new FormData(event.currentTarget));
+    const data = { name: rawData.name.trim(), external_user_id: rawData.external_user_id.trim() };
+    if (!data.name) { toast("请填写账户名称", true); return; }
     try { await api("/admin/accounts", { method: "POST", body: JSON.stringify(data) }); closeDialog(); toast("账户已创建"); await loadAccounts(); } catch (error) { toast(error.message, true); }
   });
 }
@@ -968,21 +1087,30 @@ async function modelImportDialog() {
 function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMicros) {
   const model = state.models.find((item) => item.id === Number(modelId));
   const pricing = model?.official_pricing;
-  const hasOfficialPrice = Boolean(pricing?.off_peak?.input_cache_miss_micros > 0 && pricing?.off_peak?.output_micros > 0);
+  const officialReference = officialTokenReference(pricing);
+  const hasOfficialPrice = Boolean(officialReference);
   const configuredMargin = Number(model?.pricing_margin_bps || 0) / 100;
   const currentInputPerMillion = Number(inputPriceMicros || 0) * 1000;
   const inferredMargin = hasOfficialPrice && currentInputPerMillion > 0
-    ? Math.max(0.01, Math.min(99, (1 - Number(pricing.off_peak.input_cache_miss_micros) / currentInputPerMillion) * 100))
+    ? Math.max(0.01, Math.min(99, (1 - Number(officialReference.input_micros) / currentInputPerMillion) * 100))
     : 20;
   const initialMargin = configuredMargin > 0 ? configuredMargin : Number(inferredMargin.toFixed(2));
+  const sourceLabel = pricing?.source || "服务商官方价格";
+  const tierRows = Array.isArray(pricing?.tiers) ? pricing.tiers.map((tier) => `<div><span>${formatTokenBound(tier.min_input_tokens_exclusive)} &lt; 输入 ≤ ${formatTokenBound(tier.max_input_tokens_inclusive)}</span><strong>输入 ${formatMoney(tier.input_micros)} · 输出 ${formatMoney(tier.output_micros)}</strong></div>`).join("") : "";
   const reference = pricing?.off_peak ? `
-    <div class="field-hint">官网参考价（人民币 / 1M，已按 ${pricing.exchange_rate_usd_to_cny || "部署配置"} 汇率换算）</div>
-    <div class="key-detail-grid"><div><span>缓存命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>未命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出 · 低峰</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div><div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">DeepSeek 官网</a></strong></div></div>` : "";
+    <div class="field-hint">官方成本参考价（人民币 / 1M Token，按 ${pricing.exchange_rate_usd_to_cny || "部署配置"} 汇率换算）</div>
+    <div class="key-detail-grid"><div><span>缓存命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>未命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出 · 低峰</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div><div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : hasOfficialPrice ? `
+    <div class="field-hint">官方标准成本价（人民币 / 1M Token，不含活动优惠）</div>
+    <div class="key-detail-grid pricing-tier-grid">${tierRows}<div><span>来源 · ${escapeHtml(pricing.region || "中国")}</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : pricing?.unit === "per_image" ? `
+    <div class="field-hint">官方图像成本价（按张计费，等待图像任务适配器）</div>
+    <div class="key-detail-grid"><div><span>输入图片</span><strong>${formatMoney(pricing.input_per_image_micros)} / 张</strong></div>${(pricing.output_prices || []).map((item) => `<div><span>输出 · ${escapeHtml(item.resolution)}</span><strong>${formatMoney(item.output_per_image_micros)} / 张</strong></div>`).join("")}<div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : pricing?.source_url ? `
+    <div class="field-hint">${escapeHtml(pricing.note || "该模型尚未录入经核验的官方价格")}</div>
+    <div class="key-detail-grid"><div><span>价格状态</span><strong>待核验</strong></div><div><span>计费单位</span><strong>${escapeHtml(pricing.unit || "服务商定义")}</strong></div><div><span>服务商</span><strong>${escapeHtml(pricing.provider || "-")}</strong></div><div><span>官方来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : "";
   openDialog(`模型定价 · ${modelName}`, `
     <form id="model-pricing-form">
       <div class="dialog-body">
         ${reference}
-        ${hasOfficialPrice ? `<div class="field"><label for="model-pricing-mode">定价方式</label><select id="model-pricing-mode" name="pricing_mode"><option value="margin" selected>按官方价格和利润率自动定价</option><option value="manual">手工设置平台售价</option></select></div><div class="field" id="model-margin-field"><label for="model-margin">目标利润率（%）</label><input id="model-margin" name="margin" type="number" min="0.01" max="99" step="0.01" value="${initialMargin}" required><small class="field-hint">按毛利率计算：平台售价 = 官方价格 ÷（1 - 利润率）。官方输入价采用未命中缓存、低峰档。</small></div>` : '<p class="dialog-copy">该模型尚无可核验的官方价格，请先手工设置平台售价；补齐官方价格后可启用利润率自动定价。</p>'}
+        ${hasOfficialPrice ? `<div class="field"><label for="model-pricing-mode">定价方式</label><select id="model-pricing-mode" name="pricing_mode"><option value="margin" selected>按官方价格和利润率自动定价</option><option value="manual">手工设置平台售价</option></select></div><div class="field" id="model-margin-field"><label for="model-margin">目标利润率（%）</label><input id="model-margin" name="margin" type="number" min="0.01" max="99" step="0.01" value="${initialMargin}" required><small class="field-hint">按毛利率计算：平台售价 = 官方价格 ÷（1 - 利润率）。阶梯模型以第一档标准原价生成基础售价，实际结算需按请求输入 Token 命中对应成本阶梯。</small></div>` : pricing?.unit === "per_image" ? '<p class="dialog-copy">该模型按张计费，图像任务适配器和独立计价字段启用前不能发布；此处不写入 Token 售价。</p>' : `<p class="dialog-copy">该模型尚无可核验的官方价格，请打开上方官方来源核对当前模型价格后，再手工设置 LokToken 平台售价。</p>`}
         <div class="field-row"><div class="field"><label for="model-input-price">平台输入售价 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">平台输出售价 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
         <p class="dialog-copy">这里维护该模型面向 LokToken 用户的最终售价，按人民币 / 1M Token 计费。供应商采购成本请在该模型的“渠道”中单独维护。新价格只用于后续请求，已结算请求不会被修改。</p>
       </div>
@@ -999,8 +1127,8 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
     outputPrice.readOnly = automatic;
     if (!automatic) return;
     const margin = Math.min(99, Math.max(0.01, Number(marginInput.value || 0))) / 100;
-    inputPrice.value = (Number(pricing.off_peak.input_cache_miss_micros) / 1_000_000 / (1 - margin)).toFixed(3);
-    outputPrice.value = (Number(pricing.off_peak.output_micros) / 1_000_000 / (1 - margin)).toFixed(3);
+    inputPrice.value = (Number(officialReference.input_micros) / 1_000_000 / (1 - margin)).toFixed(3);
+    outputPrice.value = (Number(officialReference.output_micros) / 1_000_000 / (1 - margin)).toFixed(3);
   };
   if (hasOfficialPrice) {
     modeInput.addEventListener("change", updatePricePreview);
@@ -1028,7 +1156,7 @@ async function channelDialog(modelId, modelName) {
       <td>${item.priority}</td>
       <td>${item.weight}</td>
       <td><div class="primary-cell"><span>输入 ${item.provider_input_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_input_cost_micros_per_1k) : "未配置"}</span><span class="secondary">输出 ${item.provider_output_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_output_cost_micros_per_1k) : "未配置"}</span></div></td>
-      <td>${channelStatusBadge(item.status)}<span class="secondary block-text">${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : "尚未检测"}</span>${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
+      <td>${channelStatusBadge(item.status)}<span class="secondary block-text">${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : item.health_source === "catalogue" ? "目录状态" : "尚未检测"}</span>${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
       <td>${item.consecutive_failures}</td>
       <td class="align-right"><div class="table-actions"><button class="table-button" data-action="edit-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="settings-2"></i><span>编辑</span></button><button class="table-button" data-action="check-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="activity"></i><span>检测</span></button><button class="table-button" data-action="toggle-channel" data-id="${item.id}" data-active="${!item.active}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}">${item.active ? "停用" : "启用"}</button></div></td>
     </tr>
@@ -1117,7 +1245,7 @@ function editChannelDialog(channelId, modelId, modelName) {
 async function checkChannel(channelId, modelId, modelName) {
   try {
     const result = await api(`/admin/channels/${channelId}/check`, { method: "POST", body: "{}" });
-    toast(result.healthy ? `检测通过，${result.latency_ms} ms` : result.detail, !result.healthy);
+    toast(result.healthy ? `检测通过，${result.latency_ms} ms` : result.detail, result.status !== "unavailable");
     await channelDialog(modelId, modelName);
     await loadModels();
   } catch (error) { toast(error.message, true); }
@@ -1159,7 +1287,7 @@ function redemptionDialog() {
   openDialog("创建兑换码", `
     <form id="redemption-form">
       <div class="dialog-body">
-        <div class="field"><label for="redemption-label">福利名称</label><input id="redemption-label" name="label" required maxlength="120" placeholder="例如：LokSystem 内测福利"></div>
+        <div class="field"><label for="redemption-label">福利名称</label><input id="redemption-label" name="label" required maxlength="120" placeholder="例如：新用户体验福利"></div>
         <div class="field-row"><div class="field"><label for="redemption-amount">额度（元）</label><input id="redemption-amount" name="amount" type="number" min="0.000001" step="0.01" required></div><div class="field"><label for="redemption-max">最大领取次数</label><input id="redemption-max" name="max_redemptions" type="number" min="1" max="100000" value="1" required></div></div>
         <div class="field"><label for="redemption-expiry">过期时间</label><input id="redemption-expiry" name="expires_at" type="datetime-local" min="${tomorrow}"><small class="field-hint">留空表示长期有效。</small></div>
         <div class="field"><label for="redemption-code">自定义兑换码</label><input id="redemption-code" name="code" minlength="8" maxlength="120" placeholder="留空则安全随机生成"><small class="field-hint">完整兑换码只会在创建成功后显示一次。</small></div>
@@ -1256,6 +1384,15 @@ async function deleteModel(modelId, modelName) {
   } catch (error) { toast(error.message, true); }
 }
 
+async function deleteAccount(accountId, accountName) {
+  if (!window.confirm(`删除“${accountName}”？删除后账户及其访问凭证将移除，且不可恢复。已有余额、调用或账务记录的账户无法删除。`)) return;
+  try {
+    await api(`/admin/accounts/${accountId}`, { method: "DELETE" });
+    toast(`账户“${accountName}”已删除`);
+    await loadAccounts();
+  } catch (error) { toast(error.message, true); }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   icons();
   document.getElementById("auth-form").addEventListener("submit", async (event) => {
@@ -1302,10 +1439,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!target) return;
     if (target.dataset.close !== undefined) closeDialog();
     if (target.dataset.go) switchView(target.dataset.go);
+    if (target.dataset.modelPageBack !== undefined) {
+      state.modelProviderDetail = "";
+      state.modelFilters.provider = "";
+      document.getElementById("model-provider-filter").value = "";
+      renderModels();
+      return;
+    }
     if (target.dataset.modelProvider) { state.modelProviderDetail = target.dataset.modelProvider; state.modelFilters.provider = target.dataset.modelProvider; document.getElementById("model-provider-filter").value = target.dataset.modelProvider; renderModels(); }
     if (target.dataset.modelProviderMore !== undefined) { state.modelProviderDetail = "__more__"; state.modelFilters.provider = ""; document.getElementById("model-provider-filter").value = ""; renderModels(); }
     if (target.dataset.modelProviderBack !== undefined) { state.modelProviderDetail = ""; state.modelFilters.provider = ""; document.getElementById("model-provider-filter").value = ""; renderModels(); }
     if (target.dataset.action === "create-account") accountDialog();
+    if (target.dataset.action === "account-detail") accountDetailDialog(target.dataset.id);
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
@@ -1337,6 +1482,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "provider-bills") providerBillsDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "manage-admins") manageAdmins();
     if (target.dataset.action === "delete-model") deleteModel(target.dataset.id, target.dataset.name);
+    if (target.dataset.action === "delete-account") deleteAccount(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");

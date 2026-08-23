@@ -49,8 +49,6 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
     expected = {
         "deepseek-v4-flash",
         "deepseek-v4-pro",
-        "qwen/qwen-plus",
-        "qwen/qwen-image-plus",
         "qwen/wan2.1-t2v-turbo",
         "glm/glm-4.5",
         "glm/cogview-4",
@@ -72,8 +70,176 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
         assert len(channels) == len(expected)
         assert all(channel.active is False for channel in channels)
         metadata = {model.public_name: json.loads(model.catalog_metadata_json or "{}") for model in seeded}
-        assert metadata["qwen/qwen-image-plus"]["api_type"] == "images_generations"
         assert metadata["doubao/doubao-seedance-1-0-pro"]["api_type"] == "video_generations"
+
+
+def test_qwen_preset_includes_sota_and_task_model_candidates() -> None:
+    from app.provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset
+
+    preset = get_provider_preset("qwen")
+    assert preset is not None
+    public_names = {model.public_name for model in preset.models}
+    assert {
+        "qwen/qwen3.8-max",
+        "qwen/qwen3.8-2.4t-a95b",
+        "qwen/qwen3.8-27b",
+        "qwen/qwen3.7-plus",
+        "qwen/qwen3-coder-next",
+        "qwen/qwen3-vl-plus",
+        "qwen/qwen-image-3.0",
+    } <= public_names
+    task_types = {
+        model.public_name: model.catalog_metadata["api_type"]
+        for model in preset.models
+        if model.public_name in {"qwen/qwen-image-3.0", "qwen/qwen-image-3.0-pro", "qwen/wan2.1-t2v-turbo"}
+    }
+    assert task_types == {
+        "qwen/qwen-image-3.0": "images_generations",
+        "qwen/qwen-image-3.0-pro": "images_generations",
+        "qwen/wan2.1-t2v-turbo": "video_generations",
+    }
+    assert not (public_names & set(DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES))
+
+    priced = {model.public_name: model for model in preset.models}
+    max_pricing = priced["qwen/qwen3.8-max"].official_pricing
+    assert max_pricing["source_url"] == "https://help.aliyun.com/zh/model-studio/model-pricing"
+    assert max_pricing["default_reference"] == {
+        "input_micros": 12_000_000,
+        "output_micros": 36_000_000,
+        "max_input_tokens_inclusive": 1_000_000,
+    }
+    assert priced["qwen/qwen3.8-27b"].platform_input_price_micros_per_1k == 3_000
+    assert priced["qwen/qwen3.8-27b"].platform_output_price_micros_per_1k == 12_000
+    assert len(priced["qwen/qwen3-coder-plus"].official_pricing["tiers"]) == 4
+    assert priced["qwen/qwen-image-3.0-pro"].official_pricing["unit"] == "per_image"
+    assert priced["qwen/qwen-image-3.0-pro"].platform_input_price_micros_per_1k == 0
+
+
+def test_provider_presets_expose_provider_specific_pricing_sources() -> None:
+    from app.provider_presets import PROVIDER_PRICING_SOURCES, PROVIDER_PRESETS
+
+    expected = {
+        "DeepSeek": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+        "Qwen": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "GLM": "https://bigmodel.cn/pricing",
+        "Kimi": "https://platform.kimi.com/docs/pricing/chat",
+        "MiniMax": "https://platform.minimaxi.com/docs/guides/pricing-paygo",
+        "Doubao": "https://docs.volcengine.com/docs/82379/1544106?lang=zh",
+    }
+    assert {name: url for name, (_, url) in PROVIDER_PRICING_SOURCES.items()} == expected
+    for preset in PROVIDER_PRESETS:
+        for model in preset.models:
+            assert model.official_pricing is not None
+            assert model.official_pricing["source_url"] == expected[preset.name.split(" /")[0]]
+            if not model.official_pricing.get("default_reference") and not model.official_pricing.get("off_peak"):
+                expected_status = "verified" if model.official_pricing.get("unit") == "per_image" else "manual_review_required"
+                assert model.official_pricing["verification_status"] == expected_status
+
+
+def test_provider_presets_expose_gateway_profiles_by_model_type() -> None:
+    from app.provider_presets import PROVIDER_PRESETS
+
+    for preset in PROVIDER_PRESETS:
+        for model in preset.models:
+            profile = model.catalog_metadata["gateway_profile"]
+            assert profile["auth_scheme"] == "bearer"
+            if model.catalog_metadata["api_type"] == "chat_completions":
+                assert profile["protocol"] == "openai_chat_completions"
+                assert profile["stream_transport"] == "sse"
+                assert profile["request_path"] == "/chat/completions"
+                assert profile["parameter_policy"] == "verified_common_only"
+            else:
+                assert profile["protocol"] == "async_task"
+                assert profile["stream_transport"] == "none"
+                assert profile["parameter_policy"] == "task_specific_pending_adapter"
+
+
+def test_provider_parameter_aliases_normalize_to_upstream_contract() -> None:
+    from app.models import ModelConfig
+    from app.services import normalize_request_payload
+    from app.schemas import ChatCompletionRequest
+
+    model = ModelConfig(
+        public_name="qwen-contract",
+        upstream_model="qwen3.8-max",
+        provider_base_url="https://dashscope.example/v1",
+        catalog_metadata_json=json.dumps({
+            "api_type": "chat_completions",
+            "gateway_profile": {
+                "protocol": "openai_chat_completions",
+                "parameter_aliases": {"max_completion_tokens": "max_tokens"},
+            },
+        }),
+    )
+    request = ChatCompletionRequest(
+        model="qwen-contract",
+        messages=[{"role": "user", "content": "hello"}],
+        max_completion_tokens=32,
+    )
+    payload = normalize_request_payload(request, model)
+    assert payload["max_tokens"] == 32
+    assert "max_completion_tokens" not in payload
+
+
+def test_model_metadata_exposes_gateway_contract_and_output_limit() -> None:
+    from app.builtin_models import model_metadata
+
+    metadata = model_metadata("qwen/qwen3.8-max", json.dumps({
+        "display_name": "Qwen3.8-Max",
+        "provider": "Qwen",
+        "api_type": "chat_completions",
+        "max_output_tokens": 32768,
+        "gateway_profile": {"protocol": "openai_chat_completions", "stream_transport": "sse"},
+    }))
+    assert metadata["max_output_tokens"] == 32768
+    assert metadata["gateway_profile"]["stream_transport"] == "sse"
+
+
+@pytest.mark.asyncio
+async def test_task_model_is_rejected_by_chat_contract() -> None:
+    from app.services import validate_model_request
+    from app.schemas import ChatCompletionRequest
+    from fastapi import HTTPException
+
+    model = ModelConfig(
+        public_name="image-contract",
+        upstream_model="image-task",
+        provider_base_url="https://provider.example/v1",
+        catalog_metadata_json=json.dumps({
+            "api_type": "images_generations",
+            "gateway_profile": {"protocol": "async_task"},
+        }),
+    )
+    request = ChatCompletionRequest(model="image-contract", messages=[{"role": "user", "content": "draw"}])
+    with pytest.raises(HTTPException, match="不是当前文本聊天协议"):
+        validate_model_request(model, request)
+
+
+def test_deprecated_qwen_candidates_are_removed_with_their_channels() -> None:
+    from app.db import remove_deprecated_provider_models
+
+    with SessionLocal() as db:
+        model = ModelConfig(
+            public_name="qwen/qwen-plus",
+            upstream_model="qwen-plus",
+            provider_base_url="https://dashscope.example/v1",
+            active=False,
+        )
+        db.add(model)
+        db.flush()
+        db.add(ModelChannel(
+            model_config_id=model.id,
+            name="Retired channel",
+            provider_base_url=model.provider_base_url,
+            upstream_model=model.upstream_model,
+            active=False,
+        ))
+        db.commit()
+        model_id = model.id
+    remove_deprecated_provider_models()
+    with SessionLocal() as db:
+        assert db.get(ModelConfig, model_id) is None
+        assert db.query(ModelChannel).filter(ModelChannel.model_config_id == model_id).count() == 0
 
 
 def test_provider_catalogue_enriches_existing_model_without_overwriting_routing() -> None:
@@ -250,7 +416,75 @@ async def test_channel_health_rejects_unknown_upstream_model(monkeypatch) -> Non
         result = await services.check_channel_health(db, channel)
 
     assert result["healthy"] is False
-    assert "供应商模型目录不包含上游模型: missing-model" in result["detail"]
+    assert result["status"] == "unavailable"
+    assert "尚未开放上游模型: missing-model" in result["detail"]
+    with SessionLocal() as db:
+        refreshed = db.get(ModelChannel, channel.id)
+        assert refreshed.status == "unavailable"
+        assert refreshed.consecutive_failures == 0
+        assert refreshed.circuit_open_until is None
+
+
+@pytest.mark.asyncio
+async def test_channel_health_reports_cross_provider_configuration_error(monkeypatch) -> None:
+    import app.services as services
+    from app.models import ProviderConnection
+
+    class MiniMaxListResponse:
+        is_error = False
+
+        def json(self) -> dict[str, object]:
+            return {"object": "list", "data": [{"id": "MiniMax-M2.5"}, {"id": "MiniMax/speech-02-hd"}]}
+
+    class MiniMaxListClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def get(self, *_args, **_kwargs) -> MiniMaxListResponse:
+            return MiniMaxListResponse()
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "mock_mode", False)
+    monkeypatch.setattr(settings, "default_provider_api_key", "test-provider-key")
+    monkeypatch.setattr(services.httpx, "AsyncClient", MiniMaxListClient)
+    with SessionLocal() as db:
+        connection = ProviderConnection(
+            preset_id="qwen",
+            name="Qwen / DashScope",
+            provider_base_url="https://dashscope.example/v1",
+        )
+        model = ModelConfig(
+            public_name="qwen/qwen3.8",
+            upstream_model="qwen3.8",
+            provider_base_url=connection.provider_base_url,
+        )
+        db.add_all([connection, model])
+        db.flush()
+        channel = ModelChannel(
+            model_config_id=model.id,
+            provider_connection_id=connection.id,
+            name="Qwen channel",
+            provider_base_url=connection.provider_base_url,
+            upstream_model=model.upstream_model,
+        )
+        db.add(channel)
+        db.commit()
+        result = await services.check_channel_health(db, channel)
+
+    assert result["healthy"] is False
+    assert result["status"] == "misconfigured"
+    assert "服务商目录与 Qwen / DashScope 不匹配" in result["detail"]
+    with SessionLocal() as db:
+        refreshed = db.get(ModelChannel, channel.id)
+        assert refreshed.status == "misconfigured"
+        assert refreshed.consecutive_failures == 0
+        assert refreshed.circuit_open_until is None
 
 
 @pytest.mark.asyncio
@@ -394,6 +628,8 @@ async def test_portal_registration_and_login() -> None:
         registered_account = next(item for item in (await client.get("/admin/accounts", headers={"X-Admin-Token": "test-admin"})).json()["data"] if item["login_id"] == "new-user")
         assert registered_account["account_source"] == "self_registered"
         assert registered_account["account_source_label"] == "用户注册"
+        assert registered_account["account_type"] == "个人账户"
+        assert registered_account["project_count"] >= 1
         duplicate = await client.post(
             "/auth/register",
             json={"login_id": "new-user", "name": "Duplicate", "password": "correct-horse"},
@@ -445,7 +681,7 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'document.getElementById("admin-guide-link").hidden = view !== "overview";' in admin_script
         assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script
 
-        admin_nav = ["管理概览", "模型管理", "账户管理", "密钥管理", "订单管理", "福利管理", "用量管理", "安全审计"]
+        admin_nav = ["管理概览", "账户管理", "模型管理", "密钥管理", "订单管理", "福利管理", "用量管理", "安全审计"]
         portal_nav = ["用户概览", "模型广场", "额度管理", "密钥管理", "请求记录", "订单管理", "兑换福利"]
         admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
         portal_nav_markup = portal_page.split('<nav aria-label="用户导航">', 1)[1].split("</nav>", 1)[0]
@@ -460,7 +696,8 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
             "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
         }.items())
         assert 'id="admin-provider-grid"' in admin_page
-        assert 'id="admin-model-provider-back"' in admin_page
+        assert 'id="admin-model-page-back"' in admin_page
+        assert 'id="admin-model-create-inline"' in admin_page
         assert 'id="model-marketplace-provider-back"' in portal_page
         assert "portal-provider-card" in portal_script
         assert "admin-provider-card" in admin_script
@@ -679,7 +916,12 @@ async def test_admin_console_queries_and_toggles() -> None:
             assert response.status_code == 200
         listed_account = next(item for item in (await client.get("/admin/accounts", headers=admin_headers)).json()["data"] if item["id"] == account_id)
         assert listed_account["account_source"] == "admin"
-        assert listed_account["account_source_label"] == "管理员发放"
+        assert listed_account["account_source_label"] == "管理员创建"
+        assert listed_account["account_type"] == "客户账户"
+        assert listed_account["project_count"] >= 1
+        assert listed_account["api_key_count"] == 1
+        assert listed_account["recent_spend_micros"] == 0
+        assert listed_account["last_activity_at"] is None
 
         providers = await client.get("/admin/payment-providers", headers=admin_headers)
         assert providers.status_code == 200
@@ -800,10 +1042,10 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         portal_page = await client.get("/portal")
         assert portal_page.status_code == 200
-        assert "LokToken用户中心" in portal_page.text
+        assert "LokToken 用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260821-1"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260821-2"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
@@ -817,7 +1059,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert 'id="portal-refresh"' in portal_page.text
         for local_refresh_id in ("keys-refresh", "quota-refresh", "orders-refresh", "redeem-refresh", "usage-refresh"):
             assert f'id="{local_refresh_id}"' not in portal_page.text
-        assert "LokSystem 一键注册 / 登录" in portal_page.text
+        assert "使用外部身份登录" in portal_page.text
         assert 'id="loksystem-login-button"' in portal_page.text
         assert portal_page.text.index('id="portal-login-form"') < portal_page.text.index('id="loksystem-login-button"') < portal_page.text.index('id="portal-register-form"')
         assert 'id="portal-integration-guide"' in portal_page.text
@@ -826,15 +1068,14 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "试用令牌（trl_ 开头）" in portal_page.text
         portal_script = await client.get("/static/portal.js?v=portal-20260819-11")
         assert portal_script.headers["cache-control"] == "no-store"
-        assert "复制并前往 LokSystem" in portal_script.text
-        assert "loksystem://add-provider?platform=LokToken" in portal_script.text
+        assert "loksystem://add-provider?platform=LokToken" not in portal_script.text
         assert "应用接入" in portal_script.text
         assert "在应用中完成配置" in portal_script.text
         assert 'keys: "密钥管理"' in portal_script.text
         for local_refresh_id in ("keys-refresh", "quota-refresh", "orders-refresh", "redeem-refresh", "usage-refresh"):
             assert local_refresh_id not in portal_script.text
         assert "if (loksystemStatus.enabled) loksystemLoginButton.hidden = false;" in portal_script.text
-        assert "创建 API Key" not in portal_script.text
+        assert "创建 API Key" in portal_script.text
 
         account = await client.post(
             "/admin/accounts",
@@ -1166,6 +1407,37 @@ async def test_model_pricing_margin_uses_official_reference_price() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_pricing_margin_uses_standard_tier_reference_price() -> None:
+    with SessionLocal() as db:
+        model = ModelConfig(
+            public_name="tier-margin-model",
+            upstream_model="tier-margin-upstream",
+            provider_base_url="https://provider.example/v1",
+            official_pricing_json=json.dumps({
+                "default_reference": {"input_micros": 2_000_000, "output_micros": 8_000_000},
+                "tiers": [
+                    {"max_input_tokens_inclusive": 256_000, "input_micros": 2_000_000, "output_micros": 8_000_000},
+                    {"max_input_tokens_inclusive": 1_000_000, "input_micros": 6_000_000, "output_micros": 24_000_000},
+                ],
+            }),
+            active=False,
+        )
+        db.add(model)
+        db.commit()
+        model_id = model.id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        updated = await client.patch(
+            f"/admin/models/{model_id}",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"pricing_margin_bps": 2000},
+        )
+    assert updated.status_code == 200
+    assert updated.json()["input_price_micros_per_1k"] == 2500
+    assert updated.json()["output_price_micros_per_1k"] == 10_000
+
+
+@pytest.mark.asyncio
 async def test_model_pricing_margin_requires_official_reference_price() -> None:
     with SessionLocal() as db:
         model = ModelConfig(public_name="manual-only-model", upstream_model="manual-only", provider_base_url="https://provider.example/v1", active=False)
@@ -1177,6 +1449,47 @@ async def test_model_pricing_margin_requires_official_reference_price() -> None:
         updated = await client.patch(f"/admin/models/{model_id}", headers={"X-Admin-Token": "test-admin"}, json={"pricing_margin_bps": 2500})
         assert updated.status_code == 422
         assert "官方价格" in updated.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_task_model_cannot_be_published_before_gateway_adapter() -> None:
+    with SessionLocal() as db:
+        model = ModelConfig(
+            public_name="image-task-model",
+            upstream_model="image-task-upstream",
+            provider_base_url="https://dashscope.example/v1",
+            input_price_micros_per_1k=1000,
+            output_price_micros_per_1k=2000,
+            catalog_metadata_json=json.dumps({"api_type": "images_generations"}),
+            active=False,
+        )
+        db.add(model)
+        db.commit()
+        model_id = model.id
+        channel = ModelChannel(
+            model_config_id=model_id,
+            name="DashScope 主渠道",
+            provider_base_url=model.provider_base_url,
+            upstream_model=model.upstream_model,
+            active=True,
+            status="healthy",
+            health_source="mock",
+        )
+        db.add(channel)
+        db.commit()
+        channel_id = channel.id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        checked = await client.post(f"/admin/channels/{channel_id}/check", headers={"X-Admin-Token": "test-admin"})
+        updated = await client.patch(
+            f"/admin/models/{model_id}",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"active": True},
+        )
+    assert checked.status_code == 200
+    assert checked.json()["status"] == "pending_adapter"
+    assert updated.status_code == 422
+    assert "统一调用适配器" in updated.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -1213,6 +1526,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
             security_delivery_mode="webhook",
             security_delivery_webhook_url="https://security.example.com/events",
             security_delivery_webhook_secret="d" * 32,
+            loksystem_sso_enabled=True,
         ))
     validate_startup_settings(Settings(
         environment="production",
@@ -1359,8 +1673,9 @@ async def test_provider_connection_syncs_entire_preset_and_publishes_callable_te
 
     async def fake_discovery(_base_url: str, _env_name: str | None, _provider_api_key: str | None = None) -> list[str]:
         return [
-            "qwen-plus", "qwen-turbo", "qwen-max", "qwen3-coder-plus",
-            "qwen-vl-max-latest", "qwen-image-plus", "wan2.1-t2v-turbo",
+            "qwen3.8-max", "qwen3.8-2.4t-a95b", "qwen3.8-27b", "qwen3.7-plus",
+            "qwen3-coder-next", "qwen3-coder-plus", "qwen3-vl-flash", "qwen3-vl-plus",
+            "qwen-image-3.0", "qwen-image-3.0-pro", "wan2.1-t2v-turbo",
         ]
 
     monkeypatch.setattr("app.main.discover_upstream_models", fake_discovery)
@@ -1378,21 +1693,22 @@ async def test_provider_connection_syncs_entire_preset_and_publishes_callable_te
         assert synced.status_code == 200
         result = synced.json()
         assert result["connection"]["credentials_configured"] is True
-        assert result["connection"]["synced_model_count"] == 7
-        assert result["connection"]["callable_model_count"] == 5
+        from app.provider_presets import get_provider_preset
+
+        assert result["connection"]["synced_model_count"] == len(get_provider_preset("qwen").models)
+        assert result["connection"]["callable_model_count"] == 8
         assert {item["public_name"] for item in result["models"] if item["callable"]} == {
-            "qwen/qwen-plus", "qwen/qwen-turbo", "qwen/qwen-max", "qwen/qwen3-coder-plus", "qwen/qwen-vl-max",
+            "qwen/qwen3.8-max", "qwen/qwen3.8-2.4t-a95b", "qwen/qwen3.8-27b", "qwen/qwen3.7-plus",
+            "qwen/qwen3-coder-next", "qwen/qwen3-coder-plus", "qwen/qwen3-vl-flash", "qwen/qwen3-vl-plus",
         }
         listed = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
         qwen = {item["public_name"]: item for item in listed.json()["data"] if item["public_name"].startswith("qwen/") or item["public_name"].startswith("qwen")}
-        assert qwen["qwen/qwen-plus"]["active"] is True
-        assert qwen["qwen/qwen-image-plus"]["active"] is False
-        assert qwen["qwen/qwen-image-plus"]["publication_state"] == "candidate"
+        assert qwen["qwen/qwen3.8-max"]["active"] is True
         with SessionLocal() as db:
             connection = db.query(ProviderConnection).filter_by(preset_id="qwen").one()
-            channel = db.query(ModelChannel).join(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen-plus").one()
+            channel = db.query(ModelChannel).join(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen3.8-max").one()
             assert channel.provider_connection_id == connection.id
-            assert db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen-plus").count() == 1
+            assert db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen3.8-max").count() == 1
 
 
 @pytest.mark.asyncio

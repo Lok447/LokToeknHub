@@ -25,15 +25,15 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ModelChannel, ModelConfig, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionCode, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
-from .provider_presets import get_provider_preset, provider_preset_data, PROVIDER_PRESETS
+from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
 from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -76,7 +76,7 @@ if cors_origin_list(get_settings()):
         CORSMiddleware,
         allow_origins=cors_origin_list(get_settings()),
         allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", "X-Admin-Token", "X-Request-ID", "X-Trace-ID", "X-Token-Signature"],
         expose_headers=["X-Request-ID", "X-Trace-ID", "Retry-After"],
     )
@@ -149,7 +149,7 @@ async def production_response_headers(request: Request, call_next):
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault("X-Request-ID", correlation_id)
-    if request.url.path in {"/portal", "/static/portal.js", "/static/portal.css", "/static/styles.css"}:
+    if request.url.path in {"/", "/portal", "/static/app.js", "/static/portal.js", "/static/portal.css", "/static/styles.css"} or request.url.path.startswith("/admin/"):
         response.headers.setdefault("Cache-Control", "no-store")
     return response
 
@@ -986,22 +986,41 @@ async def payment_webhook(
 @app.get("/admin/accounts", dependencies=[Depends(require_admin)])
 def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
-    source_labels = {"admin": "管理员发放", "self_registered": "用户注册", "loksystem": "LokSystem 接入", "oidc": "统一身份接入"}
-    return {"data": [
-        {
+    source_labels = {"admin": "管理员创建", "self_registered": "用户注册", "loksystem": "外部身份接入", "oidc": "统一身份接入"}
+    account_types = {"admin": "客户账户", "self_registered": "个人账户", "loksystem": "外部身份账户", "oidc": "外部身份账户"}
+    recent_cutoff = utcnow() - timedelta(days=30)
+    data = []
+    for account in accounts:
+        last_usage_at = db.scalar(select(func.max(UsageRecord.created_at)).where(UsageRecord.account_id == account.id))
+        last_transaction_at = db.scalar(select(func.max(AccountBalanceTransaction.created_at)).where(AccountBalanceTransaction.account_id == account.id))
+        last_activity_at = max((value for value in (last_usage_at, last_transaction_at) if value), default=None)
+        data.append({
             "id": account.id,
             "external_user_id": account.external_user_id,
             "login_id": account.login_id,
             "account_source": account.account_source or "admin",
-            "account_source_label": source_labels.get(account.account_source, "管理员发放"),
+            "account_source_label": source_labels.get(account.account_source, "管理员创建"),
+            "account_type": account_types.get(account.account_source, "客户账户"),
             "name": account.name,
             "balance_micros": account.balance_micros,
             "active": account.active,
             "api_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id)) or 0,
+            "project_count": db.scalar(
+                select(func.count(Project.id))
+                .join(Workspace, Workspace.id == Project.workspace_id)
+                .where(Workspace.owner_account_id == account.id)
+            ) or 0,
+            "recent_spend_micros": db.scalar(
+                select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(
+                    UsageRecord.account_id == account.id,
+                    UsageRecord.created_at >= recent_cutoff,
+                    UsageRecord.status == "success",
+                )
+            ) or 0,
+            "last_activity_at": last_activity_at.isoformat() if last_activity_at else None,
             "created_at": account.created_at.isoformat(),
-        }
-        for account in accounts
-    ]}
+        })
+    return {"data": data}
 
 
 @app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_operator)])
@@ -1013,6 +1032,44 @@ def update_account(account_id: int, payload: ActiveUpdate, db: Session = Depends
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.status_updated", target_type="account", target_id=account.id, details={"active": account.active})
     db.commit()
     return {"id": account.id, "active": account.active}
+
+
+@app.delete("/admin/accounts/{account_id}", dependencies=[Depends(require_superadmin)])
+def delete_account(account_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(BillingAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    if account.active:
+        raise HTTPException(status_code=409, detail="请先停用账户后再删除")
+    if account.balance_micros:
+        raise HTTPException(status_code=409, detail="账户仍有余额，不能删除")
+    if db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.account_id == account.id)):
+        raise HTTPException(status_code=409, detail="该账户已有调用记录，不能删除；请保留停用状态以便审计")
+    if db.scalar(select(func.count(AccountBalanceTransaction.id)).where(AccountBalanceTransaction.account_id == account.id)):
+        raise HTTPException(status_code=409, detail="该账户已有账务流水，不能删除；请保留停用状态以便审计")
+    if db.scalar(select(func.count(PaymentOrder.id)).where(PaymentOrder.account_id == account.id)):
+        raise HTTPException(status_code=409, detail="该账户已有充值订单，不能删除；请保留停用状态以便审计")
+    if db.scalar(select(func.count(RedemptionClaim.id)).where(RedemptionClaim.account_id == account.id)):
+        raise HTTPException(status_code=409, detail="该账户已有福利领取记录，不能删除；请保留停用状态以便审计")
+    if db.scalar(select(func.count(Organization.id)).where(Organization.owner_account_id == account.id)):
+        raise HTTPException(status_code=409, detail="该账户仍是组织所有者，不能删除")
+
+    workspace_ids = db.scalars(select(Workspace.id).where(Workspace.owner_account_id == account.id)).all()
+    if workspace_ids:
+        db.execute(delete(Project).where(Project.workspace_id.in_(workspace_ids)))
+        db.execute(delete(Workspace).where(Workspace.id.in_(workspace_ids)))
+    db.execute(delete(ApiKey).where(ApiKey.account_id == account.id))
+    db.execute(delete(OrganizationMember).where(OrganizationMember.account_id == account.id))
+    db.execute(delete(PasswordResetChallenge).where(PasswordResetChallenge.account_id == account.id))
+    db.execute(delete(SecurityContactChallenge).where(SecurityContactChallenge.account_id == account.id))
+    db.execute(delete(SecurityNotification).where(SecurityNotification.account_id == account.id))
+    db.execute(delete(ExternalIdentity).where(ExternalIdentity.account_id == account.id))
+    account_id_value = account.id
+    external_user_id = account.external_user_id
+    db.delete(account)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="account.deleted", target_type="account", target_id=account_id_value, details={"external_user_id": external_user_id})
+    db.commit()
+    return {"id": account_id_value, "external_user_id": external_user_id, "deleted": True}
 
 
 @app.get("/admin/api-keys", dependencies=[Depends(require_admin)])
@@ -1082,9 +1139,10 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
 
 @app.post("/admin/accounts", dependencies=[Depends(require_operator)])
 def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == payload.external_user_id)):
+    external_user_id = payload.external_user_id or f"admin-{uuid.uuid4().hex[:20]}"
+    if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == external_user_id)):
         raise HTTPException(status_code=409, detail="external user already has an account")
-    account = BillingAccount(external_user_id=payload.external_user_id, name=payload.name, account_source="admin")
+    account = BillingAccount(external_user_id=external_user_id, name=payload.name, account_source="admin")
     db.add(account)
     db.flush()
     ensure_personal_workspace(db, account)
@@ -1254,6 +1312,24 @@ def provider_connection_data(connection: ProviderConnection | None, preset) -> d
     }
 
 
+def mark_provider_connection_misconfigured(db: Session, connection: ProviderConnection | None, detail: str) -> None:
+    if not connection:
+        return
+    checked_at = utcnow()
+    connection.status = "misconfigured"
+    connection.last_checked_at = checked_at
+    connection.last_error = detail
+    channels = db.scalars(select(ModelChannel).where(ModelChannel.provider_connection_id == connection.id)).all()
+    for channel in channels:
+        channel.status = "misconfigured"
+        channel.health_source = "provider"
+        channel.consecutive_failures = 0
+        channel.circuit_open_until = None
+        channel.last_checked_at = checked_at
+        channel.last_error = detail
+    db.commit()
+
+
 @app.get("/admin/provider-connections", dependencies=[Depends(require_admin)])
 def list_provider_connections(db: Session = Depends(get_db)) -> dict[str, object]:
     connections = {item.preset_id: item for item in db.scalars(select(ProviderConnection)).all()}
@@ -1279,6 +1355,11 @@ async def test_provider_connection(preset_id: str, payload: ProviderConnectionCo
         model_ids = await discover_upstream_models(base_url, env_name, raw_secret)
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not provider_catalogue_matches(preset.id, model_ids):
+        sample = ", ".join(model_ids[:6])
+        detail = f"服务商目录与 {preset.name} 不匹配，请检查 API 地址和 API Key；返回样例: {sample}"
+        mark_provider_connection_misconfigured(db, connection, detail)
+        raise HTTPException(status_code=422, detail=detail)
     return {"ok": True, "provider": preset.name, "discovered_model_count": len(model_ids), "latency_ms": int((time.perf_counter() - started) * 1000), "sample_models": model_ids[:8]}
 
 
@@ -1384,6 +1465,11 @@ async def configure_provider_connection(
         discovered_ids = set(await discover_upstream_models(base_url, env_name, raw_secret))
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if not provider_catalogue_matches(preset.id, discovered_ids):
+        sample = ", ".join(sorted(discovered_ids)[:6])
+        detail = f"服务商目录与 {preset.name} 不匹配，请检查 API 地址和 API Key；返回样例: {sample}"
+        mark_provider_connection_misconfigured(db, connection, detail)
+        raise HTTPException(status_code=422, detail=detail)
     if connection is None:
         connection = ProviderConnection(
             preset_id=preset.id,
@@ -1481,14 +1567,22 @@ async def configure_provider_connection(
         channel.upstream_model = preset_model.model_id
         channel.provider_api_key_env = env_name
         channel.encrypted_api_key = encrypted_secret
+        if not channel.provider_input_cost_micros_per_1k:
+            channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
+        if not channel.provider_output_cost_micros_per_1k:
+            channel.provider_output_cost_micros_per_1k = preset_model.platform_output_price_micros_per_1k
         available = preset_model.model_id in discovered_ids
         metadata_api_type = preset_model.catalog_metadata.get("api_type", "chat_completions")
         channel.active = available and metadata_api_type == "chat_completions"
-        channel.status = "healthy" if channel.active else "unhealthy" if metadata_api_type == "chat_completions" else "unknown"
-        channel.health_source = "provider" if available else "unknown"
+        channel.status = "healthy" if channel.active else "unavailable" if metadata_api_type == "chat_completions" else "pending_adapter"
+        channel.health_source = "provider"
         channel.consecutive_failures = 0 if available else channel.consecutive_failures
         channel.last_checked_at = connection.last_checked_at
-        channel.last_error = None if available else f"供应商模型目录不包含上游模型: {preset_model.model_id}"
+        channel.last_error = (
+            None if available and metadata_api_type == "chat_completions"
+            else "等待统一调用适配器" if metadata_api_type != "chat_completions"
+            else f"当前服务商账号尚未开放上游模型: {preset_model.model_id}"
+        )
         price_ready = model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0
         callable_now = channel.active and price_ready
         if not available:
@@ -1629,7 +1723,11 @@ def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> d
 @app.get("/admin/models", dependencies=[Depends(require_admin)])
 def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
     settings = get_settings()
-    models = db.scalars(select(ModelConfig).order_by(ModelConfig.id.desc())).all()
+    models = db.scalars(
+        select(ModelConfig)
+        .where(ModelConfig.public_name.not_in(DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES))
+        .order_by(ModelConfig.id.desc())
+    ).all()
     return {"data": [
         {
             "id": model.id,
@@ -1676,6 +1774,13 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
         # A direct price edit is an explicit manual override of the margin strategy.
         changes["pricing_margin_bps"] = 0
     if changes.get("active"):
+        catalog_metadata = parse_model_json(model.catalog_metadata_json) or {}
+        api_type = catalog_metadata.get("api_type", "chat_completions")
+        if api_type != "chat_completions":
+            raise HTTPException(
+                status_code=422,
+                detail=f"当前网关尚未启用 {api_type} 统一调用适配器，不能发布该模型",
+            )
         settings = get_settings()
         input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
         output_price = changes.get("output_price_micros_per_1k", model.output_price_micros_per_1k)
@@ -1737,6 +1842,13 @@ def parse_model_json(value: str | None) -> dict[str, object] | None:
 def official_reference_prices(model: ModelConfig) -> tuple[int, int] | None:
     """Return official input/output costs in the ledger's /1K micros unit."""
     pricing = parse_model_json(model.official_pricing_json) or {}
+    default_reference = pricing.get("default_reference")
+    if isinstance(default_reference, dict):
+        input_per_million = default_reference.get("input_micros")
+        output_per_million = default_reference.get("output_micros")
+        if isinstance(input_per_million, (int, float)) and isinstance(output_per_million, (int, float)):
+            if input_per_million > 0 and output_per_million > 0:
+                return round(input_per_million / 1000), round(output_per_million / 1000)
     off_peak = pricing.get("off_peak")
     if not isinstance(off_peak, dict):
         return None
@@ -1862,11 +1974,15 @@ async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[s
     results = []
     for channel in channels:
         result = await check_channel_health(db, channel)
-        results.append({"channel_id": channel.id, "model_config_id": channel.model_config_id, **result})
+        db.refresh(channel)
+        results.append({"channel_id": channel.id, "model_config_id": channel.model_config_id, "status": channel.status, **result})
     return {
         "checked": len(results),
         "healthy": sum(1 for item in results if item["healthy"]),
-        "unhealthy": sum(1 for item in results if not item["healthy"]),
+        "unhealthy": sum(1 for item in results if item["status"] == "unhealthy"),
+        "unavailable": sum(1 for item in results if item["status"] == "unavailable"),
+        "pending_adapter": sum(1 for item in results if item["status"] == "pending_adapter"),
+        "misconfigured": sum(1 for item in results if item["status"] == "misconfigured"),
         "data": results,
     }
 
@@ -1963,6 +2079,8 @@ def list_models(authorization: str | None = Header(default=None), db: Session = 
                 "output_cny_per_1k": item.output_price_micros_per_1k,
             },
             "supported_parameters": metadata.get("supported_parameters", ["messages", "stream", "temperature", "max_tokens"]),
+            "gateway_profile": metadata.get("gateway_profile"),
+            "max_output_tokens": metadata.get("max_output_tokens"),
         })
     return {"object": "list", "data": data}
 
@@ -2006,6 +2124,7 @@ async def chat_completions(
         raise HTTPException(status_code=404, detail=f"unknown model: {payload.model}")
     if not model_is_callable(db, model):
         raise HTTPException(status_code=503, detail=f"model unavailable: {payload.model}")
+    validate_model_request(model, payload)
     request_id = x_request_id or "req_" + uuid.uuid4().hex
     trace_id = x_trace_id or request_id
     if not _request_id_pattern.fullmatch(request_id) or not _request_id_pattern.fullmatch(trace_id):

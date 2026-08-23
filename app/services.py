@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import get_settings
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, ProviderConnection, UsageRecord, utcnow
+from .provider_presets import get_provider_preset, provider_catalogue_matches
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret
 from .schemas import ChatCompletionRequest
 
@@ -42,13 +43,43 @@ def calculate_amount(model: ModelConfig, input_tokens: int, output_tokens: int) 
     )
 
 
-def normalize_request_payload(request: ChatCompletionRequest) -> dict[str, Any]:
-    """Build a provider payload while normalizing the two OpenAI token names."""
+def _catalog_metadata(model: ModelConfig | None) -> dict[str, Any]:
+    if not model or not model.catalog_metadata_json:
+        return {}
+    try:
+        value = json.loads(model.catalog_metadata_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_request_payload(request: ChatCompletionRequest, model: ModelConfig | None = None) -> dict[str, Any]:
+    """Build an upstream payload from the model's provider capability contract."""
     payload = request.model_dump(exclude_none=True)
-    max_completion_tokens = payload.pop("max_completion_tokens", None)
-    if max_completion_tokens is not None and "max_tokens" not in payload:
-        payload["max_tokens"] = max_completion_tokens
+    metadata = _catalog_metadata(model)
+    profile = metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else {}
+    aliases = profile.get("parameter_aliases") if isinstance(profile.get("parameter_aliases"), dict) else {}
+    aliases = {str(source): str(target) for source, target in aliases.items() if str(source) and str(target)}
+    aliases.setdefault("max_completion_tokens", "max_tokens")
+    for source, target in aliases.items():
+        if source in payload:
+            value = payload.pop(source)
+            if target not in payload:
+                payload[target] = value
     return payload
+
+
+def validate_model_request(model: ModelConfig, request: ChatCompletionRequest) -> None:
+    """Reject requests that cannot be handled by the model's configured gateway type."""
+    metadata = _catalog_metadata(model)
+    api_type = metadata.get("api_type", "chat_completions")
+    profile = metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else {}
+    if api_type != "chat_completions" or profile.get("protocol") not in {None, "openai_chat_completions"}:
+        raise HTTPException(status_code=422, detail=f"模型 {model.public_name} 不是当前文本聊天协议可调用模型")
+    max_output = metadata.get("max_output_tokens")
+    requested = request.max_tokens or request.max_completion_tokens
+    if isinstance(max_output, int) and max_output > 0 and requested and requested > max_output:
+        raise HTTPException(status_code=422, detail=f"请求输出上限超过模型限制 {max_output} tokens")
 
 
 def extract_usage(data: dict[str, Any], estimated_input: int = 0) -> tuple[int, int, dict[str, int]]:
@@ -257,6 +288,20 @@ def mark_channel_failure(db: Session, channel: ModelChannel, detail: str) -> Non
     db.commit()
 
 
+def mark_channel_catalogue_state(db: Session, channel: ModelChannel, status: str, detail: str, source: str = "provider") -> None:
+    """Record catalogue/configuration problems without opening the runtime circuit."""
+    tracked = db.get(ModelChannel, channel.id)
+    if not tracked:
+        return
+    tracked.status = status
+    tracked.health_source = source
+    tracked.consecutive_failures = 0
+    tracked.circuit_open_until = None
+    tracked.last_checked_at = utcnow()
+    tracked.last_error = detail[:1000]
+    db.commit()
+
+
 def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     settings = get_settings()
     try:
@@ -344,6 +389,16 @@ def _retryable_status(status_code: int) -> bool:
 async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, Any]:
     settings = get_settings()
     started = time.perf_counter()
+    model = db.get(ModelConfig, channel.model_config_id)
+    try:
+        metadata = json.loads(model.catalog_metadata_json or "{}") if model else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    api_type = metadata.get("api_type", "chat_completions") if isinstance(metadata, dict) else "chat_completions"
+    if api_type != "chat_completions":
+        detail = f"等待 {api_type} 统一调用适配器"
+        mark_channel_catalogue_state(db, channel, "pending_adapter", detail, "catalogue")
+        return {"healthy": False, "status": "pending_adapter", "latency_ms": 0, "detail": detail}
     if settings.mock_mode:
         mark_channel_success(db, channel, "mock")
         return {"healthy": True, "latency_ms": 0, "detail": "Mock mode"}
@@ -374,21 +429,28 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
             detail = "供应商模型目录响应无有效模型"
             mark_channel_failure(db, channel, detail)
             return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+        connection = db.get(ProviderConnection, channel.provider_connection_id) if channel.provider_connection_id else None
+        preset = get_provider_preset(connection.preset_id) if connection else None
+        if preset and not provider_catalogue_matches(preset.id, provider_model_ids):
+            available = ", ".join(sorted(provider_model_ids)[:6])
+            detail = f"服务商目录与 {preset.name} 不匹配，请检查 API 地址和 API Key；返回样例: {available}"
+            mark_channel_catalogue_state(db, channel, "misconfigured", detail)
+            return {"healthy": False, "status": "misconfigured", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
         if channel.upstream_model not in provider_model_ids:
-            available = ", ".join(sorted(provider_model_ids)[:10])
-            detail = f"供应商模型目录不包含上游模型: {channel.upstream_model}; 可用模型: {available}"
-            mark_channel_failure(db, channel, detail)
-            return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
+            detail = f"当前服务商账号尚未开放上游模型: {channel.upstream_model}"
+            mark_channel_catalogue_state(db, channel, "unavailable", detail)
+            return {"healthy": False, "status": "unavailable", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
     except httpx.HTTPError as exc:
         detail = f"provider unavailable: {exc}"
         mark_channel_failure(db, channel, detail)
         return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
     mark_channel_success(db, channel)
-    return {"healthy": True, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": "OK"}
+    return {"healthy": True, "status": "healthy", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": "OK"}
 
 
 async def call_provider_details(db: Session, model: ModelConfig, request: ChatCompletionRequest) -> ProviderCallDetails:
     settings = get_settings()
+    validate_model_request(model, request)
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
@@ -414,7 +476,7 @@ async def call_provider_details(db: Session, model: ModelConfig, request: ChatCo
     route_attempts: list[dict[str, Any]] = []
     for channel in channels:
         endpoint, headers = _provider_auth(channel)
-        payload = normalize_request_payload(request)
+        payload = normalize_request_payload(request, model)
         payload["model"] = channel.upstream_model
         payload.setdefault("max_tokens", settings.reservation_output_tokens)
         attempt_started = time.perf_counter()
@@ -472,6 +534,7 @@ async def stream_provider(
     route_meta: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
     settings = get_settings()
+    validate_model_request(model, request)
     estimated_input = estimate_tokens(request.messages)
     if settings.mock_mode:
         channels = select_channels(db, model)
@@ -501,7 +564,7 @@ async def stream_provider(
         emitted = False
         endpoint, headers = _provider_auth(channel)
         headers["Accept"] = "text/event-stream"
-        payload = normalize_request_payload(request)
+        payload = normalize_request_payload(request, model)
         payload["model"] = channel.upstream_model
         payload["stream"] = True
         payload.setdefault("max_tokens", settings.reservation_output_tokens)

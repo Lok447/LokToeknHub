@@ -2,7 +2,7 @@ from collections.abc import Generator
 from datetime import datetime, timezone
 import json
 
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -283,8 +283,28 @@ def init_db() -> None:
                     "created_at": item["created_at"],
                 })
 
+    remove_deprecated_provider_models()
     seed_builtin_models()
     seed_provider_catalogue()
+
+
+def remove_deprecated_provider_models() -> None:
+    """Remove retired catalogue candidates while preserving auditable history."""
+    from .models import ModelChannel, ModelConfig, UsageRecord
+    from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES
+
+    with SessionLocal() as db:
+        models = db.scalars(
+            select(ModelConfig).where(ModelConfig.public_name.in_(DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES))
+        ).all()
+        for model in models:
+            has_usage = db.scalar(select(UsageRecord.id).where(UsageRecord.model == model.public_name).limit(1))
+            if has_usage:
+                model.active = False
+                continue
+            db.execute(delete(ModelChannel).where(ModelChannel.model_config_id == model.id))
+            db.delete(model)
+        db.commit()
 
 
 def seed_builtin_models() -> None:
@@ -339,10 +359,27 @@ def seed_provider_catalogue() -> None:
             for preset_model in preset.models:
                 existing = existing_models.get(preset_model.public_name)
                 if existing:
-                    if not existing.catalog_metadata_json:
-                        existing.catalog_metadata_json = json.dumps(preset_model.catalog_metadata, ensure_ascii=False)
-                    if not existing.official_pricing_json and preset_model.official_pricing:
+                    current_metadata = {}
+                    if existing.catalog_metadata_json:
+                        try:
+                            decoded_metadata = json.loads(existing.catalog_metadata_json)
+                            current_metadata = decoded_metadata if isinstance(decoded_metadata, dict) else {}
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            current_metadata = {}
+                    if preset_model.catalog_metadata:
+                        current_metadata.update(preset_model.catalog_metadata)
+                        existing.catalog_metadata_json = json.dumps(current_metadata, ensure_ascii=False)
+                    if preset_model.official_pricing:
                         existing.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
+                    if existing.input_price_micros_per_1k <= 0 and preset_model.platform_input_price_micros_per_1k > 0:
+                        existing.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k
+                    if existing.output_price_micros_per_1k <= 0 and preset_model.platform_output_price_micros_per_1k > 0:
+                        existing.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k
+                    for channel in db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == existing.id)).all():
+                        if not channel.provider_input_cost_micros_per_1k:
+                            channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
+                        if not channel.provider_output_cost_micros_per_1k:
+                            channel.provider_output_cost_micros_per_1k = preset_model.platform_output_price_micros_per_1k
                     continue
                 record = ModelConfig(
                     public_name=preset_model.public_name,

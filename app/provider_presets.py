@@ -5,7 +5,117 @@ from dataclasses import asdict, dataclass
 from .config import get_settings
 
 
-DEEPSEEK_PRICING_URL = "https://api-docs.deepseek.com/quick_start/pricing"
+DEEPSEEK_PRICING_URL = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing"
+QWEN_PRICING_URL = "https://help.aliyun.com/zh/model-studio/model-pricing"
+GLM_PRICING_URL = "https://bigmodel.cn/pricing"
+KIMI_PRICING_URL = "https://platform.kimi.com/docs/pricing/chat"
+MINIMAX_PRICING_URL = "https://platform.minimaxi.com/docs/guides/pricing-paygo"
+DOUBAO_PRICING_URL = "https://docs.volcengine.com/docs/82379/1544106?lang=zh"
+
+PROVIDER_PRICING_SOURCES = {
+    "DeepSeek": ("DeepSeek 官方价格", DEEPSEEK_PRICING_URL),
+    "Qwen": ("阿里云百炼官方价格", QWEN_PRICING_URL),
+    "GLM": ("智谱 GLM 官方价格", GLM_PRICING_URL),
+    "Kimi": ("Kimi 官方价格", KIMI_PRICING_URL),
+    "MiniMax": ("MiniMax 官方价格", MINIMAX_PRICING_URL),
+    "Doubao": ("火山方舟官方价格", DOUBAO_PRICING_URL),
+}
+
+PROVIDER_GATEWAY_PROFILES = {
+    "DeepSeek": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+    "Qwen": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+    "GLM": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+    "Kimi": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+    "MiniMax": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+    "Doubao": {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "verified_common_only",
+    },
+}
+
+
+def gateway_profile(provider: str, api_type: str) -> dict[str, object]:
+    profile = dict(PROVIDER_GATEWAY_PROFILES.get(provider, {
+        "protocol": "openai_chat_completions",
+        "auth_scheme": "bearer",
+        "discovery_path": "/models",
+        "request_path": "/chat/completions",
+        "stream_transport": "sse",
+        "usage_source": "response.usage",
+        "parameter_policy": "passthrough_unknown",
+        "parameter_aliases": {"max_completion_tokens": "max_tokens"},
+    }))
+    if api_type != "chat_completions":
+        profile.update({
+            "protocol": "async_task",
+            "request_path": "/images/generations" if api_type == "images_generations" else "/videos/generations",
+            "stream_transport": "none",
+            "usage_source": "task_result",
+            "parameter_policy": "task_specific_pending_adapter",
+            "parameter_aliases": {},
+        })
+    else:
+        profile.setdefault("parameter_aliases", {"max_completion_tokens": "max_tokens"})
+    return profile
+
+# Removed from the curated catalogue after the Qwen3.8 series rollout. Startup
+# cleanup deletes these candidates only when they have no usage history.
+DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES = (
+    "qwen/qwen-image-plus",
+    "qwen/qwen-vl-max",
+    "qwen/qwen-max",
+    "qwen/qwen-turbo",
+    "qwen/qwen-plus",
+    "qwen/qwen3.8-plus",
+    "qwen/qwen3.8",
+    "qwen/qwen3-coder",
+    "qwen/qwen3-vl-max",
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +180,8 @@ def deepseek_model(
         "context_window": "1M",
         "model_version": version,
         "max_output_tokens": 384_000,
+        "api_type": "chat_completions",
+        "gateway_profile": gateway_profile("DeepSeek", "chat_completions"),
     }
     official_pricing = {
         "source": "DeepSeek official pricing",
@@ -119,6 +231,21 @@ def catalogue_model(
     context_window: str = "按供应商配置",
 ) -> ProviderModelPreset:
     """Build a catalog-only candidate without inventing provider pricing."""
+    pricing_source = PROVIDER_PRICING_SOURCES.get(provider)
+    official_pricing = None
+    if pricing_source:
+        source_name, source_url = pricing_source
+        pricing_unit = "per_1m_tokens" if api_type == "chat_completions" else "provider_defined"
+        official_pricing = {
+            "source": source_name,
+            "source_url": source_url,
+            "currency": "CNY",
+            "unit": pricing_unit,
+            "price_basis": "provider_list_price",
+            "verification_status": "manual_review_required",
+            "provider": provider,
+            "note": "已挂载官方价格来源；模型级价格需按供应商当前目录核验后录入。",
+        }
     return ProviderModelPreset(
         model_id=model_id,
         public_name=public_name,
@@ -138,7 +265,126 @@ def catalogue_model(
             "api_type": api_type,
             "catalog_status": "curated_candidate",
             "requires_provider_verification": True,
+            "gateway_profile": gateway_profile(provider, api_type),
+            "pricing_source_url": pricing_source[1] if pricing_source else None,
+            "pricing_verification_status": "manual_review_required" if pricing_source else "unavailable",
         },
+        official_pricing=official_pricing,
+    )
+
+
+def qwen_token_model(
+    model_id: str,
+    public_name: str,
+    display_name: str,
+    *,
+    tiers: tuple[tuple[int, float, float], ...],
+    modalities: tuple[str, ...] = ("text",),
+    capabilities: tuple[str, ...] = ("对话",),
+    summary: str,
+    context_window: str,
+) -> ProviderModelPreset:
+    """Build a Qwen candidate backed by the official standard list price."""
+    candidate = catalogue_model(
+        model_id,
+        public_name,
+        display_name,
+        "Qwen",
+        modalities=modalities,
+        capabilities=capabilities,
+        summary=summary,
+        context_window=context_window,
+    )
+
+    def micros(yuan: float) -> int:
+        return round(yuan * 1_000_000)
+
+    normalized_tiers = []
+    lower_bound = 0
+    for max_tokens, input_yuan, output_yuan in tiers:
+        normalized_tiers.append({
+            "min_input_tokens_exclusive": lower_bound,
+            "max_input_tokens_inclusive": max_tokens,
+            "input_micros": micros(input_yuan),
+            "output_micros": micros(output_yuan),
+        })
+        lower_bound = max_tokens
+    first = normalized_tiers[0]
+    official_pricing = {
+        "source": "Alibaba Cloud Model Studio official pricing",
+        "source_url": QWEN_PRICING_URL,
+        "currency": "CNY",
+        "unit": "per_1m_tokens",
+        "region": "cn-beijing",
+        "price_basis": "standard_list_price",
+        "verification_status": "verified",
+        "page_updated_at": "2026-08-21 20:41:43",
+        "retrieved_at": "2026-08-21",
+        "default_reference": {
+            "input_micros": first["input_micros"],
+            "output_micros": first["output_micros"],
+            "max_input_tokens_inclusive": first["max_input_tokens_inclusive"],
+        },
+        "tiers": normalized_tiers,
+    }
+    return ProviderModelPreset(
+        model_id=candidate.model_id,
+        public_name=candidate.public_name,
+        display_name=candidate.display_name,
+        model_version=candidate.model_version,
+        context_window=candidate.context_window,
+        max_output_tokens=candidate.max_output_tokens,
+        catalog_metadata=candidate.catalog_metadata,
+        official_pricing=official_pricing,
+        platform_input_price_micros_per_1k=round(first["input_micros"] / 1000),
+        platform_output_price_micros_per_1k=round(first["output_micros"] / 1000),
+    )
+
+
+def qwen_image_model(
+    model_id: str,
+    public_name: str,
+    display_name: str,
+    *,
+    output_prices: tuple[tuple[str, float], ...],
+    summary: str,
+) -> ProviderModelPreset:
+    """Build an image candidate without mixing per-image costs into token fields."""
+    candidate = catalogue_model(
+        model_id,
+        public_name,
+        display_name,
+        "Qwen",
+        api_type="images_generations",
+        modalities=("image",),
+        capabilities=("文生图", "图像编辑"),
+        summary=summary,
+    )
+    official_pricing = {
+        "source": "Alibaba Cloud Model Studio official pricing",
+        "source_url": QWEN_PRICING_URL,
+        "currency": "CNY",
+        "unit": "per_image",
+        "region": "cn-beijing",
+        "price_basis": "standard_list_price",
+        "verification_status": "verified",
+        "page_updated_at": "2026-08-21 20:41:43",
+        "retrieved_at": "2026-08-21",
+        "input_per_image_micros": 20_000,
+        "output_prices": [
+            {"resolution": resolution, "output_per_image_micros": round(yuan * 1_000_000)}
+            for resolution, yuan in output_prices
+        ],
+    }
+    return ProviderModelPreset(
+        model_id=candidate.model_id,
+        public_name=candidate.public_name,
+        display_name=candidate.display_name,
+        model_version=candidate.model_version,
+        context_window=candidate.context_window,
+        max_output_tokens=candidate.max_output_tokens,
+        catalog_metadata=candidate.catalog_metadata,
+        official_pricing=official_pricing,
     )
 
 
@@ -160,15 +406,22 @@ PROVIDER_PRESETS = (
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_key_env="DASHSCOPE_API_KEY",
         models=(
-            catalogue_model("qwen-plus", "qwen/qwen-plus", "Qwen Plus", "Qwen", capabilities=("对话", "长文本")),
-            catalogue_model("qwen-turbo", "qwen/qwen-turbo", "Qwen Turbo", "Qwen", capabilities=("对话", "快速响应")),
-            catalogue_model("qwen-max", "qwen/qwen-max", "Qwen Max", "Qwen", capabilities=("对话", "复杂推理")),
-            catalogue_model("qwen3-coder-plus", "qwen/qwen3-coder-plus", "Qwen3 Coder Plus", "Qwen", capabilities=("代码", "Agent")),
-            catalogue_model("qwen-vl-max-latest", "qwen/qwen-vl-max", "Qwen VL Max", "Qwen", modalities=("text", "image"), capabilities=("图像理解", "视觉问答")),
-            catalogue_model("qwen-image-plus", "qwen/qwen-image-plus", "Qwen Image Plus", "Qwen", api_type="images_generations", modalities=("image",), capabilities=("文生图", "图像编辑")),
-            catalogue_model("wan2.1-t2v-turbo", "qwen/wan2.1-t2v-turbo", "Wan 2.1 T2V Turbo", "Qwen", api_type="video_generations", modalities=("video",), capabilities=("文生视频",)),
+            # Qwen3.8 SOTA candidates. DashScope model IDs are verified during
+            # provider sync; candidates stay unpublished until the account
+            # exposes the exact ID and pricing is reviewed.
+            qwen_token_model("qwen3.8-max", "qwen/qwen3.8-max", "Qwen3.8-Max", tiers=((1_000_000, 12, 36),), capabilities=("对话", "复杂推理", "Agent"), context_window="1M", summary="Qwen3.8 Max 候选，面向复杂推理和生产级 Agent 场景。"),
+            qwen_token_model("qwen3.8-2.4t-a95b", "qwen/qwen3.8-2.4t-a95b", "Qwen3.8 2.4T A95B", tiers=((1_000_000, 12, 36),), capabilities=("对话", "推理", "长文本"), context_window="1M", summary="DashScope 真实目录中的 Qwen3.8 旗舰 MoE 候选。"),
+            qwen_token_model("qwen3.8-27b", "qwen/qwen3.8-27b", "Qwen3.8 27B", tiers=((1_000_000, 3, 12),), capabilities=("对话", "推理"), context_window="1M", summary="DashScope 真实目录中的 Qwen3.8 27B 候选。"),
+            qwen_token_model("qwen3.7-plus", "qwen/qwen3.7-plus", "Qwen3.7 Plus", tiers=((256_000, 2, 8), (1_000_000, 6, 24)), capabilities=("对话", "推理", "长文本"), context_window="1M", summary="DashScope 当前可用的 Plus 系列候选。"),
+            qwen_token_model("qwen3-coder-next", "qwen/qwen3-coder-next", "Qwen3 Coder Next", tiers=((32_000, 1, 4), (128_000, 1.5, 6), (256_000, 2.5, 10)), capabilities=("代码", "Agent", "工具调用"), context_window="256K", summary="Qwen-Coder Next 候选，面向代码生成、审查和 Agent 工具调用。"),
+            qwen_token_model("qwen3-coder-plus", "qwen/qwen3-coder-plus", "Qwen3 Coder Plus", tiers=((32_000, 4, 16), (128_000, 6, 24), (256_000, 10, 40), (1_000_000, 20, 200)), capabilities=("代码", "Agent", "工具调用"), context_window="1M", summary="Qwen-Coder Plus 候选，面向复杂代码和 Agent 编排。"),
+            qwen_token_model("qwen3-vl-flash", "qwen/qwen3-vl-flash", "Qwen3-VL Flash", tiers=((32_000, 0.15, 1.5), (128_000, 0.3, 3), (256_000, 0.6, 6)), modalities=("text", "image"), capabilities=("图像理解", "视觉问答", "快速响应"), context_window="256K", summary="Qwen3-VL Flash 候选，面向低延迟图像理解。"),
+            qwen_token_model("qwen3-vl-plus", "qwen/qwen3-vl-plus", "Qwen3-VL Plus", tiers=((32_000, 1, 10), (128_000, 1.5, 15), (256_000, 3, 30)), modalities=("text", "image"), capabilities=("图像理解", "视觉问答"), context_window="256K", summary="Qwen-VL Plus 候选，面向图文对话和视觉问答。"),
+            qwen_image_model("qwen-image-3.0", "qwen/qwen-image-3.0", "Qwen Image 3.0", output_prices=(("1K", 0.18), ("2K", 0.18)), summary="DashScope 真实目录中的 Qwen Image 3.0 任务型候选。"),
+            qwen_image_model("qwen-image-3.0-pro", "qwen/qwen-image-3.0-pro", "Qwen Image 3.0 Pro", output_prices=(("1K", 0.25), ("2K", 0.50)), summary="DashScope 真实目录中的 Qwen Image 3.0 Pro 任务型候选。"),
+            catalogue_model("wan2.1-t2v-turbo", "qwen/wan2.1-t2v-turbo", "Wan 2.1 T2V Turbo", "Qwen", api_type="video_generations", modalities=("video",), capabilities=("文生视频",), summary="Wan 视频任务型候选；需异步任务适配器、回调/轮询和按时长计费规则。"),
         ),
-        note="预置 Qwen 文本、多模态、图像和视频候选；请按 DashScope 账号实际目录确认模型 ID 与价格。",
+        note="首批预置 DashScope 真实目录中的 Qwen3.8、Plus、Qwen-Coder、Qwen-VL、Qwen Image 3.0 及 Wan 视频任务候选；价格采用阿里云百炼标准原价，不包含活动优惠。",
     ),
     ProviderPreset(
         id="glm",
@@ -237,3 +490,21 @@ def provider_preset_data(preset: ProviderPreset) -> dict[str, object]:
 
 def get_provider_preset(preset_id: str) -> ProviderPreset | None:
     return next((item for item in PROVIDER_PRESETS if item.id == preset_id), None)
+
+
+def provider_catalogue_matches(preset_id: str, model_ids: set[str] | list[str]) -> bool:
+    """Reject credentials or endpoints that clearly belong to another provider."""
+    normalized = {str(model_id).strip().lower() for model_id in model_ids if str(model_id).strip()}
+    if not normalized:
+        return False
+    markers = {
+        "deepseek": ("deepseek",),
+        "qwen": ("qwen", "wan"),
+        "glm": ("glm", "cogview", "cogvideo"),
+        "kimi": ("kimi", "moonshot"),
+        "minimax": ("minimax", "speech-", "image-", "video-"),
+        "doubao": ("doubao", "seedream", "seedance", "ep-"),
+    }.get(preset_id)
+    if not markers:
+        return True
+    return any(any(marker in model_id for marker in markers) for model_id in normalized)

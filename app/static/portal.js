@@ -127,6 +127,14 @@ function modelHealth(item) {
   return `<span class="badge ${kind}">${label}</span>`;
 }
 
+function gatewayCapabilitySummary(item) {
+  const profile = item.gateway_profile || {};
+  const protocol = profile.protocol === "async_task" ? "异步任务" : profile.protocol === "openai_chat_completions" ? "Chat Completions" : "兼容协议";
+  const stream = profile.stream_transport === "sse" ? "SSE 流式" : profile.stream_transport === "none" ? "非流式" : "按服务商";
+  const auth = profile.auth_scheme === "bearer" ? "Bearer" : profile.auth_scheme || "按服务商";
+  return `${protocol} · ${stream} · ${auth}`;
+}
+
 function keyStatusBadge(item) {
   const expiry = keyExpiry(item);
   if (expiry && expiry <= new Date()) return '<span class="badge warning">已过期</span>';
@@ -161,7 +169,7 @@ function renderIntegrationGuide() {
       <li><span>3</span><div><strong>在应用中完成配置</strong><small>在任意兼容 OpenAI 的应用中填写 Base URL、API Key 和模型 ID。</small></div>${status(hasRequests)}</li>
     </ol>
     <div class="integration-guide-actions">
-      ${hasKey ? '<button class="primary-button" type="button" data-action="open-loksystem-model"><i data-lucide="settings-2"></i><span>前往 LokSystem 配置</span></button>' : '<button class="primary-button" type="button" data-action="create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button>'}
+      ${hasKey ? '<button class="primary-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>管理 API Key</span></button>' : '<button class="primary-button" type="button" data-action="create-key"><i data-lucide="key-round"></i><span>创建 API Key</span></button>'}
       <button class="secondary-button" type="button" data-go="models"><i data-lucide="boxes"></i><span>查看模型</span></button>
       ${hasBalance ? "" : '<button class="secondary-button" type="button" data-go="quota"><i data-lucide="wallet-cards"></i><span>管理额度</span></button>'}
     </div>`;
@@ -231,6 +239,20 @@ function setAuthMode(mode) {
   document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.authMode === mode));
   document.getElementById("portal-auth-error").textContent = "";
   portalIcons();
+}
+
+function prioritizeFederatedLogin(button, subtitle) {
+  const loginForm = document.getElementById("portal-login-form");
+  const localLoginButton = document.getElementById("local-login-button");
+  const subtitleElement = document.getElementById("portal-auth-subtitle");
+  if (!button || !loginForm || !localLoginButton) return;
+  button.hidden = false;
+  button.classList.remove("secondary-button");
+  button.classList.add("primary-button");
+  localLoginButton.classList.remove("primary-button");
+  localLoginButton.classList.add("secondary-button");
+  loginForm.insertBefore(button, localLoginButton);
+  if (subtitleElement) subtitleElement.textContent = subtitle;
 }
 
 function passwordResetDialog() {
@@ -319,7 +341,9 @@ async function workspaceManagerDialog() {
   const projectRows = portalState.projects.map((project) => `<div class="status-row"><span class="status-name"><i data-lucide="folder-kanban"></i>${escapeHtml(project.name)}<small>${escapeHtml(project.slug)}</small></span><span class="secondary">${project.active ? "有效" : "已停用"}</span></div>`).join("") || '<p class="dialog-copy">暂无项目。</p>';
   openPortalDialog("空间与项目", `<div class="dialog-body"><div class="key-detail-grid"><div><span>新建资源归属空间</span><strong>${escapeHtml(current.name)}</strong></div><div><span>访问角色</span><strong>${escapeHtml(current.role)}</strong></div></div><div class="section-header"><div><h2>项目</h2><p>新建 API Key 和充值申请会归属当前空间的默认项目。</p></div></div><div class="status-list">${projectRows}</div>${canManage ? `<form id="workspace-project-form"><div class="field"><label for="workspace-project-name">新增项目</label><input id="workspace-project-name" name="name" maxlength="120" required placeholder="例如：生产环境"></div><button class="secondary-button" type="submit"><i data-lucide="plus"></i><span>创建项目</span></button></form>` : ""}<div class="section-header"><div><h2>组织空间</h2><p>创建组织后可邀请已注册的 LokToken 用户协作。</p></div></div><form id="workspace-org-form"><div class="field"><label for="workspace-org-name">组织名称</label><input id="workspace-org-name" name="name" maxlength="120" required placeholder="例如：LokSystem 团队"></div><button class="primary-button" type="submit"><i data-lucide="building-2"></i><span>创建组织</span></button></form></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button></div>`);
   const workspaceDialogBody = document.querySelector("#portal-dialog-content .dialog-body");
-  workspaceDialogBody.insertAdjacentHTML("afterbegin", `<div class="field"><label for="workspace-manager-select">当前空间</label><select id="workspace-manager-select">${portalState.workspaces.map((workspace) => `<option value="${workspace.id}" ${workspace.id === portalState.activeWorkspaceId ? "selected" : ""}>${workspace.type === "personal" ? "个人" : "组织"} · ${escapeHtml(workspace.name)}</option>`).join("")}</select><small class="field-hint">新建 API Key 和充值申请将归属所选空间的默认项目。</small></div>`);
+   workspaceDialogBody.insertAdjacentHTML("afterbegin", `<div class="field"><label for="workspace-manager-select">当前空间</label><select id="workspace-manager-select">${portalState.workspaces.map((workspace) => `<option value="${workspace.id}" ${workspace.id === portalState.activeWorkspaceId ? "selected" : ""}>${workspace.type === "personal" ? "个人" : "组织"} · ${escapeHtml(workspace.name)}</option>`).join("")}</select><small class="field-hint">新建 API Key 和充值申请将归属所选空间的默认项目。</small></div>`);
+  const workspaceOrgName = document.getElementById("workspace-org-name");
+  if (workspaceOrgName) workspaceOrgName.placeholder = "例如：你的团队";
   document.getElementById("workspace-manager-select").addEventListener("change", async (event) => {
     portalState.activeWorkspaceId = Number(event.target.value);
     try { await loadWorkspaces(); await workspaceManagerDialog(); portalToast("已切换资源归属空间"); } catch (error) { portalToast(error.message, true); }
@@ -678,7 +702,7 @@ function modelDetailDialog(modelName) {
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
     <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${item.max_output_tokens ? `${formatNumber(item.max_output_tokens)} Token` : "按上游配置"}</strong></div><div><span>调用协议</span><strong>${escapeHtml(gatewayCapabilitySummary(item))}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
   </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
@@ -1011,7 +1035,7 @@ function keyDialog() {
   openPortalDialog("密钥管理", `
     <form id="portal-dialog-form">
       <div class="dialog-body">
-        <div class="key-dialog-intro"><i data-lucide="shield-check"></i><p>用于调用 LokSystem 模型 API 的访问凭证。密钥创建后只会完整展示一次，请妥善保存。</p></div>
+        <div class="key-dialog-intro"><i data-lucide="shield-check"></i><p>用于调用 LokToken 模型 API 的访问凭证。密钥创建后只会完整展示一次，请妥善保存。</p></div>
         <div class="field"><label for="portal-key-name">名称</label><input id="portal-key-name" name="name" required maxlength="120" placeholder="例如：生产服务"></div>
         <div class="field"><label for="portal-key-project">归属项目</label><select id="portal-key-project" name="project_id">${portalState.projects.map((project) => `<option value="${project.id}" ${project.id === activeProjectId() ? "selected" : ""}>${escapeHtml(project.name)} · ${escapeHtml(project.slug)}</option>`).join("")}</select></div>
         <div class="key-dialog-section"><div><strong>额度与有效期</strong><span>留空表示不限制</span></div></div>
@@ -1028,15 +1052,11 @@ function keyDialog() {
     try {
       const result = await portalApi("/portal/api-keys", { method: "POST", body: JSON.stringify(data) });
       openPortalDialog("API Key 创建成功", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>完整密钥只展示这一次。关闭窗口后将无法再次查看。</span></div><div class="field"><label>完整 API Key</label><div class="secret-box mono" id="portal-key-secret">${escapeHtml(result.key)}</div></div><div class="secret-actions"><button class="secondary-button" id="portal-copy-key"><i data-lucide="copy"></i><span>复制完整 Key</span></button></div><p class="dialog-copy">复制后可直接回到 LokSystem 模型管理。系统会预选 LokToken，粘贴密钥后自动读取可用模型。</p></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后配置</button><button class="primary-button" type="button" id="portal-configure-loksystem"><i data-lucide="settings-2"></i><span>复制并前往 LokSystem</span></button></div>`);
-      document.getElementById("portal-copy-key").addEventListener("click", async () => { await navigator.clipboard.writeText(result.key); portalToast("密钥已复制"); });
-      document.getElementById("portal-configure-loksystem").addEventListener("click", async () => {
-        try {
-          await navigator.clipboard.writeText(result.key);
-          window.location.href = "loksystem://add-provider?platform=LokToken";
-        } catch (_) {
-          portalToast("无法复制密钥，请手动复制后在 LokSystem 中配置。", true);
-        }
-      });
+       document.getElementById("portal-copy-key").addEventListener("click", async () => { await navigator.clipboard.writeText(result.key); portalToast("密钥已复制"); });
+       const integrationButton = document.getElementById("portal-configure-loksystem");
+       if (integrationButton) { integrationButton.textContent = "完成"; integrationButton.removeAttribute("id"); integrationButton.dataset.close = ""; integrationButton.querySelector("i")?.remove(); }
+       const integrationCopy = document.querySelector("#portal-dialog-content .dialog-copy");
+       if (integrationCopy) integrationCopy.textContent = "请将密钥保存到你的应用或服务端密钥管理系统中。";
       await loadKeys();
     } catch (error) { portalToast(error.message, true); }
   });
@@ -1205,7 +1225,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.close !== undefined) closePortalDialog();
     if (target.dataset.go) switchPortalView(target.dataset.go);
     if (target.dataset.action === "create-key") keyDialog();
-    if (target.dataset.action === "open-loksystem-model") window.location.href = "loksystem://add-provider?platform=LokToken";
     if (target.dataset.action === "model-create-key") { closePortalDialog(); await switchPortalView("keys"); keyDialog(); }
     if (target.dataset.action === "key-columns") keyColumnsDialog();
     if (target.dataset.action === "create-payment") paymentDialog().catch((error) => portalToast(error.message, true));
