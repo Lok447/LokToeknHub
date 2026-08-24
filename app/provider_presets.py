@@ -2,7 +2,6 @@
 
 from dataclasses import asdict, dataclass
 
-from .config import get_settings
 
 
 DEEPSEEK_PRICING_URL = "https://api-docs.deepseek.com/zh-cn/quick_start/pricing"
@@ -159,12 +158,15 @@ def deepseek_model(
     cache_miss_peak: int,
     output_off_peak: int,
     output_peak: int,
+    *,
+    modalities: tuple[str, ...] = ("text",),
+    capabilities: tuple[str, ...] = ("对话", "推理", "代码"),
+    summary: str = "DeepSeek V4 系列，支持长上下文对话、推理与代码生成。",
 ) -> ProviderModelPreset:
-    """Build DeepSeek V4 metadata, converting the provider's USD prices to CNY."""
-    rate = get_settings().usd_to_cny_rate
+    """Build DeepSeek V4 metadata from the official CNY per-million-token list."""
 
-    def cny(usd_micros: int) -> int:
-        return round(usd_micros * rate)
+    def cny(cny_micros: int) -> int:
+        return cny_micros
 
     # The platform's default billable price uses the official uncached, off-peak
     # rate. Operators can raise it for margin, but the account ledger stays CNY.
@@ -173,9 +175,9 @@ def deepseek_model(
     catalog_metadata = {
         "display_name": display_name,
         "provider": "DeepSeek",
-        "summary": "DeepSeek V4 系列，支持长上下文对话、推理与代码生成。",
-        "capabilities": ["对话", "推理", "代码"],
-        "modalities": ["text"],
+        "summary": summary,
+        "capabilities": list(capabilities),
+        "modalities": list(modalities),
         "supported_parameters": ["stream", "temperature", "max_tokens"],
         "context_window": "1M",
         "model_version": version,
@@ -187,8 +189,6 @@ def deepseek_model(
         "source": "DeepSeek official pricing",
         "source_url": DEEPSEEK_PRICING_URL,
         "currency": "CNY",
-        "source_currency": "USD",
-        "exchange_rate_usd_to_cny": rate,
         "unit": "per_1m_tokens",
         "version": version,
         "effective_date": "2026-08-18",
@@ -229,6 +229,7 @@ def catalogue_model(
     summary: str = "OpenAI 兼容模型候选，需完成供应商检测后发布。",
     model_version: str = "",
     context_window: str = "按供应商配置",
+    max_output_tokens: int = 0,
 ) -> ProviderModelPreset:
     """Build a catalog-only candidate without inventing provider pricing."""
     pricing_source = PROVIDER_PRICING_SOURCES.get(provider)
@@ -252,7 +253,7 @@ def catalogue_model(
         display_name=display_name,
         model_version=model_version,
         context_window=context_window,
-        max_output_tokens=0,
+        max_output_tokens=max_output_tokens,
         catalog_metadata={
             "display_name": display_name,
             "provider": provider,
@@ -261,6 +262,7 @@ def catalogue_model(
             "modalities": list(modalities),
             "supported_parameters": ["stream", "temperature", "max_tokens"] if api_type == "chat_completions" else [],
             "context_window": context_window,
+            "max_output_tokens": max_output_tokens,
             "model_version": model_version,
             "api_type": api_type,
             "catalog_status": "curated_candidate",
@@ -395,10 +397,24 @@ PROVIDER_PRESETS = (
         base_url="https://api.deepseek.com/v1",
         api_key_env="DEEPSEEK_API_KEY",
         models=(
-            deepseek_model("deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek-V4-Flash-0731", 7_000, 14_000, 220_000, 440_000, 660_000, 1_320_000),
-            deepseek_model("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek-V4-Pro-0813", 22_000, 44_000, 660_000, 1_320_000, 1_980_000, 3_960_000),
+            deepseek_model("deepseek-v4-flash", "DeepSeek V4 Flash", "DeepSeek-V4-Flash-0731", 50_000, 100_000, 1_500_000, 3_000_000, 4_500_000, 9_000_000),
+            deepseek_model(
+                "deepseek-v4-flash-vision-exp",
+                "DeepSeek V4 Flash Vision Experimental",
+                "DeepSeek-V4-Flash-Vision-Exp",
+                50_000,
+                100_000,
+                1_500_000,
+                3_000_000,
+                4_500_000,
+                9_000_000,
+                modalities=("text", "image"),
+                capabilities=("图像理解", "视觉问答", "对话"),
+                summary="DeepSeek V4 实验性视觉模型，支持文本与图像输入。",
+            ),
+            deepseek_model("deepseek-v4-pro", "DeepSeek V4 Pro", "DeepSeek-V4-Pro-0813", 150_000, 300_000, 4_500_000, 9_000_000, 13_500_000, 27_000_000),
         ),
-        note="已按配置汇率将 DeepSeek 官网价格换算为人民币；默认平台价格采用未命中缓存、低峰档。",
+        note="已按 DeepSeek 官网人民币价格维护；默认平台价格采用未命中缓存、低峰档。Vision Experimental 为实验性视觉候选，需单独核验目录和调用能力。",
     ),
     ProviderPreset(
         id="qwen",

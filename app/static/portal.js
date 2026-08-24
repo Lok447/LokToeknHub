@@ -80,6 +80,14 @@ function formatTokenPricePerMillion(microsPerThousand) {
   return formatMoney(Number(microsPerThousand || 0) * 1000);
 }
 
+function formatMaxOutputTokens(value, fallback = "按上游配置") {
+  const tokens = Number(value || 0);
+  if (!tokens) return fallback;
+  if (tokens >= 1_000_000) return `${tokens / 1_000_000}M`;
+  const kiloTokens = tokens / 1_000;
+  return `${Number.isInteger(kiloTokens) ? kiloTokens : kiloTokens.toFixed(1)}K`;
+}
+
 function formatDate(value) {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -702,7 +710,7 @@ function modelDetailDialog(modelName) {
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
     <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${item.max_output_tokens ? `${formatNumber(item.max_output_tokens)} Token` : "按上游配置"}</strong></div><div><span>调用协议</span><strong>${escapeHtml(gatewayCapabilitySummary(item))}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(item.max_output_tokens))}</strong></div><div><span>调用协议</span><strong>${escapeHtml(gatewayCapabilitySummary(item))}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
   </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);

@@ -47,7 +47,7 @@ python scripts/cleanup_uat_data.py --execute
 
 生产环境不要使用该脚本；生产数据应通过环境隔离、数据库权限和正式迁移管理。
 
-管理台的 DeepSeek 预设已提供 `deepseek-v4-flash` 与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
+管理台的 DeepSeek 预设已提供 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`（实验性视觉候选）与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型；视觉候选还需单独核验当前目录和官方价格。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
 
 真实模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
 
@@ -133,7 +133,7 @@ POST /admin/models/health-check
 
 请求进入网关前会依据模型能力契约校验任务类型和最大输出 Token，并按服务商配置执行安全的参数别名转换（例如 `max_completion_tokens` 转为上游兼容的 `max_tokens`）。模型详情和 `/v1/models` 会返回协议、流式、鉴权、支持参数和最大输出限制，便于 SDK 在客户端提前校验；不满足契约的图像/视频请求会明确返回待适配错误，不会被当作聊天请求转发。
 
-DeepSeek V4 模板会保存官网美元价格按 `TOKEN_USD_TO_CNY_RATE`（默认 7.2）换算后的人民币参考价，并以未命中缓存、低峰价格作为平台默认计费价；运营仍可在定价操作中调整人民币售价。供应商密钥可在管理控制台加密录入，或通过 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`、`ARK_API_KEY` 注入。图像和视频模型当前先进入候选目录，在 `/v1/images/generations` 与视频任务适配器、独立计费规则上线前会保持“待完善”，不会被错误地暴露为聊天模型。
+DeepSeek V4 模板按官网人民币价格保存参考价，并以未命中缓存、低峰价格作为平台默认计费价；运营仍可在定价操作中调整人民币售价。供应商密钥可在管理控制台加密录入，或通过 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY`、`ARK_API_KEY` 注入。图像和视频模型当前先进入候选目录，在 `/v1/images/generations` 与视频任务适配器、独立计费规则上线前会保持“待完善”，不会被错误地暴露为聊天模型。
 
 批量导入仅在服务端读取环境变量中的上游密钥；浏览器、数据库和用户中心均不会接触密钥明文。每个公开模型的默认 Primary 渠道可在“渠道”中继续扩展备用上游、优先级、权重和独立健康检查。用户中心只展示 TOKEN 的公开模型名称和价格。
 

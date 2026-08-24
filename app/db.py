@@ -366,19 +366,33 @@ def seed_provider_catalogue() -> None:
                             current_metadata = decoded_metadata if isinstance(decoded_metadata, dict) else {}
                         except (TypeError, ValueError, json.JSONDecodeError):
                             current_metadata = {}
+                    previous_pricing = {}
+                    if existing.official_pricing_json:
+                        try:
+                            decoded_pricing = json.loads(existing.official_pricing_json)
+                            previous_pricing = decoded_pricing if isinstance(decoded_pricing, dict) else {}
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            previous_pricing = {}
+                    # Migrate the original DeepSeek USD-converted seed once. Do
+                    # not overwrite prices that an operator has subsequently
+                    # edited in the pricing workflow.
+                    legacy_deepseek_pricing = (
+                        current_metadata.get("provider") == "DeepSeek"
+                        and previous_pricing.get("source_currency") == "USD"
+                    )
                     if preset_model.catalog_metadata:
                         current_metadata.update(preset_model.catalog_metadata)
                         existing.catalog_metadata_json = json.dumps(current_metadata, ensure_ascii=False)
                     if preset_model.official_pricing:
                         existing.official_pricing_json = json.dumps(preset_model.official_pricing, ensure_ascii=False)
-                    if existing.input_price_micros_per_1k <= 0 and preset_model.platform_input_price_micros_per_1k > 0:
+                    if (legacy_deepseek_pricing or existing.input_price_micros_per_1k <= 0) and preset_model.platform_input_price_micros_per_1k > 0:
                         existing.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k
-                    if existing.output_price_micros_per_1k <= 0 and preset_model.platform_output_price_micros_per_1k > 0:
+                    if (legacy_deepseek_pricing or existing.output_price_micros_per_1k <= 0) and preset_model.platform_output_price_micros_per_1k > 0:
                         existing.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k
                     for channel in db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == existing.id)).all():
-                        if not channel.provider_input_cost_micros_per_1k:
+                        if legacy_deepseek_pricing or not channel.provider_input_cost_micros_per_1k:
                             channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
-                        if not channel.provider_output_cost_micros_per_1k:
+                        if legacy_deepseek_pricing or not channel.provider_output_cost_micros_per_1k:
                             channel.provider_output_cost_micros_per_1k = preset_model.platform_output_price_micros_per_1k
                     continue
                 record = ModelConfig(

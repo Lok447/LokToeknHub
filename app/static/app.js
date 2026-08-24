@@ -272,6 +272,63 @@ function modelTypeBadge(item) {
   return `<span class="badge ${kind}">${label}</span>`;
 }
 
+function modelTypeLabels(item) {
+  const type = modelApiType(item);
+  const modalities = item.catalog_metadata?.modalities || [];
+  if (type === "images_generations") return ["图像生成"];
+  if (type === "video_generations") return ["视频生成"];
+  if (type.startsWith("audio_") || modalities.includes("audio")) return ["语音"];
+  const labels = [];
+  if (modalities.includes("text") || !modalities.length) labels.push("文本");
+  if (modalities.includes("image")) labels.push("图像");
+  if (modalities.includes("video")) labels.push("视频");
+  return labels.length ? labels : ["文本"];
+}
+
+function modelPriceText(value) {
+  return Number(value || 0) > 0 ? formatTokenPricePerMillion(value) : "待核价";
+}
+
+function formatMaxOutputTokens(value, fallback = "按上游配置") {
+  const tokens = Number(value || 0);
+  if (!tokens) return fallback;
+  if (tokens >= 1_000_000) return `${tokens / 1_000_000}M`;
+  const kiloTokens = tokens / 1_000;
+  return `${Number.isInteger(kiloTokens) ? kiloTokens : kiloTokens.toFixed(1)}K`;
+}
+
+function modelCardIcon(item) {
+  if (modelApiType(item) === "images_generations" || (item.catalog_metadata?.modalities || []).includes("image")) return "image";
+  if (modelApiType(item) === "video_generations" || (item.catalog_metadata?.modalities || []).includes("video")) return "video";
+  if ((item.catalog_metadata?.capabilities || []).some((value) => String(value).includes("推理"))) return "brain-circuit";
+  return "message-square-text";
+}
+
+function modelAdminDetailDialog(modelId) {
+  const item = state.models.find((model) => String(model.id) === String(modelId));
+  if (!item) return;
+  const metadata = item.catalog_metadata || {};
+  const pricing = item.official_pricing || {};
+  const profile = metadata.gateway_profile || {};
+  const parameterTags = (metadata.supported_parameters || []).map((value) => `<span>${escapeHtml(value)}</span>`).join("") || '<span class="empty">按上游配置</span>';
+  const capabilityTags = (metadata.capabilities || []).map((value) => `<span>${escapeHtml(value)}</span>`).join("") || '<span class="empty">待补充</span>';
+  const priceRows = pricing.off_peak || pricing.peak ? `
+    <div class="admin-model-price-table"><div><span>价格时段</span><span>缓存命中输入</span><span>未命中输入</span><span>输出</span></div>
+      ${["off_peak", "peak"].filter((period) => pricing[period]).map((period) => `<div><strong>${period === "off_peak" ? "低峰" : "高峰"}</strong><span>${modelPriceText(pricing[period].input_cache_hit_micros ? Math.round(pricing[period].input_cache_hit_micros / 1000) : 0)}</span><span>${modelPriceText(pricing[period].input_cache_miss_micros ? Math.round(pricing[period].input_cache_miss_micros / 1000) : 0)}</span><span>${modelPriceText(pricing[period].output_micros ? Math.round(pricing[period].output_micros / 1000) : 0)}</span></div>`).join("")}
+    </div>` : '<p class="field-hint">暂无已核验的官方价格阶梯，当前平台价格需要人工确认。</p>';
+  openDialog(`模型详情 · ${metadata.display_name || item.public_name}`, `
+    <div class="dialog-body admin-model-detail-dialog">
+      <div class="admin-model-detail-heading"><div><span class="eyebrow">${escapeHtml(metadata.provider || "自定义")}</span><h3>${escapeHtml(metadata.display_name || item.public_name)}</h3><code>${escapeHtml(item.public_name)}</code></div>${modelPublicationBadge(item)}</div>
+      <p class="dialog-copy">${escapeHtml(metadata.summary || "暂无模型说明")}</p>
+      <div class="admin-model-detail-grid"><div><span>模型类型</span><strong>${escapeHtml(modelTypeLabels(item).join(" · "))}</strong></div><div><span>上下文长度</span><strong>${escapeHtml(metadata.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(metadata.max_output_tokens))}</strong></div><div><span>渠道健康</span><strong>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)}</strong></div><div><span>调用协议</span><strong>${escapeHtml(profile.protocol || modelApiType(item))}</strong></div><div><span>上游模型</span><strong class="mono">${escapeHtml(item.upstream_model)}</strong></div></div>
+      <section class="admin-model-detail-section"><h4>能力</h4><div class="admin-model-tags">${capabilityTags}</div></section>
+      <section class="admin-model-detail-section"><h4>支持参数</h4><div class="admin-model-tags">${parameterTags}</div></section>
+      <section class="admin-model-detail-section"><h4>官方价格参考</h4>${pricing.source_url ? `<a class="admin-model-source" href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(pricing.source || "查看官方价格")}</a>` : ""}${priceRows}</section>
+      ${item.publication_reasons?.length ? `<div class="callout warning"><strong>发布检查</strong><span>${escapeHtml(item.publication_reasons.join("；"))}</span></div>` : ""}
+    </div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button></div>
+  `);
+}
+
 function emptyRow(columns, label = "暂无数据") {
   return `<tr><td class="empty-row" colspan="${columns}">${escapeHtml(label)}</td></tr>`;
 }
@@ -709,15 +766,8 @@ function renderModels() {
   document.getElementById("model-result-count").textContent = state.modelProviderDetail ? `${state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail} · ${detailModels.length} 个模型` : `${providerCount} 家供应商 · ${models.length} 个模型`;
   if (!state.modelProviderDetail) return;
   const detailProvider = state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail;
-  const providerPreset = state.providerPresets.find((preset) => providerPresetDisplayName(preset) === detailProvider);
-  const pricedModel = providerPreset?.models?.find((item) => item.official_pricing?.source_url);
-  const sourceUrl = pricedModel?.official_pricing?.source_url || "";
-  const sourceLabel = pricedModel?.official_pricing?.source || "服务商官方文档";
-  const detailTypes = [...new Set(detailModels.map(modelCategory))].map((type) => type === "text" ? "文本" : type === "image" ? "图像" : type === "video" ? "视频" : "语音");
-  const maxOutput = detailModels.reduce((max, item) => Math.max(max, Number(item.catalog_metadata?.max_output_tokens || 0)), 0);
-  const context = detailModels.find((item) => item.catalog_metadata?.context_window)?.catalog_metadata?.context_window || "按上游配置";
-  document.getElementById("model-provider-overview").innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${providerLogo(detailProvider)}</span><div><span class="eyebrow">MODEL & PRICING</span><h3>${escapeHtml(detailProvider)}</h3><p>${escapeHtml(providerDescription(detailProvider))}</p></div></div><div class="model-provider-overview-source">${sourceUrl ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>查看${escapeHtml(sourceLabel)}</span></a>` : "<span>官方价格来源待配置</span>"}</div></div><div class="model-provider-overview-stats"><div><span>模型版本</span><strong>${detailModels.length} 个</strong></div><div><span>模型类型</span><strong>${escapeHtml(detailTypes.join(" · ") || "待分类")}</strong></div><div><span>上下文长度</span><strong>${escapeHtml(context)}</strong></div><div><span>最大输出</span><strong>${maxOutput ? `${formatNumber(maxOutput)} Token` : "按模型配置"}</strong></div></div>`;
-  document.getElementById("models-table").innerHTML = detailModels.length ? detailModels.map((item) => {
+  document.getElementById("model-provider-overview").innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${providerLogo(detailProvider)}</span><div><span class="eyebrow">MODEL & PRICING</span><h3>${escapeHtml(detailProvider)}</h3><p>${escapeHtml(providerDescription(detailProvider))}</p></div></div></div>`;
+  document.getElementById("models-table").innerHTML = detailModels.length ? `<div class="admin-model-card-grid">${detailModels.map((item) => {
     const publishBlocked = item.publication_state === "blocked" && !item.active;
     const publishLabel = item.active ? "下架" : publishBlocked ? "完善后上架" : "上架";
     const publishTitle = publishBlocked ? ` title="${escapeHtml(item.publication_reasons.join("；"))}" disabled` : "";
@@ -729,19 +779,19 @@ function renderModels() {
     const preflightButton = isSuperadmin() ? `<button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" ${chatCompatible ? "" : 'disabled title="等待统一调用适配器"'}><i data-lucide="flask-conical"></i><span>预检</span></button>` : "";
     const publishButton = `<button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}"${publishTitle}>${publishLabel}</button>`;
     const deleteButton = isSuperadmin() ? `<button class="table-button danger" data-action="delete-model" data-id="${item.id}" data-name="${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}"><i data-lucide="trash-2"></i><span>删除</span></button>` : "";
+    const metadata = item.catalog_metadata || {};
+    const capabilities = (metadata.capabilities || []).slice(0, 4).map((value) => `<span>${escapeHtml(value)}</span>`).join("");
+    const parameters = (metadata.supported_parameters || []).slice(0, 3).map((value) => escapeHtml(value)).join(" · ");
     return `
-    <tr>
-      <td><div class="primary-cell"><strong>${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}</strong><span class="secondary mono">${escapeHtml(item.public_name)}</span><span class="secondary mono">上游：${escapeHtml(item.upstream_model)}</span></div></td>
-      <td>${escapeHtml(provider)}</td>
-      <td>${modelTypeBadge(item)}</td>
-      <td>${chatCompatible ? formatTokenPricePerMillion(item.input_price_micros_per_1k) : "按任务计费"}</td>
-      <td>${chatCompatible ? formatTokenPricePerMillion(item.output_price_micros_per_1k) : "-"}</td>
-      <td>${formatNumber(item.channel_count)}</td>
-      <td><span class="channel-health"><strong>${formatNumber(item.healthy_channel_count)}</strong> / ${formatNumber(item.channel_count)}</span></td>
-      <td>${modelPublicationBadge(item)}</td>
-      <td class="align-right">${canOperate() ? `<div class="table-actions">${channelButton}${pricingButton}${preflightButton}${publishButton}${deleteButton}</div>` : '<span class="secondary">只读</span>'}</td>
-    </tr>
-  `; }).join("") : emptyRow(9, "没有符合筛选条件的模型");
+      <article class="admin-model-card">
+        <div class="admin-model-card-header"><span class="admin-model-icon">${providerLogo(provider, "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(metadata.display_name || item.public_name)}</h3><code>${escapeHtml(item.public_name)}</code></div><div>${modelPublicationBadge(item)}</div></div></div>
+        <div class="admin-model-card-meta">${modelTypeBadge(item)}<span>${escapeHtml(provider)}</span><span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)} 健康</span></div>
+        <div class="admin-model-tags">${capabilities || '<span class="empty">能力待补充</span>'}</div>
+        <div class="admin-model-card-stats"><div><span>上下文</span><strong>${escapeHtml(metadata.context_window || "按上游")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(metadata.max_output_tokens, "按上游"))}</strong></div><div><span>参数</span><strong title="${escapeHtml(parameters)}">${escapeHtml(parameters || "待补充")}</strong></div></div>
+        <div class="admin-model-card-pricing"><div><span>平台输入 / 1M</span><strong>${chatCompatible ? modelPriceText(item.input_price_micros_per_1k) : "按任务计费"}</strong></div><div><span>平台输出 / 1M</span><strong>${chatCompatible ? modelPriceText(item.output_price_micros_per_1k) : "按任务计费"}</strong></div></div>
+        <div class="admin-model-card-footer"><button class="text-button" type="button" data-action="model-detail-admin" data-id="${item.id}"><i data-lucide="file-text"></i><span>完整参数</span></button><div class="admin-model-actions">${canOperate() ? `${channelButton}${pricingButton}${preflightButton}${publishButton}${deleteButton}` : '<span class="secondary">只读</span>'}</div></div>
+      </article>
+    `; }).join("")}</div>` : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>没有符合筛选条件的模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
   icons();
 }
 
@@ -1453,6 +1503,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "account-detail") accountDetailDialog(target.dataset.id);
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
+    if (target.dataset.action === "model-detail-admin") modelAdminDetailDialog(target.dataset.id);
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
     if (target.dataset.action === "preflight-model") preflightModel(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "import-models") modelImportDialog().catch((error) => toast(error.message, true));

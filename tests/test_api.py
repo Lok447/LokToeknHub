@@ -48,6 +48,7 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
     init_db()
     expected = {
         "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
         "deepseek-v4-pro",
         "qwen/wan2.1-t2v-turbo",
         "glm/glm-4.5",
@@ -71,6 +72,10 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
         assert all(channel.active is False for channel in channels)
         metadata = {model.public_name: json.loads(model.catalog_metadata_json or "{}") for model in seeded}
         assert metadata["doubao/doubao-seedance-1-0-pro"]["api_type"] == "video_generations"
+        assert metadata["deepseek-v4-flash-vision-exp"]["provider"] == "DeepSeek"
+        assert metadata["deepseek-v4-flash-vision-exp"]["modalities"] == ["text", "image"]
+        assert metadata["deepseek-v4-flash-vision-exp"]["max_output_tokens"] == 384000
+        assert metadata["deepseek-v4-flash-vision-exp"]["model_version"] == "DeepSeek-V4-Flash-Vision-Exp"
 
 
 def test_qwen_preset_includes_sota_and_task_model_candidates() -> None:
@@ -1642,8 +1647,9 @@ async def test_provider_presets_install_disabled_candidates_without_credentials(
         assert presets.status_code == 200
         deepseek = next(item for item in presets.json()["data"] if item["id"] == "deepseek")
         assert deepseek["models"][0]["official_pricing"]["currency"] == "CNY"
-        assert deepseek["models"][0]["platform_input_price_micros_per_1k"] == 1584
-        assert deepseek["models"][0]["platform_output_price_micros_per_1k"] == 4752
+        assert deepseek["models"][0]["model_version"] == "DeepSeek-V4-Flash-0731"
+        assert deepseek["models"][0]["platform_input_price_micros_per_1k"] == 1500
+        assert deepseek["models"][0]["platform_output_price_micros_per_1k"] == 4500
         installed = await client.post(
             "/admin/provider-presets/deepseek/install",
             headers=admin_headers,
@@ -1653,7 +1659,7 @@ async def test_provider_presets_install_disabled_candidates_without_credentials(
         assert all(item["active"] is False for item in installed.json()["data"])
         listed = await client.get("/admin/models", headers=admin_headers)
         candidates = {item["public_name"]: item for item in listed.json()["data"] if item["public_name"].startswith("deepseek-v4-")}
-        assert set(candidates) == {"deepseek-v4-flash", "deepseek-v4-pro"}
+        assert set(candidates) == {"deepseek-v4-flash", "deepseek-v4-flash-vision-exp", "deepseek-v4-pro"}
         assert all(item["active"] is False for item in candidates.values())
         duplicate = await client.post(
             "/admin/provider-presets/deepseek/install",

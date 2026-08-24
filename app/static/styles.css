@@ -281,7 +281,55 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .model-catalog-toolbar .model-type-tabs { min-width: 0; justify-content: flex-start; }
 .model-catalog-toolbar .model-type-tabs button { white-space: nowrap; }
 .model-catalog-toolbar > span { color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
-.model-catalog-table { min-width: 1180px; }
+.admin-model-list { padding: 18px; }
+.admin-model-card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.admin-model-card { min-width: 0; display: grid; gap: 14px; padding: 17px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.admin-model-card:hover { border-color: var(--line-strong); box-shadow: 0 8px 24px rgba(17, 24, 32, .07); transform: translateY(-1px); }
+.admin-model-card-header { min-width: 0; display: flex; align-items: flex-start; gap: 11px; }
+.admin-model-icon { width: 36px; height: 36px; flex: 0 0 36px; display: grid; place-items: center; border-radius: 7px; color: #2856d8; background: var(--signal-soft); }
+.admin-model-icon svg { width: 18px; height: 18px; }
+.admin-model-logo-image { width: 24px; height: 24px; display: block; object-fit: contain; }
+.admin-model-card-title { min-width: 0; flex: 1; display: flex; justify-content: space-between; gap: 8px; }
+.admin-model-card-title h3 { margin: 0 0 4px; overflow: hidden; color: var(--ink); font-size: 14px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.admin-model-card-title code { display: block; overflow: hidden; color: var(--muted); font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.admin-model-card-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--muted); font-size: 10px; }
+.admin-model-health { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+.admin-model-health svg { width: 13px; height: 13px; color: var(--success); }
+.admin-model-tags { min-height: 24px; display: flex; flex-wrap: wrap; gap: 5px; }
+.admin-model-tags span { padding: 4px 7px; border-radius: 4px; color: #2856d8; background: var(--signal-soft); font-size: 9px; font-weight: 700; }
+.admin-model-tags span.empty { color: var(--muted); background: var(--surface-muted); font-weight: 500; }
+.admin-model-card-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--line); border-radius: 5px; }
+.admin-model-card-stats > div { min-width: 0; display: grid; gap: 5px; padding: 9px 10px; border-right: 1px solid var(--line); }
+.admin-model-card-stats > div:last-child { border-right: 0; }
+.admin-model-card-stats span, .admin-model-card-pricing span { color: var(--muted); font-size: 9px; }
+.admin-model-card-stats strong { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-model-card-pricing { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.admin-model-card-pricing > div { display: grid; gap: 4px; padding: 9px 10px; border-radius: 5px; background: var(--surface-soft); }
+.admin-model-card-pricing strong { color: var(--ink); font-size: 12px; }
+.admin-model-card-footer { display: grid; gap: 10px; padding-top: 2px; }
+.admin-model-card-footer > .text-button { justify-self: start; padding: 0; }
+.admin-model-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.admin-model-actions .table-button { min-height: 28px; padding: 0 8px; }
+.admin-model-detail-dialog { gap: 18px; }
+.admin-model-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.admin-model-detail-heading h3 { margin: 4px 0; color: var(--ink); font-size: 20px; }
+.admin-model-detail-heading code { color: var(--muted); font-size: 11px; }
+.admin-model-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--line); border-radius: 5px; }
+.admin-model-detail-grid > div { min-width: 0; display: grid; gap: 5px; padding: 12px 13px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.admin-model-detail-grid > div:nth-child(3n) { border-right: 0; }
+.admin-model-detail-grid > div:nth-last-child(-n + 3) { border-bottom: 0; }
+.admin-model-detail-grid span, .admin-model-detail-section h4 { color: var(--muted); font-size: 10px; font-weight: 700; }
+.admin-model-detail-grid strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-model-detail-section { display: grid; gap: 8px; }
+.admin-model-detail-section h4 { margin: 0; }
+.admin-model-source { width: fit-content; color: #2856d8; font-size: 11px; font-weight: 700; }
+.admin-model-price-table { overflow: hidden; border: 1px solid var(--line); border-radius: 5px; font-size: 10px; }
+.admin-model-price-table > div { display: grid; grid-template-columns: 1.1fr repeat(3, 1fr); }
+.admin-model-price-table > div > * { min-width: 0; padding: 9px 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.admin-model-price-table > div > *:last-child { border-right: 0; }
+.admin-model-price-table > div:last-child > * { border-bottom: 0; }
+.admin-model-price-table > div:first-child { color: var(--muted); background: var(--surface-soft); }
+.admin-model-price-table strong { color: var(--ink); }
 .admin-provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 18px; }
 .admin-provider-card { min-width: 0; min-height: 156px; display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: start; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--surface); text-align: left; transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
 .admin-provider-card:hover { border-color: var(--line-strong); box-shadow: 0 6px 18px rgba(17, 24, 32, .06); transform: translateY(-1px); }
@@ -341,11 +389,6 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .model-provider-overview-stats > div:last-child { border-right: 0; }
 .model-provider-overview-stats span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; }
 .model-provider-overview-stats strong { color: var(--ink); font-size: 14px; }
-.model-catalog-table th,
-.model-catalog-table td { padding: 12px 14px; }
-.model-catalog-table th:nth-child(1) { min-width: 235px; }
-.model-catalog-table th:nth-child(2) { min-width: 105px; }
-.model-catalog-table th:nth-child(9) { min-width: 295px; }
 
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; max-width: min(360px, calc(100vw - 44px)); padding: 13px 16px; border-radius: 5px; color: #fff; background: var(--accent); box-shadow: var(--shadow); opacity: 0; transform: translateY(12px); pointer-events: none; transition: 160ms ease; }
 .toast.show { opacity: 1; transform: translateY(0); }
@@ -359,6 +402,7 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .model-catalog-toolbar { grid-template-columns: minmax(280px, 1.4fr) minmax(180px, 1fr) 120px 105px auto; }
   .model-catalog-toolbar > span { grid-column: 1 / -1; }
   .admin-provider-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-model-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-provider-overview-main { align-items: flex-start; flex-direction: column; padding: 16px; }
   .model-provider-overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .model-provider-overview-stats > div:nth-child(2) { border-right: 0; }
@@ -405,6 +449,13 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .model-catalog-toolbar { grid-template-columns: 1fr; }
   .model-catalog-toolbar > span { grid-column: auto; }
   .admin-provider-grid { grid-template-columns: 1fr; padding: 12px; }
+  .admin-model-list { padding: 12px; }
+  .admin-model-card-grid { grid-template-columns: 1fr; }
+  .admin-model-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-model-detail-grid > div:nth-child(3n) { border-right: 1px solid var(--line); }
+  .admin-model-detail-grid > div:nth-child(2n) { border-right: 0; }
+  .admin-model-detail-grid > div:nth-last-child(-n + 3) { border-bottom: 1px solid var(--line); }
+  .admin-model-detail-grid > div:nth-last-child(-n + 2) { border-bottom: 0; }
 }
 
 @media (max-width: 440px) {

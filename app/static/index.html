@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=console-20260822-2">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260824-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=console-20260822-1" defer></script>
+  <script src="/static/app.js?v=console-20260824-4" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -120,7 +120,7 @@
               <span id="model-result-count">共 0 个模型</span><button class="primary-button compact-provider-button" id="admin-model-create-inline" type="button" data-action="create-model" hidden><i data-lucide="plus"></i><span>添加模型</span></button>
             </div>
             <div class="admin-provider-grid" id="admin-provider-grid"></div>
-            <div class="model-provider-overview" id="model-provider-overview" hidden></div><div class="table-wrap" id="admin-model-list" hidden><table class="model-catalog-table"><thead><tr><th>公开模型</th><th>服务商</th><th>类型</th><th>平台输入 / 1M</th><th>平台输出 / 1M</th><th>渠道</th><th>健康</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div>
+            <div class="model-provider-overview" id="model-provider-overview" hidden></div><div class="admin-model-list" id="admin-model-list" hidden><div id="models-table"></div></div>
           </section>
         </section>
 
