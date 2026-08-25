@@ -725,6 +725,40 @@ async def test_registered_user_can_complete_first_call_journey() -> None:
 
 
 @pytest.mark.asyncio
+async def test_portal_model_test_call_uses_selected_key_and_records_billable_usage() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "model-test-user", "name": "Model Test User", "password": "correct-horse"},
+        )
+        assert registered.status_code == 200
+        portal_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+        key = await client.post("/portal/api-keys", headers=portal_headers, json={"name": "marketplace-test"})
+        assert key.status_code == 200
+        topped_up = await client.post(
+            f"/admin/accounts/{registered.json()['account']['id']}/balance",
+            headers=admin_headers,
+            json={"amount_micros": 100_000, "idempotency_key": "model-test-topup"},
+        )
+        assert topped_up.status_code == 200
+        result = await client.post(
+            "/portal/model-tests",
+            headers=portal_headers,
+            json={"model": "lok-chat", "api_key_id": key.json()["id"], "prompt": "用一句话介绍自己", "max_tokens": 64},
+        )
+        records = await client.get("/portal/usage/records", headers=portal_headers)
+    assert result.status_code == 200
+    assert result.json()["model"] == "lok-chat"
+    assert result.json()["amount_micros"] > 0
+    assert records.status_code == 200
+    assert records.json()["data"][0]["model"] == "lok-chat"
+    assert records.json()["data"][0]["status"] == "success"
+@pytest.mark.asyncio
 async def test_portal_registration_and_login() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -814,7 +848,23 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'id="admin-model-page-back"' in admin_page
         assert 'id="admin-model-create-inline"' not in admin_page
         assert 'id="model-marketplace-provider-back"' in portal_page
-        assert "portal-provider-card" in portal_script
+        assert 'class="panel model-catalog-panel portal-model-catalog-panel"' in portal_page
+        assert 'class="model-catalog-toolbar"' in portal_page
+        assert 'class="model-type-tabs" id="model-marketplace-tabs"' in portal_page
+        assert 'id="portal-provider-grid"' in portal_page
+        assert 'id="portal-provider-overview"' in portal_page
+        assert 'id="portal-model-list"' in portal_page
+        assert 'id="model-marketplace-provider-filter"' in portal_page
+        assert 'id="model-marketplace-health"' in portal_page
+        assert 'id="model-marketplace-sort"' in portal_page
+        assert 'id="model-compare-dock"' in portal_page
+        assert "admin-provider-card" in portal_script
+        assert "admin-model-card portal-model-card" in portal_script
+        assert "modelCompareDialog" in portal_script
+        assert "最多同时对比 3 个模型" in portal_script
+        assert "统一调用地址" in portal_script
+        assert "/portal/model-tests" in portal_script
+        assert "本次测试会消耗额度" in portal_script
         assert "admin-provider-card" in admin_script
         assert "更多系列 / 厂商查询" in admin_script
         assert "更多系列 / 厂商查询" in portal_script
@@ -1160,7 +1210,8 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken 用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260825-1"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260826-1"' in portal_page.text
+        assert 'href="/static/portal.css?v=portal-20260826-2"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
@@ -1826,6 +1877,36 @@ async def test_provider_connection_syncs_entire_preset_and_publishes_callable_te
             channel = db.query(ModelChannel).join(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen3.8-max").one()
             assert channel.provider_connection_id == connection.id
             assert db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen3.8-max").count() == 1
+            # Legacy or manually added preset models may predate the explicit
+            # channel-to-connection link and must still count for the provider.
+            channel.provider_connection_id = None
+            post_sync_model = ModelConfig(
+                public_name="qwen/post-sync-model",
+                upstream_model="post-sync-model",
+                provider_base_url=connection.provider_base_url,
+                input_price_micros_per_1k=1200,
+                output_price_micros_per_1k=3600,
+                catalog_metadata_json=json.dumps({"provider": "Qwen", "api_type": "chat_completions"}),
+                active=True,
+            )
+            db.add(post_sync_model)
+            db.flush()
+            db.add(ModelChannel(
+                model_config_id=post_sync_model.id,
+                provider_connection_id=connection.id,
+                name="Qwen post-sync channel",
+                upstream_model=post_sync_model.upstream_model,
+                provider_base_url=connection.provider_base_url,
+                encrypted_api_key=connection.encrypted_api_key,
+                active=True,
+                status="healthy",
+                health_source="provider",
+            ))
+            db.commit()
+
+        refreshed_connections = await client.get("/admin/provider-connections", headers={"X-Admin-Token": "test-admin"})
+        refreshed_qwen = next(item for item in refreshed_connections.json()["data"] if item["preset_id"] == "qwen")
+        assert refreshed_qwen["callable_model_count"] == 11
 
 
 @pytest.mark.asyncio

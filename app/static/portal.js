@@ -13,7 +13,7 @@ const portalState = {
   keyFilters: { search: "", status: "" },
   keyColumns: { name: true, key: true, usage: true, expires: true, "last-used": true, status: true, created: true },
   orders: [],
-  marketplace: { query: "", modality: "all", provider: "" },
+  marketplace: { query: "", modality: "all", provider: "", providerFilter: "", health: "all", sort: "default", compare: [] },
 };
 
 const portalTitles = { overview: "用户概览", models: "模型广场", quota: "额度管理", keys: "密钥管理", usage: "请求记录", orders: "订单管理", redeem: "兑换福利" };
@@ -606,32 +606,76 @@ async function loadKeys() {
 }
 
 async function loadModels() {
-  const result = await portalApi("/portal/models");
+  const [result, keys] = await Promise.all([
+    portalApi("/portal/models"),
+    portalApi("/portal/api-keys"),
+  ]);
   portalState.models = result.data;
+  portalState.keys = keys.data;
+  portalState.marketplace.compare = portalState.marketplace.compare.filter((name) => portalState.models.some((item) => item.public_name === name));
   renderModelMarketplace();
 }
 
 const marketplaceFilters = [
-  ["all", "全部"], ["text", "文本"], ["reasoning", "推理"], ["code", "代码"], ["image", "图像"], ["video", "视频"], ["tool", "工具调用"],
+  ["all", "全部", "layout-grid"], ["text", "文本", "message-square-text"], ["image", "图像", "image"], ["video", "视频", "video"], ["audio", "语音", "audio-lines"],
 ];
 
 function modelApiType(item) {
   return item.api_type || "chat_completions";
 }
 
+function marketplaceModelCategory(item) {
+  const type = modelApiType(item);
+  const modalities = item.modalities || [];
+  if (type === "images_generations") return "image";
+  if (type === "video_generations") return "video";
+  if (type.startsWith("audio_") || modalities.includes("audio")) return "audio";
+  return "text";
+}
+
+function marketplaceModelTypeBadge(item) {
+  const type = modelApiType(item);
+  const modalities = item.modalities || [];
+  if (type === "images_generations") return '<span class="badge warning">图像生成</span>';
+  if (type === "video_generations") return '<span class="badge neutral">视频生成</span>';
+  if (type.startsWith("audio_") || modalities.includes("audio")) return '<span class="badge neutral">语音模型</span>';
+  return `<span class="badge success">${modalities.includes("image") ? "多模态对话" : "文本对话"}</span>`;
+}
+
 function modelProtocolLabel(item) {
   if (modelApiType(item) === "images_generations") return "图像生成接口";
   if (modelApiType(item) === "video_generations") return "视频异步任务接口";
-  return "聊天完成接口";
+  return "对话接口（Chat Completions）";
+}
+
+function modelEndpoint(item) {
+  if (modelApiType(item) === "images_generations") return `${window.location.origin}/v1/images/generations`;
+  if (modelApiType(item) === "video_generations") return `${window.location.origin}/v1/videos/generations`;
+  return `${window.location.origin}/v1/chat/completions`;
 }
 
 function taskPriceLabel(item) {
   return modelApiType(item) === "video_generations" ? "每次视频生成" : "每张图片生成";
 }
 
-function modelPriceMarkup(item) {
-  if (modelApiType(item) !== "chat_completions") return `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div><div><span>调用方式</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div>`;
-  return `<div><span>输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div>`;
+function modelPriceValue(item) {
+  if (modelApiType(item) !== "chat_completions") return Number(item.task_price_micros || 0);
+  return Number(item.input_price_micros_per_1k || 0) * 1000;
+}
+
+function modelContextTokens(item) {
+  const value = String(item.context_window || "").trim().toUpperCase();
+  const matched = value.match(/^([\d.]+)\s*([KM])$/);
+  if (!matched) return 0;
+  return Number(matched[1]) * (matched[2] === "M" ? 1_000_000 : 1_000);
+}
+
+function modelVersionLabel(item) {
+  return item.model_version || "当前版本";
+}
+
+function modelMaxOutputLabel(item) {
+  return modelApiType(item) === "chat_completions" ? formatMaxOutputTokens(item.max_output_tokens) : "按任务配置";
 }
 
 function modelIcon(item) {
@@ -654,13 +698,13 @@ function portalProviderDescription(provider) {
   return "来自生态合作伙伴的模型系列，按统一接口接入并由平台集中管理。";
 }
 
-function portalProviderLogo(provider) {
+function portalProviderLogo(provider, className = "provider-logo-image") {
   const name = String(provider || "").toLocaleLowerCase();
   const slug = name.includes("deepseek") ? "deepseek" : name.includes("qwen") || name.includes("通义") ? "qwen" : name.includes("智谱") || name.includes("zhipu") || name.includes("glm") ? "glm-local" : name.includes("kimi") ? "kimi-local" : name.includes("moonshot") ? "moonshotai" : name.includes("minimax") ? "minimax" : name.includes("doubao") || name.includes("豆包") ? "doubao-local" : name.includes("字节") ? "bytedance" : "";
   const color = { deepseek: "4D6BFE", qwen: "6155F5", moonshotai: "4C8BF5", minimax: "FF5B7F", bytedance: "2A5CAA" }[slug] || "59636D";
   const source = { "glm-local": "/static/provider-logos/glm.png", "kimi-local": "/static/provider-logos/kimi.ico", "doubao-local": "/static/provider-logos/doubao.png" }[slug] || `https://cdn.simpleicons.org/${slug}/${color}`;
   const initial = escapeHtml(String(provider || "自定义").slice(0, 1).toUpperCase());
-  return slug ? `<img class="provider-logo-image" src="${source}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${initial}</span>` : initial;
+  return slug ? `<img class="${className}" src="${source}" alt="${escapeHtml(provider)} Logo" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false"><span hidden>${initial}</span>` : initial;
 }
 
 const marketplaceProviderOrder = ["deepseek", "qwen", "glm", "zhipu", "智谱", "kimi", "minimax", "doubao", "字节"];
@@ -670,49 +714,122 @@ function marketplaceProviderRank(provider) {
   return index < 0 ? Number.MAX_SAFE_INTEGER : index;
 }
 
-function matchesMarketplaceModel(item) {
+function matchesMarketplaceModelWithoutModality(item) {
   const query = portalState.marketplace.query.trim().toLocaleLowerCase();
-  const terms = [item.public_name, item.display_name, item.provider, item.summary, ...(item.capabilities || [])].join(" ").toLocaleLowerCase();
-  return (!query || terms.includes(query)) && (portalState.marketplace.modality === "all" || (item.modalities || []).includes(portalState.marketplace.modality));
+  const terms = [item.public_name, item.display_name, item.provider, item.model_version, item.summary, ...(item.capabilities || [])].join(" ").toLocaleLowerCase();
+  const matchesHealth = portalState.marketplace.health === "all" || (portalState.marketplace.health === "healthy" ? item.health_status === "healthy" : item.health_status !== "healthy");
+  const matchesProvider = !portalState.marketplace.providerFilter || (item.provider || "第三方模型") === portalState.marketplace.providerFilter;
+  return (!query || terms.includes(query)) && matchesHealth && matchesProvider;
+}
+
+function matchesMarketplaceModel(item) {
+  return matchesMarketplaceModelWithoutModality(item)
+    && (portalState.marketplace.modality === "all" || marketplaceModelCategory(item) === portalState.marketplace.modality);
+}
+
+function sortMarketplaceModels(items) {
+  const sorted = [...items];
+  if (portalState.marketplace.sort === "price-asc") sorted.sort((a, b) => modelPriceValue(a) - modelPriceValue(b) || String(a.public_name).localeCompare(String(b.public_name)));
+  if (portalState.marketplace.sort === "context-desc") sorted.sort((a, b) => modelContextTokens(b) - modelContextTokens(a) || String(a.public_name).localeCompare(String(b.public_name)));
+  if (portalState.marketplace.sort === "name-asc") sorted.sort((a, b) => String(a.display_name || a.public_name).localeCompare(String(b.display_name || b.public_name)));
+  return sorted;
+}
+
+const featuredProviderNames = ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"];
+
+function isFeaturedProvider(provider) {
+  const name = String(provider || "").toLocaleLowerCase();
+  return featuredProviderNames.some((candidate) => name.includes(candidate));
+}
+
+function marketplaceProviderTypeCounts(items) {
+  const labels = { text: "文本", image: "图像", video: "视频", audio: "语音" };
+  return [...new Set(items.map(marketplaceModelCategory))].map((type) => `${labels[type]} ${items.filter((item) => marketplaceModelCategory(item) === type).length}`).join(" · ");
+}
+
+function populateMarketplaceProviderFilter() {
+  const select = document.getElementById("model-marketplace-provider-filter");
+  const providers = [...new Set(portalState.models.map((item) => item.provider || "第三方模型"))].sort((a, b) => marketplaceProviderRank(a) - marketplaceProviderRank(b) || a.localeCompare(b));
+  select.innerHTML = '<option value="">全部服务商</option>' + providers.map((provider) => `<option value="${escapeHtml(provider)}">${escapeHtml(provider)}</option>`).join("");
+  select.value = portalState.marketplace.providerFilter;
+}
+
+function renderMarketplaceModelCard(item) {
+  const selected = portalState.marketplace.compare.includes(item.public_name);
+  const parameters = (item.supported_parameters || []).slice(0, 3).join(" · ");
+  const capabilities = (item.capabilities || []).slice(0, 4).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("");
+  const chatCompatible = modelApiType(item) === "chat_completions";
+  return `<article class="admin-model-card portal-model-card ${selected ? "is-compared" : ""}">
+    <div class="admin-model-card-header"><span class="admin-model-icon">${portalProviderLogo(item.provider || "第三方模型", "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(item.display_name || item.public_name)}</h3><div class="admin-model-version"><span>模型版本</span><strong>${escapeHtml(modelVersionLabel(item))}</strong></div><code>调用 ID：${escapeHtml(item.public_name)}</code></div><span class="badge success">可调用</span></div></div>
+    <div class="admin-model-card-meta">${marketplaceModelTypeBadge(item)}<span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.active_channel_count)} 健康</span></div>
+    <div class="admin-model-tags">${capabilities || '<span class="empty">能力待补充</span>'}</div>
+    <div class="admin-model-card-stats"><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(modelMaxOutputLabel(item))}</strong></div><div><span>参数</span><strong title="${escapeHtml(parameters)}">${escapeHtml(parameters || "按任务协议")}</strong></div></div>
+    <div class="admin-model-card-pricing">${chatCompatible ? `<div><span>平台输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>平台输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div>` : `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div><div><span>调用方式</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div>`}</div>
+    <div class="admin-model-card-footer"><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}"><i data-lucide="file-text"></i><span>完整参数</span></button><div class="admin-model-actions"><button class="table-button ${selected ? "selected" : ""}" type="button" data-model-compare="${escapeHtml(item.public_name)}" aria-pressed="${selected}"><i data-lucide="columns-2"></i><span>${selected ? "已选对比" : "加入对比"}</span></button><button class="table-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制 ID</span></button></div></div>
+  </article>`;
+}
+
+function renderModelCompareDock() {
+  const target = document.getElementById("model-compare-dock");
+  const selected = portalState.marketplace.compare.map((name) => portalState.models.find((item) => item.public_name === name)).filter(Boolean);
+  target.hidden = !selected.length;
+  if (!selected.length) {
+    target.innerHTML = "";
+    return;
+  }
+  target.innerHTML = `<div><span>模型对比</span><div class="model-compare-chips">${selected.map((item) => `<span>${escapeHtml(item.display_name || item.public_name)}<button type="button" data-model-compare="${escapeHtml(item.public_name)}" title="移出对比" aria-label="将 ${escapeHtml(item.display_name || item.public_name)} 移出对比"><i data-lucide="x"></i></button></span>`).join("")}</div><small>${selected.length} / 3，至少选择两个模型</small></div><div><button class="secondary-button" type="button" data-model-compare-clear><i data-lucide="trash-2"></i><span>清空</span></button><button class="primary-button" type="button" data-model-compare-open ${selected.length < 2 ? "disabled" : ""}><i data-lucide="columns-2"></i><span>开始对比</span></button></div>`;
 }
 
 function renderModelMarketplace() {
-  const visibleModels = portalState.models.filter(matchesMarketplaceModel);
+  const visibleModels = sortMarketplaceModels(portalState.models.filter(matchesMarketplaceModel));
+  const filteredModels = portalState.models.filter(matchesMarketplaceModelWithoutModality);
   const tabContainer = document.getElementById("model-marketplace-tabs");
-  tabContainer.innerHTML = marketplaceFilters.map(([value, label]) => {
-    const count = value === "all" ? portalState.models.length : portalState.models.filter((item) => (item.modalities || []).includes(value)).length;
-    return `<button type="button" class="${portalState.marketplace.modality === value ? "active" : ""}" data-model-filter="${value}">${label}<span>${count}</span></button>`;
+  tabContainer.innerHTML = marketplaceFilters.map(([value, label, icon]) => {
+    const count = value === "all" ? filteredModels.length : filteredModels.filter((item) => marketplaceModelCategory(item) === value).length;
+    return `<button type="button" class="${portalState.marketplace.modality === value ? "active" : ""}" data-model-filter="${value}" aria-pressed="${portalState.marketplace.modality === value}"><i data-lucide="${icon}"></i><span>${label}</span><small>${count}</small></button>`;
   }).join("");
+  populateMarketplaceProviderFilter();
+  const providerGrid = document.getElementById("portal-provider-grid");
+  const providerOverview = document.getElementById("portal-provider-overview");
+  const modelList = document.getElementById("portal-model-list");
   const container = document.getElementById("portal-models-table");
   const providerBack = document.getElementById("model-marketplace-provider-back");
   if (portalState.marketplace.provider) {
-    const detailModels = portalState.marketplace.provider === "__more__" ? visibleModels.filter((item) => !["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(item.provider || "").toLocaleLowerCase().includes(name))) : visibleModels.filter((item) => (item.provider || "LokSystem") === portalState.marketplace.provider);
-    document.getElementById("model-marketplace-count").textContent = `${portalState.marketplace.provider === "__more__" ? "更多系列 / 厂商查询" : portalState.marketplace.provider} · ${detailModels.length} 个模型`;
+    const detailModels = portalState.marketplace.provider === "__more__" ? visibleModels.filter((item) => !isFeaturedProvider(item.provider)) : visibleModels.filter((item) => (item.provider || "第三方模型") === portalState.marketplace.provider);
+    const providerName = portalState.marketplace.provider === "__more__" ? "更多系列 / 厂商查询" : portalState.marketplace.provider;
+    document.getElementById("model-marketplace-count").textContent = `筛选后 · ${providerName} · ${detailModels.length} 个模型`;
     providerBack.hidden = false;
-    container.classList.remove("provider-catalog-grid");
-    container.innerHTML = detailModels.length ? detailModels.map((item) => `
-    <article class="model-catalog-card ${item.builtin ? "is-builtin" : ""}">
-      <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span class="model-provider">${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
-      <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-      <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
-      <div class="model-price-grid">${modelPriceMarkup(item)}</div>
-      <div class="model-card-footer"><span><i data-lucide="activity"></i> ${modelHealth(item)}</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
-    </article>
-  `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
+    providerGrid.hidden = true;
+    providerOverview.hidden = false;
+    modelList.hidden = false;
+    providerOverview.innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${portalState.marketplace.provider === "__more__" ? '<i data-lucide="search"></i>' : portalProviderLogo(providerName)}</span><div><span class="eyebrow">MODEL CATALOG</span><h3>${escapeHtml(providerName)}</h3><p>${escapeHtml(portalState.marketplace.provider === "__more__" ? "浏览其他第三方及新接入的可调用模型。" : portalProviderDescription(providerName))}</p></div></div><div class="model-provider-overview-actions"><button class="secondary-button compact-provider-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button></div></div>`;
+    container.innerHTML = detailModels.length ? `<div class="admin-model-card-grid">${detailModels.map(renderMarketplaceModelCard).join("")}</div>` : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>没有符合筛选条件的模型</strong><span>调整搜索、类型或状态筛选后重试</span><button class="secondary-button" type="button" data-model-filter-reset><i data-lucide="rotate-ccw"></i><span>重置筛选</span></button></div>';
   } else {
-    const providers = [...new Map(visibleModels.map((item) => [item.provider || "LokSystem", visibleModels.filter((candidate) => (candidate.provider || "LokSystem") === (item.provider || "LokSystem"))])).values()];
-    const featured = providers.filter((items) => ["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name))).sort((a, b) => marketplaceProviderRank(a[0].provider) - marketplaceProviderRank(b[0].provider));
-    const otherModels = providers.filter((items) => !["deepseek", "qwen", "智谱", "zhipu", "glm", "kimi", "minimax", "doubao", "字节"].some((name) => String(items[0].provider || "").toLocaleLowerCase().includes(name))).flat();
-    document.getElementById("model-marketplace-count").textContent = `${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
+    const providerMap = new Map();
+    visibleModels.forEach((item) => {
+      const provider = item.provider || "第三方模型";
+      if (!providerMap.has(provider)) providerMap.set(provider, []);
+      providerMap.get(provider).push(item);
+    });
+    const providers = [...providerMap.values()];
+    const featured = providers.filter((items) => isFeaturedProvider(items[0].provider)).sort((a, b) => marketplaceProviderRank(a[0].provider) - marketplaceProviderRank(b[0].provider));
+    const otherModels = providers.filter((items) => !isFeaturedProvider(items[0].provider)).flat();
+    document.getElementById("model-marketplace-count").textContent = `筛选后 · ${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
     providerBack.hidden = true;
-    container.classList.add("provider-catalog-grid");
-    container.innerHTML = featured.length || otherModels.length ? featured.map((items) => {
-      const provider = items[0].provider || "LokSystem";
-      const categories = [...new Set(items.map((item) => modelApiType(item) === "video_generations" ? "视频" : modelApiType(item) === "images_generations" ? "图像" : (item.modalities || []).includes("image") ? "视觉" : (item.modalities || []).includes("reasoning") ? "推理" : "文本"))].join(" · ");
-      const chips = items.slice(0, 3).map((item) => `<em>${escapeHtml(item.display_name || item.public_name)}</em>`).join("");
-      return `<button class="portal-provider-card" type="button" data-model-provider="${escapeHtml(provider)}"><span class="portal-provider-logo">${portalProviderLogo(provider)}</span><span><strong>${escapeHtml(provider)}</strong><p>${escapeHtml(portalProviderDescription(provider))}</p><span class="portal-provider-chips">${chips}</span><small>${items.length} 个模型 · ${categories} · ${items.filter((item) => item.health_status === "healthy").length} 个健康模型</small><b>探索系列 <i data-lucide="arrow-right"></i></b></span></button>`;
-    }).join("") + '<button class="portal-provider-card provider-more-card" type="button" data-model-provider-more><span class="portal-provider-logo"><i data-lucide="search"></i></span><span><strong>更多系列 / 厂商查询</strong><small>浏览其他第三方及新增模型</small><small>进入查询</small></span><i data-lucide="arrow-right"></i></button>' : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
+    providerGrid.hidden = false;
+    providerOverview.hidden = true;
+    modelList.hidden = true;
+    providerGrid.innerHTML = featured.length || otherModels.length ? featured.map((items, index) => {
+      const provider = items[0].provider || "第三方模型";
+      const chips = items.slice(0, 3).map((item) => `<span>${escapeHtml(item.display_name || item.public_name)}</span>`).join("");
+      const hiddenModelCount = Math.max(0, items.length - 3);
+      const moreChip = hiddenModelCount ? `<span class="provider-model-chip-more">另有 ${hiddenModelCount} 个</span>` : "";
+      const healthyChannels = items.reduce((sum, item) => sum + Number(item.healthy_channel_count || 0), 0);
+      const activeChannels = items.reduce((sum, item) => sum + Number(item.active_channel_count || 0), 0);
+      return `<article class="admin-provider-card tone-${index % 5}"><span class="admin-provider-logo">${portalProviderLogo(provider)}</span><span class="admin-provider-copy"><span class="provider-card-title"><strong>${escapeHtml(provider)}</strong><span class="badge success">${items.length} 个可调用</span></span><p>${escapeHtml(portalProviderDescription(provider))}</p><span class="provider-model-chips">${chips}${moreChip}</span><small>${items.length} 个模型 · ${marketplaceProviderTypeCounts(items)} · ${healthyChannels}/${activeChannels} 渠道健康</small><span class="provider-card-actions"><button class="table-button" type="button" data-model-provider="${escapeHtml(provider)}"><i data-lucide="list"></i><span>查看系列</span></button><button class="primary-button compact-provider-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button></span></span></article>`;
+    }).join("") + (otherModels.length ? `<button class="admin-provider-card provider-more-card" type="button" data-model-provider-more><span class="admin-provider-more-icon"><i data-lucide="search"></i></span><span class="admin-provider-copy"><strong>更多系列 / 厂商查询</strong><p>${otherModels.length} 个其他第三方及新增模型</p><b>进入查询 <i data-lucide="arrow-right"></i></b></span></button>` : "") : '<div class="empty-state compact"><i data-lucide="boxes"></i><span>没有符合筛选条件的供应商</span><button class="secondary-button" type="button" data-model-filter-reset><i data-lucide="rotate-ccw"></i><span>重置筛选</span></button></div>';
   }
+  renderModelCompareDock();
   portalIcons();
 }
 
@@ -734,17 +851,86 @@ function modelPythonSnippet(item) {
   return `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${window.location.origin}/v1",\n    api_key="YOUR_API_KEY",\n)\n\nresponse = client.chat.completions.create(\n    model="${item.public_name}",\n    messages=[{"role": "user", "content": "你好"}],\n)\nprint(response.choices[0].message.content)`;
 }
 
+function modelTestDialog(modelName) {
+  const item = portalState.models.find((model) => model.public_name === modelName);
+  if (!item) return;
+  if (modelApiType(item) !== "chat_completions") {
+    portalToast("当前测试入口暂支持对话模型，请按详情中的调用示例接入", true);
+    return;
+  }
+  const keys = portalState.keys.filter((key) => key.active && (!keyExpiry(key) || keyExpiry(key) > new Date()));
+  if (!keys.length) {
+    openPortalDialog("测试调用 · 需要 API Key", `<div class="dialog-body"><div class="model-test-warning"><i data-lucide="key-round"></i><div><strong>请先创建一个有效的 API Key</strong><span>测试调用会消耗账户额度，并写入请求记录。创建完成后再从模型详情进入测试。</span></div></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后处理</button><button class="primary-button" type="button" data-action="create-key"><i data-lucide="key-round"></i><span>创建 API Key</span></button></div>`);
+    return;
+  }
+  openPortalDialog(`测试调用 · ${item.display_name || item.public_name}`, `<form id="model-test-form"><div class="dialog-body"><div class="model-test-warning"><i data-lucide="triangle-alert"></i><div><strong>本次测试会消耗额度</strong><span>请求将使用所选 API Key，并按模型当前平台价格计费，结果会写入请求记录。</span></div></div><div class="field"><label for="model-test-key">API Key</label><select id="model-test-key" name="api_key_id" required>${keys.map((key) => `<option value="${key.id}">${escapeHtml(key.name)} · ${escapeHtml(key.key_prefix)}...</option>`).join("")}</select></div><div class="field"><label for="model-test-prompt">测试提示词</label><textarea id="model-test-prompt" name="prompt" rows="4" maxlength="2000" required placeholder="例如：用一句话介绍这个模型适合什么场景"></textarea><small class="field-hint">最多 2,000 个字符，建议使用简短问题。</small></div><div class="field"><label for="model-test-max-tokens">最大输出 Token</label><input id="model-test-max-tokens" name="max_tokens" type="number" min="32" max="4096" step="1" value="256" required></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="play"></i><span>开始测试</span></button></div></form>`);
+  document.getElementById("model-test-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submit = event.submitter;
+    if (submit) submit.disabled = true;
+    try {
+      const data = Object.fromEntries(new FormData(event.currentTarget));
+      const result = await portalApi("/portal/model-tests", { method: "POST", body: JSON.stringify({ model: item.public_name, api_key_id: Number(data.api_key_id), prompt: data.prompt, max_tokens: Number(data.max_tokens) }) });
+      const choice = result.response?.choices?.[0];
+      const output = choice?.message?.content || choice?.text || JSON.stringify(result.response || {}, null, 2);
+      openPortalDialog("测试调用结果", `<div class="dialog-body"><div class="model-test-success"><i data-lucide="circle-check"></i><div><strong>调用成功</strong><span>请求已完成并按实际用量结算。</span></div></div><div class="model-test-output"><pre>${escapeHtml(String(output))}</pre></div><div class="key-detail-grid"><div><span>输入 Token</span><strong>${formatNumber(result.input_tokens)}</strong></div><div><span>输出 Token</span><strong>${formatNumber(result.output_tokens)}</strong></div><div><span>本次扣费</span><strong>${formatMoney(result.amount_micros)}</strong></div></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+      await loadKeys();
+      await loadProfile();
+    } catch (error) {
+      if (submit) submit.disabled = false;
+      portalToast(error.message, true);
+    }
+  });
+}
+
 function modelDetailDialog(modelName) {
   const item = portalState.models.find((model) => model.public_name === modelName);
   if (!item) return;
   const limit = item.rate_limit || {};
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
-    <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
+    <div class="model-detail-hero"><div class="model-card-icon">${portalProviderLogo(item.provider || "第三方模型", "model-detail-logo-image")}</div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>调用协议</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div>${modelApiType(item) === "chat_completions" ? `<div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div>` : `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div>`}<div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · ") || "按任务协议")}</strong></div></div>
+    <div class="model-endpoint-row"><div><span>统一调用地址</span><code>${escapeHtml(modelEndpoint(item))}</code></div><button class="icon-button compact-icon" type="button" data-copy-endpoint="${escapeHtml(modelEndpoint(item))}" title="复制调用地址" aria-label="复制调用地址"><i data-lucide="copy"></i></button></div>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>模型版本</span><strong>${escapeHtml(modelVersionLabel(item))}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>调用协议</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(modelMaxOutputLabel(item))}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div>${modelApiType(item) === "chat_completions" ? `<div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div>` : `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div>`}<div class="model-parameter-cell"><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · ") || "按任务协议")}</strong></div></div>
+    <p class="model-pricing-note">平台价格由管理控制台根据官方价格和目标利润率统一计算，调整后仅对新请求生效。</p>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>${escapeHtml(modelProtocolLabel(item))}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python 调用</strong><span>${modelApiType(item) === "chat_completions" ? "使用 OpenAI SDK" : "使用 HTTP 请求"}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
-  </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
+  </div><div class="dialog-actions">${modelApiType(item) === "chat_completions" ? `<button class="secondary-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button>` : ""}<button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
+}
+
+function modelComparisonPrice(item) {
+  if (modelApiType(item) !== "chat_completions") return `${taskPriceLabel(item)} ${formatMoney(item.task_price_micros || 0)}`;
+  return `输入 ${formatTokenPricePerMillion(item.input_price_micros_per_1k)} / 输出 ${formatTokenPricePerMillion(item.output_price_micros_per_1k)}`;
+}
+
+function modelCompareDialog() {
+  const items = portalState.marketplace.compare.map((name) => portalState.models.find((item) => item.public_name === name)).filter(Boolean);
+  if (items.length < 2) {
+    portalToast("请至少选择两个模型进行对比", true);
+    return;
+  }
+  const rows = [
+    ["供应商", (item) => item.provider || "第三方模型"],
+    ["模型版本", modelVersionLabel],
+    ["能力", (item) => (item.capabilities || []).join(" · ") || "-"],
+    ["调用协议", modelProtocolLabel],
+    ["上下文", (item) => item.context_window || "按任务配置"],
+    ["最大输出", modelMaxOutputLabel],
+    ["平台定价", modelComparisonPrice],
+    ["渠道状态", (item) => item.health_status === "healthy" ? "渠道健康" : item.health_status === "degraded" ? "部分异常" : item.health_status === "checking" ? "待检测" : "暂不可用"],
+  ];
+  openPortalDialog("模型对比", `<div class="dialog-body model-compare-body"><p class="dialog-copy">对比信息来自管理控制台当前已发布配置，实际费用按调用用量或任务次数结算。</p><div class="model-compare-table-wrap"><table class="model-compare-table"><thead><tr><th>对比项</th>${items.map((item) => `<th><span>${escapeHtml(item.provider || "第三方模型")}</span><strong>${escapeHtml(item.display_name || item.public_name)}</strong><code>${escapeHtml(item.public_name)}</code></th>`).join("")}</tr></thead><tbody>${rows.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th>${items.map((item) => `<td>${escapeHtml(value(item))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
+}
+
+function toggleModelComparison(modelName) {
+  const selected = portalState.marketplace.compare;
+  const index = selected.indexOf(modelName);
+  if (index >= 0) selected.splice(index, 1);
+  else if (selected.length >= 3) {
+    portalToast("最多同时对比 3 个模型", true);
+    return;
+  } else selected.push(modelName);
+  renderModelMarketplace();
 }
 
 async function loadUsage() {
@@ -1235,6 +1421,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("key-search").addEventListener("change", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
   document.getElementById("key-status-filter").addEventListener("change", (event) => { portalState.keyFilters.status = event.target.value; renderKeyTable(); });
   document.getElementById("model-marketplace-search").addEventListener("input", (event) => { portalState.marketplace.query = event.target.value; renderModelMarketplace(); });
+  document.getElementById("model-marketplace-provider-filter").addEventListener("change", (event) => { portalState.marketplace.providerFilter = event.target.value; portalState.marketplace.provider = ""; renderModelMarketplace(); });
+  document.getElementById("model-marketplace-health").addEventListener("change", (event) => { portalState.marketplace.health = event.target.value; renderModelMarketplace(); });
+  document.getElementById("model-marketplace-sort").addEventListener("change", (event) => { portalState.marketplace.sort = event.target.value; renderModelMarketplace(); });
   document.getElementById("order-status-filter").addEventListener("change", renderOrders);
   document.getElementById("portal-redeem-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1274,11 +1463,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.copy === "base-url") { await navigator.clipboard.writeText(document.getElementById("portal-base-url").textContent); portalToast("Base URL 已复制"); }
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
     if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }
+    if (target.dataset.copyEndpoint) { await navigator.clipboard.writeText(target.dataset.copyEndpoint); portalToast("调用地址已复制"); }
     if (target.dataset.modelFilter) { portalState.marketplace.modality = target.dataset.modelFilter; renderModelMarketplace(); }
     if (target.dataset.modelProvider) { portalState.marketplace.provider = target.dataset.modelProvider; renderModelMarketplace(); }
     if (target.dataset.modelProviderMore !== undefined) { portalState.marketplace.provider = "__more__"; renderModelMarketplace(); }
     if (target.dataset.modelProviderBack !== undefined) { portalState.marketplace.provider = ""; renderModelMarketplace(); }
+    if (target.dataset.modelFilterReset !== undefined) {
+      portalState.marketplace.query = "";
+      portalState.marketplace.modality = "all";
+      portalState.marketplace.providerFilter = "";
+      portalState.marketplace.health = "all";
+      portalState.marketplace.sort = "default";
+      document.getElementById("model-marketplace-search").value = "";
+      document.getElementById("model-marketplace-provider-filter").value = "";
+      document.getElementById("model-marketplace-health").value = "all";
+      document.getElementById("model-marketplace-sort").value = "default";
+      renderModelMarketplace();
+    }
     if (target.dataset.modelDetail) modelDetailDialog(target.dataset.modelDetail);
+    if (target.dataset.modelTest) modelTestDialog(target.dataset.modelTest);
+    if (target.dataset.modelCompare) toggleModelComparison(target.dataset.modelCompare);
+    if (target.dataset.modelCompareClear !== undefined) { portalState.marketplace.compare = []; renderModelMarketplace(); }
+    if (target.dataset.modelCompareOpen !== undefined) modelCompareDialog();
     if (target.dataset.copyModelCode) {
       const model = portalState.models.find((item) => item.public_name === target.dataset.modelName);
       if (model) {

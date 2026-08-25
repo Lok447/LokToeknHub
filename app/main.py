@@ -1308,7 +1308,21 @@ def list_provider_presets() -> dict[str, object]:
     return {"data": [provider_preset_data(item) for item in PROVIDER_PRESETS]}
 
 
-def provider_connection_data(connection: ProviderConnection | None, preset) -> dict[str, object]:
+def provider_callable_model_count(db: Session, connection: ProviderConnection | None, preset) -> int:
+    if not connection:
+        return 0
+    linked_model_ids = set(db.scalars(
+        select(ModelChannel.model_config_id).where(ModelChannel.provider_connection_id == connection.id)
+    ).all())
+    preset_public_names = {item.public_name for item in preset.models}
+    models = [
+        model for model in db.scalars(select(ModelConfig)).all()
+        if model.id in linked_model_ids or model.public_name in preset_public_names
+    ]
+    return sum(1 for model in models if model_is_callable(db, model))
+
+
+def provider_connection_data(db: Session, connection: ProviderConnection | None, preset) -> dict[str, object]:
     env_name = connection.provider_api_key_env if connection else preset.api_key_env
     env_configured = bool(env_name and os.getenv(env_name, "").strip())
     stored_secret = bool(connection and connection.encrypted_api_key)
@@ -1324,7 +1338,9 @@ def provider_connection_data(connection: ProviderConnection | None, preset) -> d
         "status": connection.status if connection else "unconfigured",
         "discovered_model_count": connection.discovered_model_count if connection else 0,
         "synced_model_count": connection.synced_model_count if connection else 0,
-        "callable_model_count": connection.callable_model_count if connection else 0,
+        # This count changes when a model is published, disabled, or loses a
+        # healthy channel, so the last provider-sync snapshot is not reliable.
+        "callable_model_count": provider_callable_model_count(db, connection, preset),
         "default_input_price_micros_per_1k": connection.default_input_price_micros_per_1k if connection else 0,
         "default_output_price_micros_per_1k": connection.default_output_price_micros_per_1k if connection else 0,
         "last_checked_at": connection.last_checked_at.isoformat() if connection and connection.last_checked_at else None,
@@ -1362,7 +1378,7 @@ def mark_provider_connection_misconfigured(db: Session, connection: ProviderConn
 @app.get("/admin/provider-connections", dependencies=[Depends(require_admin)])
 def list_provider_connections(db: Session = Depends(get_db)) -> dict[str, object]:
     connections = {item.preset_id: item for item in db.scalars(select(ProviderConnection)).all()}
-    return {"data": [provider_connection_data(connections.get(preset.id), preset) for preset in PROVIDER_PRESETS]}
+    return {"data": [provider_connection_data(db, connections.get(preset.id), preset) for preset in PROVIDER_PRESETS]}
 
 
 @app.post("/admin/provider-connections/{preset_id}/test", dependencies=[Depends(require_operator)])
@@ -1433,7 +1449,7 @@ async def refresh_provider_balance(preset_id: str, context: AdminContext = Depen
     record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_refreshed", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "status": result.get("status"), "source": result.get("source")})
     db.commit()
     db.refresh(connection)
-    return {"connection": provider_connection_data(connection, preset)}
+    return {"connection": provider_connection_data(db, connection, preset)}
 
 
 @app.post("/admin/provider-connections/{preset_id}/balance/manual", dependencies=[Depends(require_operator)])
@@ -1447,7 +1463,7 @@ def record_manual_provider_balance(preset_id: str, payload: ProviderBalanceManua
     record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="provider.balance_recorded", target_type="provider_connection", target_id=connection.id, details={"preset_id": preset_id, "currency": payload.currency.upper()})
     db.commit()
     db.refresh(connection)
-    return {"connection": provider_connection_data(connection, preset)}
+    return {"connection": provider_connection_data(db, connection, preset)}
 
 
 @app.put("/admin/provider-connections/{preset_id}", dependencies=[Depends(require_operator)])
@@ -1656,7 +1672,7 @@ async def configure_provider_connection(
     )
     db.commit()
     db.refresh(connection)
-    return {"connection": provider_connection_data(connection, preset), "models": synced}
+    return {"connection": provider_connection_data(db, connection, preset), "models": synced}
 
 
 @app.post("/admin/provider-presets/{preset_id}/install", dependencies=[Depends(require_operator)])

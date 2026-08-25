@@ -5,6 +5,7 @@ import hmac
 import io
 import json
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from urllib.parse import quote, urlencode, urlparse
@@ -25,8 +26,9 @@ from .guardrails import rate_limiter
 from .model_release import model_is_callable
 from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
-from .schemas import ActiveUpdate, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
+from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
 from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, verify_password
+from .services import call_provider_details, calculate_amount, estimate_tokens, reserve_balance, save_usage, settle_balance, validate_model_request
 from .workspaces import accessible_workspaces, create_organization, create_project, ensure_default_project, ensure_personal_workspace, project_access, require_workspace_manager, workspace_access, workspace_data
 
 
@@ -781,6 +783,80 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccou
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.status_updated", target_type="api_key", target_id=api_key.id, details={"active": api_key.active})
     db.commit()
     return {"id": api_key.id, "active": api_key.active}
+
+
+@router.post("/portal/model-tests")
+async def test_model(
+    payload: PortalModelTestRequest,
+    account: BillingAccount = Depends(portal_account),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Run one bounded, billable chat request from the model marketplace."""
+    settings = get_settings()
+    rate_limiter.check("portal-model-test", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
+    api_key = db.scalar(select(ApiKey).where(ApiKey.id == payload.api_key_id, ApiKey.account_id == account.id))
+    if not api_key or not api_key.active:
+        raise HTTPException(status_code=422, detail="请选择有效的 API Key")
+    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    request = ChatCompletionRequest(
+        model=model.public_name,
+        messages=[{"role": "user", "content": payload.prompt.strip()}],
+        max_tokens=payload.max_tokens,
+        stream=False,
+    )
+    try:
+        metadata = json.loads(model.catalog_metadata_json) if model.catalog_metadata_json else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    if not isinstance(metadata, dict) or metadata.get("api_type", "chat_completions") != "chat_completions":
+        raise HTTPException(status_code=422, detail="当前测试入口暂支持对话模型，图像和视频模型请按调用示例接入")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail="model unavailable")
+    validate_model_request(model, request)
+    request_id = "test_" + uuid.uuid4().hex
+    trace_id = request_id
+    estimated_input = estimate_tokens(request.messages)
+    reservation = calculate_amount(model, estimated_input, payload.max_tokens)
+    try:
+        reserve_balance(db, account, api_key, reservation, request_id)
+    except ValueError as exc:
+        save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "rejected", 0, str(exc), amount_micros=0)
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
+    started = time.perf_counter()
+    try:
+        provider_result = await call_provider_details(db, model, request)
+        actual_amount = calculate_amount(model, provider_result.input_tokens, provider_result.output_tokens)
+        settle_balance(db, account, api_key, reservation, actual_amount, request_id)
+        save_usage(
+            db, api_key, model, request_id, trace_id,
+            provider_result.input_tokens, provider_result.output_tokens, "success",
+            int((time.perf_counter() - started) * 1000),
+            provider_cost_micros=provider_result.provider_cost_micros,
+            provider_channel_id=provider_result.channel_id,
+            provider_request_id=provider_result.provider_request_id,
+            usage_details=provider_result.usage_details,
+            raw_usage=provider_result.raw_usage,
+            route_attempts=provider_result.route_attempts,
+            amount_micros=actual_amount,
+        )
+        return {
+            "request_id": request_id,
+            "model": model.public_name,
+            "response": provider_result.response,
+            "input_tokens": provider_result.input_tokens,
+            "output_tokens": provider_result.output_tokens,
+            "amount_micros": actual_amount,
+        }
+    except HTTPException as exc:
+        settle_balance(db, account, api_key, reservation, 0, request_id)
+        save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "error", int((time.perf_counter() - started) * 1000), str(exc.detail), amount_micros=0)
+        raise
+    except Exception as exc:
+        settle_balance(db, account, api_key, reservation, 0, request_id)
+        save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "error", int((time.perf_counter() - started) * 1000), str(exc), amount_micros=0)
+        raise HTTPException(status_code=502, detail="模型测试调用失败，请稍后重试") from exc
 
 
 @router.get("/portal/models")

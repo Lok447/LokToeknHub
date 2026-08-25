@@ -19,6 +19,13 @@ class PortalApiKeyCreate(BaseModel):
     spending_limit_micros: int | None = Field(default=None, gt=0)
 
 
+class PortalModelTestRequest(BaseModel):
+    model: str = Field(min_length=1, max_length=120)
+    api_key_id: int = Field(gt=0)
+    prompt: str = Field(min_length=1, max_length=2000)
+    max_tokens: int = Field(default=256, gt=0, le=4096)
+
+
 class TrialLinkCreate(BaseModel):
     account_id: int = Field(gt=0)
     expires_in_seconds: int | None = Field(default=None, ge=300, le=2592000)

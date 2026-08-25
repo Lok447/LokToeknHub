@@ -440,6 +440,7 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .provider-dialog-actions .secondary-button svg { width: 13px; height: 13px; }
 .provider-model-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .provider-model-chips span { padding: 4px 6px; border-radius: 4px; color: var(--muted); background: var(--surface-muted); font-size: 9px; }
+.provider-model-chips .provider-model-chip-more { color: var(--signal); background: var(--signal-soft); font-weight: 700; }
 .provider-more-card { place-content: center; background: var(--surface-soft); }
 .admin-provider-more-icon { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 7px; color: var(--ink); background: var(--surface-muted); }
 .admin-provider-more-icon svg { width: 20px; }

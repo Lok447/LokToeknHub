@@ -56,7 +56,7 @@ $headers = @{ Authorization = "Bearer $($key.key)" }
 Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Headers $headers -ContentType "application/json" -Body '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"你好，请介绍一下 LokToken"}]}'
 ```
 
-用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按文本、推理、代码、视觉和工具调用筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。
+用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按模型类型、服务商、健康状态和价格排序筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。文本对话模型详情还提供“测试调用”入口：选择账户下有效的 API Key、输入简短提示词即可在页面内验证模型，测试请求会按当前平台价格消耗额度并写入请求记录；没有有效 Key 时需先创建 Key。
 
 ## 用户试用闭环 v0.2
 
