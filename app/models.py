@@ -103,6 +103,8 @@ class ModelConfig(Base):
     provider_api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
     input_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
     output_price_micros_per_1k: Mapped[int] = mapped_column(BigInteger, default=0)
+    # Task models (image/video/audio) are billed per generated task, not tokens.
+    task_price_micros: Mapped[int] = mapped_column(BigInteger, default=0)
     # Stored in basis points: 100 bps = 1%. A null/zero value means manual pricing.
     pricing_margin_bps: Mapped[int] = mapped_column(Integer, default=0)
     catalog_metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -177,7 +179,31 @@ class ModelChannel(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_input_cost_micros_per_1k: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     provider_output_cost_micros_per_1k: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    provider_task_cost_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GenerationTask(Base):
+    __tablename__ = "generation_tasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    api_key_id: Mapped[int] = mapped_column(ForeignKey("api_keys.id"), index=True)
+    model_config_id: Mapped[int] = mapped_column(ForeignKey("model_configs.id"), index=True)
+    provider_channel_id: Mapped[int | None] = mapped_column(ForeignKey("model_channels.id", ondelete="SET NULL"), nullable=True, index=True)
+    provider_task_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    trace_id: Mapped[str] = mapped_column(String(64), index=True)
+    task_type: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=1)
+    reserved_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    result_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UsageRecord(Base):

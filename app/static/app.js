@@ -38,7 +38,7 @@ function setAdminIdentity(identity) {
 
 function applyRoleUi() {
   const hiddenActions = new Set(isAuditor() ? [
-    "create-account", "create-key", "health-check-all", "import-models", "create-model",
+    "create-account", "create-key", "health-check-all", "create-model",
     "create-payment", "create-redemption", "trial-link", "topup", "confirm-payment",
     "refund-payment", "toggle-redemption", "edit-model-pricing", "manage-channels",
     "preflight-model", "delete-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
@@ -53,7 +53,6 @@ function applyRoleUi() {
     "create-account": canOperate(),
     "create-key": canOperate(),
     "health-check-all": canOperate(),
-    "import-models": canOperate(),
     "create-model": canOperate(),
     "create-payment": canOperate(),
     "create-redemption": canOperate(),
@@ -640,20 +639,17 @@ function renderAdminProviderCards(models) {
   const list = document.getElementById("admin-model-list");
   const overview = document.getElementById("model-provider-overview");
   const pageBack = document.getElementById("admin-model-page-back");
-  const inlineCreate = document.getElementById("admin-model-create-inline");
   if (state.modelProviderDetail) {
     grid.hidden = true;
     list.hidden = false;
     overview.hidden = false;
     pageBack.hidden = false;
-    inlineCreate.hidden = false;
     return;
   }
   list.hidden = true;
   grid.hidden = false;
   overview.hidden = true;
   pageBack.hidden = true;
-  inlineCreate.hidden = true;
   const { featured, otherModels } = adminProviderCardData(models);
   grid.innerHTML = featured.length || otherModels.length ? featured.map(({ provider, presetId, items }, index) => {
     const typeCounts = [...new Set(items.map(modelCategory))].map((type) => `${type === "text" ? "文本" : type === "image" ? "图像" : type === "video" ? "视频" : "语音"} ${items.filter((item) => modelCategory(item) === type).length}`).join(" · ");
@@ -672,30 +668,49 @@ function providerConnectionDialog(presetId) {
   const connection = state.providerConnections.find((item) => item.preset_id === presetId);
   if (!preset) { toast("没有找到供应商模板", true); return; }
   const balanceText = connection?.balance_status === "available" ? `${formatMoney(connection.balance_micros)} ${connection.balance_currency || "CNY"}` : connection?.balance_status === "unsupported" ? "该供应商需在控制台查看" : connection?.balance_status === "error" ? "上次查询失败" : "尚未查询";
+  const hasStoredCredential = connection?.credential_source === "stored";
+  const credentialSource = hasStoredCredential ? "api_key" : "environment";
   openDialog(`服务商接入 · ${preset.name}`, `
     <form id="provider-connection-form">
       <div class="dialog-body">
         <div class="provider-connection-summary"><span class="admin-provider-logo">${providerLogo(preset.name)}</span><div><strong>一次配置，统一同步 ${preset.models.length} 个系列模型</strong><p>${escapeHtml(preset.note)}</p></div></div>
-        <div class="field"><label for="provider-connection-url">供应商 API 地址</label><input id="provider-connection-url" name="provider_base_url" required maxlength="500" value="${escapeHtml(connection?.provider_base_url || preset.base_url)}"></div>
-        <div class="field"><label for="provider-connection-key">供应商 API Key</label><input id="provider-connection-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="${connection?.credentials_configured ? "已保存；留空表示继续使用当前密钥" : "输入服务商控制台发放的 API Key"}"><small class="field-hint">密钥由服务端加密保存，不会回显到浏览器或模型列表。</small></div>
-        <div class="field"><label for="provider-connection-env">服务器密钥环境变量（可选）</label><input id="provider-connection-env" name="provider_api_key_env" maxlength="120" value="${escapeHtml(connection?.provider_api_key_env || preset.api_key_env || "")}" placeholder="例如 DASHSCOPE_API_KEY"><small class="field-hint">填写环境变量时，可不在此录入明文密钥。</small></div>
-        <div class="field"><label for="provider-balance-threshold">上游余额预警阈值（元，可选）</label><input id="provider-balance-threshold" name="balance_alert_threshold" type="number" min="0" step="0.01" value="${connection?.balance_alert_threshold_micros ? (connection.balance_alert_threshold_micros / 1000000).toFixed(2) : "0"}"><small class="field-hint">仅用于提醒采购，不会影响用户额度或自动扣款。</small></div>
-        <div class="provider-balance-panel"><div><strong>上游账户余额</strong><span>${escapeHtml(balanceText)}</span><small>${connection?.balance_checked_at ? `最近查询：${formatDate(connection.balance_checked_at)}` : "余额查询不会通过模型健康检查推断"}</small></div><div class="provider-card-actions"><button class="table-button" type="button" data-action="refresh-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="refresh-cw"></i><span>刷新余额</span></button><button class="secondary-button compact-provider-button" type="button" data-action="manual-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="pencil"></i><span>手工录入</span></button></div></div>
-      <p class="dialog-copy">系统会读取服务商真实模型目录，为整系列复用该连接并更新健康状态。图像、视频等尚未接入统一调用适配器的模型会保留为候选，不会错误标记为可调用。同步完成后，请在模型列表中逐个维护平台售价、核对渠道采购成本和预检状态，再决定是否发布。</p>
+        <section class="provider-form-section"><div class="provider-form-section-heading"><strong>连接配置</strong><span>用于访问服务商模型目录和 API</span></div><div class="field"><label for="provider-connection-url">供应商 API 地址</label><input id="provider-connection-url" name="provider_base_url" required maxlength="500" value="${escapeHtml(connection?.provider_base_url || preset.base_url)}"></div></section>
+        <section class="provider-form-section"><div class="provider-form-section-heading"><strong>访问凭证</strong><span>选择一种凭证来源，服务端不会回显已保存的密钥</span></div><div class="field"><label for="provider-credential-source">凭证来源</label><select id="provider-credential-source" name="credential_source"><option value="environment"${credentialSource === "environment" ? " selected" : ""}>服务器环境变量</option><option value="api_key"${credentialSource === "api_key" ? " selected" : ""}>控制台 API Key</option></select></div><div class="field" id="provider-env-field"><label for="provider-connection-env">服务器密钥环境变量</label><input id="provider-connection-env" name="provider_api_key_env" maxlength="120" value="${escapeHtml(connection?.provider_api_key_env || preset.api_key_env || "")}" placeholder="例如 DEEPSEEK_API_KEY"><small class="field-hint">填写部署在 TOKEN 服务环境中的变量名，不要填写密钥内容。</small></div><div class="field" id="provider-key-field" hidden><label for="provider-connection-key">供应商 API Key</label><input id="provider-connection-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="${hasStoredCredential ? "已保存；留空表示继续使用当前密钥" : "输入服务商控制台发放的 API Key"}"><small class="field-hint">${hasStoredCredential ? "当前已有托管密钥；填写新值即可替换。" : "密钥将由服务端加密保存。"}</small></div><p id="provider-credential-note" class="field-hint"></p></section>
+        <section class="provider-form-section"><div class="provider-form-section-heading"><strong>采购监控</strong><span>仅用于余额记录和预警，不影响用户额度</span></div><div class="field"><label for="provider-balance-threshold">上游余额预警阈值（元，可选）</label><input id="provider-balance-threshold" name="balance_alert_threshold" type="number" min="0" step="0.01" value="${connection?.balance_alert_threshold_micros ? (connection.balance_alert_threshold_micros / 1000000).toFixed(2) : "0"}"><small class="field-hint">余额低于此金额时标记采购预警；填 0 表示不设置阈值。</small></div><div class="provider-balance-panel"><div><strong>上游账户余额</strong><span>${escapeHtml(balanceText)}</span><small>${connection?.balance_checked_at ? `最近查询：${formatDate(connection.balance_checked_at)}` : "余额查询不会通过模型健康检查推断"}</small></div><div class="provider-card-actions"><button class="table-button" type="button" data-action="refresh-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="refresh-cw"></i><span>刷新余额</span></button><button class="secondary-button compact-provider-button" type="button" data-action="manual-provider-balance" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="pencil"></i><span>手工录入</span></button></div></div></section>
+      <p class="dialog-copy">保存后会读取服务商模型目录并同步系列模型。文本模型使用聊天接口；图像模型可通过图像生成接口调用，视频模型通过异步任务创建和结果查询调用。只有尚未通过目录核验、未配置任务价格或渠道不可用的模型会保留为候选。</p>
       </div>
-      <div class="dialog-actions provider-dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="secondary-button" type="button" data-action="test-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>测试连接</span></button><button class="primary-button" type="submit"><i data-lucide="refresh-cw"></i><span>${connection ? "重新同步系列" : "配置并同步系列"}</span></button></div>
+      <div class="dialog-actions provider-dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="secondary-button" type="button" data-action="test-provider" data-provider-id="${escapeHtml(presetId)}"><i data-lucide="plug-zap"></i><span>测试连接</span></button><button class="primary-button" type="submit"><i data-lucide="refresh-cw"></i><span>${connection ? "保存并同步模型" : "配置并同步模型"}</span></button></div>
     </form>`);
+  const credentialSourceInput = document.getElementById("provider-credential-source");
+  const envField = document.getElementById("provider-env-field");
+  const keyField = document.getElementById("provider-key-field");
+  const envInput = document.getElementById("provider-connection-env");
+  const keyInput = document.getElementById("provider-connection-key");
+  const credentialNote = document.getElementById("provider-credential-note");
+  const updateCredentialFields = () => {
+    const usesApiKey = credentialSourceInput.value === "api_key";
+    envField.hidden = usesApiKey;
+    keyField.hidden = !usesApiKey;
+    envInput.required = !usesApiKey;
+    keyInput.required = usesApiKey && !hasStoredCredential;
+    credentialNote.textContent = usesApiKey ? "控制台 API Key 会加密保存在服务端，仅用于该服务商连接。" : hasStoredCredential ? "切换到环境变量后，原托管密钥将不再作为该连接的凭证。" : "环境变量由服务进程读取，密钥内容不会进入管理控制台。";
+  };
+  credentialSourceInput.addEventListener("change", updateCredentialFields);
+  updateCredentialFields();
+  const credentialPayload = (form) => {
+    const source = String(form.get("credential_source") || "environment");
+    const rawKey = source === "api_key" ? String(form.get("provider_api_key") || "").trim() : "";
+    return { provider_base_url: String(form.get("provider_base_url") || "").trim(), provider_api_key_env: source === "environment" ? String(form.get("provider_api_key_env") || "").trim() || null : null, provider_api_key: rawKey || null, clear_provider_api_key: source === "environment" && hasStoredCredential };
+  };
   document.getElementById("provider-connection-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const rawKey = String(form.get("provider_api_key") || "").trim();
-    const envName = String(form.get("provider_api_key_env") || "").trim();
+    const credentials = credentialPayload(form);
     const payload = {
-      provider_base_url: String(form.get("provider_base_url") || "").trim(),
-      provider_api_key_env: envName || null,
+      ...credentials,
       balance_alert_threshold_micros: Math.round(Number(form.get("balance_alert_threshold") || 0) * 1000000),
     };
-    if (rawKey) payload.provider_api_key = rawKey;
+    if (!payload.provider_api_key) delete payload.provider_api_key;
     const submit = event.currentTarget.querySelector('button[type="submit"]');
     submit.disabled = true;
     try {
@@ -715,7 +730,7 @@ function providerConnectionDialog(presetId) {
     const button = event.currentTarget;
     button.disabled = true;
     try {
-      const result = await api(`/admin/provider-connections/${presetId}/test`, { method: "POST", body: JSON.stringify({ provider_base_url: String(form.get("provider_base_url") || "").trim(), provider_api_key_env: String(form.get("provider_api_key_env") || "").trim() || null, provider_api_key: String(form.get("provider_api_key") || "").trim() || null }) });
+      const result = await api(`/admin/provider-connections/${presetId}/test`, { method: "POST", body: JSON.stringify(credentialPayload(form)) });
       toast(`连接成功：发现 ${result.discovered_model_count} 个模型，耗时 ${result.latency_ms} ms`);
     } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
   });
@@ -766,7 +781,10 @@ function renderModels() {
   document.getElementById("model-result-count").textContent = state.modelProviderDetail ? `${state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail} · ${detailModels.length} 个模型` : `${providerCount} 家供应商 · ${models.length} 个模型`;
   if (!state.modelProviderDetail) return;
   const detailProvider = state.modelProviderDetail === "__more__" ? "更多系列 / 厂商查询" : state.modelProviderDetail;
-  document.getElementById("model-provider-overview").innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${providerLogo(detailProvider)}</span><div><span class="eyebrow">MODEL & PRICING</span><h3>${escapeHtml(detailProvider)}</h3><p>${escapeHtml(providerDescription(detailProvider))}</p></div></div></div>`;
+  const detailPresetId = providerPresetId(detailProvider);
+  const detailPreset = state.providerPresets.find((preset) => preset.id === detailPresetId);
+  const providerActions = canOperate() && detailPreset ? `<div class="model-provider-overview-actions"><button class="primary-button compact-provider-button" type="button" data-action="health-check-provider" data-provider-id="${escapeHtml(detailPreset.id)}"><i data-lucide="activity"></i><span>检测全部渠道</span></button><button class="primary-button compact-provider-button" type="button" data-action="create-provider-model" data-provider-id="${escapeHtml(detailPreset.id)}"><i data-lucide="plus"></i><span>添加模型服务</span></button></div>` : "";
+  document.getElementById("model-provider-overview").innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${providerLogo(detailProvider)}</span><div><span class="eyebrow">MODEL & PRICING</span><h3>${escapeHtml(detailProvider)}</h3><p>${escapeHtml(providerDescription(detailProvider))}</p></div></div>${providerActions}</div>`;
   document.getElementById("models-table").innerHTML = detailModels.length ? `<div class="admin-model-card-grid">${detailModels.map((item) => {
     const publishBlocked = item.publication_state === "blocked" && !item.active;
     const publishLabel = item.active ? "下架" : publishBlocked ? "完善后上架" : "上架";
@@ -775,7 +793,7 @@ function renderModels() {
     const chatCompatible = apiType === "chat_completions";
     const provider = item.catalog_metadata?.provider || "自定义";
     const channelButton = `<button class="table-button" data-action="manage-channels" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}"><i data-lucide="route"></i><span>渠道</span></button>`;
-    const pricingButton = `<button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}" ${chatCompatible ? "" : 'disabled title="非 Token 计费尚未启用"'}><i data-lucide="receipt-text"></i><span>定价</span></button>`;
+    const pricingButton = `<button class="table-button" data-action="edit-model-pricing" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" data-input-price="${item.input_price_micros_per_1k}" data-output-price="${item.output_price_micros_per_1k}" data-task-price="${item.task_price_micros || 0}"><i data-lucide="receipt-text"></i><span>定价</span></button>`;
     const preflightButton = isSuperadmin() ? `<button class="table-button" data-action="preflight-model" data-id="${item.id}" data-name="${escapeHtml(item.public_name)}" ${chatCompatible ? "" : 'disabled title="等待统一调用适配器"'}><i data-lucide="flask-conical"></i><span>预检</span></button>` : "";
     const publishButton = `<button class="table-button" data-toggle="models" data-id="${item.id}" data-active="${!item.active}"${publishTitle}>${publishLabel}</button>`;
     const deleteButton = isSuperadmin() ? `<button class="table-button danger" data-action="delete-model" data-id="${item.id}" data-name="${escapeHtml(item.catalog_metadata?.display_name || item.public_name)}"><i data-lucide="trash-2"></i><span>删除</span></button>` : "";
@@ -784,8 +802,8 @@ function renderModels() {
     const parameters = (metadata.supported_parameters || []).slice(0, 3).map((value) => escapeHtml(value)).join(" · ");
     return `
       <article class="admin-model-card">
-        <div class="admin-model-card-header"><span class="admin-model-icon">${providerLogo(provider, "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(metadata.display_name || item.public_name)}</h3><code>${escapeHtml(item.public_name)}</code></div><div>${modelPublicationBadge(item)}</div></div></div>
-        <div class="admin-model-card-meta">${modelTypeBadge(item)}<span>${escapeHtml(provider)}</span><span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)} 健康</span></div>
+        <div class="admin-model-card-header"><span class="admin-model-icon">${providerLogo(provider, "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(metadata.display_name || item.public_name)}</h3><div class="admin-model-version"><span>模型版本</span><strong>${escapeHtml(metadata.model_version || "待上游确认")}</strong></div><code>调用 ID：${escapeHtml(item.public_name)}</code></div><div>${modelPublicationBadge(item)}</div></div></div>
+        <div class="admin-model-card-meta">${modelTypeBadge(item)}<span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)} 健康</span></div>
         <div class="admin-model-tags">${capabilities || '<span class="empty">能力待补充</span>'}</div>
         <div class="admin-model-card-stats"><div><span>上下文</span><strong>${escapeHtml(metadata.context_window || "按上游")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(metadata.max_output_tokens, "按上游"))}</strong></div><div><span>参数</span><strong title="${escapeHtml(parameters)}">${escapeHtml(parameters || "待补充")}</strong></div></div>
         <div class="admin-model-card-pricing"><div><span>平台输入 / 1M</span><strong>${chatCompatible ? modelPriceText(item.input_price_micros_per_1k) : "按任务计费"}</strong></div><div><span>平台输出 / 1M</span><strong>${chatCompatible ? modelPriceText(item.output_price_micros_per_1k) : "按任务计费"}</strong></div></div>
@@ -795,14 +813,16 @@ function renderModels() {
   icons();
 }
 
-async function checkAllChannels() {
-  const result = await api("/admin/models/health-check", { method: "POST", body: "{}" });
+async function checkAllChannels(providerPresetId = "") {
+  const query = providerPresetId ? `?provider_preset_id=${encodeURIComponent(providerPresetId)}` : "";
+  const result = await api(`/admin/models/health-check${query}`, { method: "POST", body: "{}" });
   const details = [`${result.healthy} 个健康`];
   if (result.unavailable) details.push(`${result.unavailable} 个未开放`);
   if (result.pending_adapter) details.push(`${result.pending_adapter} 个待适配`);
   if (result.misconfigured) details.push(`${result.misconfigured} 个配置错误`);
   if (result.unhealthy) details.push(`${result.unhealthy} 个异常`);
-  toast(`已检测 ${result.checked} 个渠道：${details.join("，")}`, result.unhealthy + result.misconfigured > 0);
+  const provider = providerPresetId ? providerPresetDisplayName(state.providerPresets.find((item) => item.id === providerPresetId)) : "全部服务商";
+  toast(`${provider}已检测 ${result.checked} 个渠道：${details.join("，")}`, result.unhealthy + result.misconfigured > 0);
   await loadModels();
 }
 
@@ -1029,21 +1049,52 @@ async function trialLinkDialog(accountId, accountName) {
   }
 }
 
-function modelDialog() {
-  openDialog("添加模型", `
+function modelDialog(providerPresetId = "") {
+  const preset = providerPresetId ? state.providerPresets.find((item) => item.id === providerPresetId) : null;
+  const connection = preset ? state.providerConnections.find((item) => item.preset_id === preset.id) : null;
+  const provider = preset ? providerPresetDisplayName(preset) : "自定义";
+  const providerBaseUrl = connection?.provider_base_url || preset?.base_url || "http://localhost:4000/v1";
+  const providerKeyEnv = connection?.provider_api_key_env || preset?.api_key_env || "";
+  const providerModels = preset?.models || [];
+  const existingModelNames = new Set(state.models.map((item) => item.public_name));
+  const availableProviderModels = providerModels.filter((item) => !existingModelNames.has(item.public_name));
+  const providerModelOptions = providerModels.map((item) => {
+    const installed = existingModelNames.has(item.public_name);
+    return `<option value="${escapeHtml(item.model_id)}"${installed ? " disabled" : ""}>${escapeHtml(item.display_name)}${installed ? "（已接入）" : ""}</option>`;
+  }).join("");
+  const providerFormFields = preset
+    ? `<div class="field"><label for="provider-model-id">模型名称</label><select id="provider-model-id" name="upstream_model" required${availableProviderModels.length ? "" : " disabled"}><option value="">${availableProviderModels.length ? "请选择已核验的服务商模型" : "该服务商目录中的模型均已接入"}</option>${providerModelOptions}</select><small class="field-hint">模型版本、能力、上下文和价格将按已核验目录自动带入。</small></div><section id="provider-model-auto-preview" class="provider-model-auto-preview" hidden></section>`
+    : `<div class="field-row"><div class="field"><label for="public-name">公开名称</label><input id="public-name" name="public_name" required></div><div class="field"><label for="upstream-model">上游模型</label><input id="upstream-model" name="upstream_model" required></div></div><div class="field"><label for="provider-url">供应商地址</label><input id="provider-url" name="provider_base_url" placeholder="http://localhost:4000/v1"></div><div class="field-row"><div class="field"><label for="key-env">密钥环境变量</label><input id="key-env" name="provider_api_key_env" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="OPENAI_API_KEY"></div><div class="field"><label for="provider-key">供应商 API Key</label><input id="provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div><div class="field-row"><div class="field"><label for="input-price">输入价格 / 1M Token（元）</label><input id="input-price" name="input_price" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="output-price">输出价格 / 1M Token（元）</label><input id="output-price" name="output_price" type="number" min="0" step="0.001" value="0"></div></div>`;
+  openDialog(preset ? `添加 ${provider} 模型` : "添加模型", `
     <form id="dialog-form">
       <div class="dialog-body">
-        <div class="field-row"><div class="field"><label for="public-name">公开名称</label><input id="public-name" name="public_name" required></div><div class="field"><label for="upstream-model">上游模型</label><input id="upstream-model" name="upstream_model" required></div></div>
-        <div class="field"><label for="provider-url">供应商地址</label><input id="provider-url" name="provider_base_url" placeholder="http://localhost:4000/v1"></div>
-        <div class="field-row"><div class="field"><label for="key-env">密钥环境变量</label><input id="key-env" name="provider_api_key_env" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="OPENAI_API_KEY"></div><div class="field"><label for="provider-key">供应商 API Key</label><input id="provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div>
-        <div class="field-row"><div class="field"><label for="input-price">输入价格 / 1M Token（元）</label><input id="input-price" name="input_price" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="output-price">输出价格 / 1M Token（元）</label><input id="output-price" name="output_price" type="number" min="0" step="0.001" value="0"></div></div>
+        ${preset ? `<div class="provider-model-create-summary"><span class="admin-provider-logo">${providerLogo(provider)}</span><div><strong>${escapeHtml(provider)} 服务商接入</strong><span>模型将复用该服务商的地址与凭证配置，并归入当前服务商系列。</span></div></div><input name="provider_preset_id" type="hidden" value="${escapeHtml(preset.id)}"><input name="provider_base_url" type="hidden" value="${escapeHtml(providerBaseUrl)}"><input name="provider_api_key_env" type="hidden" value="${escapeHtml(providerKeyEnv)}">` : ""}
+        ${providerFormFields}
       </div>
-      <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">添加模型</button></div>
+      <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit"${preset && !availableProviderModels.length ? " disabled" : ""}>添加模型</button></div>
     </form>`);
-  document.getElementById("dialog-form").addEventListener("submit", async (event) => {
+  const form = document.getElementById("dialog-form");
+  if (preset) {
+    const selector = document.getElementById("provider-model-id");
+    const preview = document.getElementById("provider-model-auto-preview");
+    const updatePreview = () => {
+      const model = providerModels.find((item) => item.model_id === selector.value);
+      if (!model) { preview.hidden = true; preview.innerHTML = ""; return; }
+      const metadata = model.catalog_metadata || {};
+      const capabilities = (metadata.capabilities || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("") || "<span>按服务商配置</span>";
+      const modalities = (metadata.modalities || []).join(" · ") || "文本";
+      preview.innerHTML = `<div class="provider-model-auto-preview-heading"><span>自动带入参数</span><code>${escapeHtml(model.model_id)}</code></div><div class="provider-model-auto-preview-grid"><div><span>模型版本</span><strong>${escapeHtml(model.model_version || metadata.model_version || "待上游确认")}</strong></div><div><span>上下文</span><strong>${escapeHtml(model.context_window || metadata.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(model.max_output_tokens || metadata.max_output_tokens))}</strong></div><div><span>模态</span><strong>${escapeHtml(modalities)}</strong></div><div><span>平台输入 / 1M</span><strong>${formatTokenPricePerMillion(model.platform_input_price_micros_per_1k)}</strong></div><div><span>平台输出 / 1M</span><strong>${formatTokenPricePerMillion(model.platform_output_price_micros_per_1k)}</strong></div></div><div class="provider-model-auto-preview-capabilities"><span>能力</span><div>${capabilities}</div></div>`;
+      preview.hidden = false;
+    };
+    selector.addEventListener("change", updatePreview);
+  }
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
-    const payload = {
+    const payload = preset ? {
+      provider_preset_id: preset.id,
+      upstream_model: data.upstream_model,
+    } : {
       public_name: data.public_name,
       upstream_model: data.upstream_model,
       provider_base_url: data.provider_base_url || null,
@@ -1136,6 +1187,16 @@ async function modelImportDialog() {
 
 function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMicros) {
   const model = state.models.find((item) => item.id === Number(modelId));
+  if (model && modelApiType(model) !== "chat_completions") {
+    const unit = modelApiType(model) === "video_generations" ? "次视频生成" : "张图片生成";
+    openDialog(`任务定价 · ${modelName}`, `<form id="task-pricing-form"><div class="dialog-body"><div class="field"><label for="task-price">平台售价 / ${unit}（元）</label><input id="task-price" name="task_price" type="number" min="0.001" step="0.001" value="${(Number(model.task_price_micros || 0) / 1000000).toFixed(3)}" required><small class="field-hint">该模型按任务计费，不使用 Token 输入或输出价格。</small></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存定价</span></button></div></form>`);
+    document.getElementById("task-pricing-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const taskPriceMicros = Math.round(Number(new FormData(event.currentTarget).get("task_price") || 0) * 1000000);
+      try { await api(`/admin/models/${modelId}`, { method: "PATCH", body: JSON.stringify({ task_price_micros: taskPriceMicros }) }); closeDialog(); toast("任务定价已保存"); await loadModels(); } catch (error) { toast(error.message, true); }
+    });
+    return;
+  }
   const pricing = model?.official_pricing;
   const officialReference = officialTokenReference(pricing);
   const hasOfficialPrice = Boolean(officialReference);
@@ -1148,8 +1209,10 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
   const sourceLabel = pricing?.source || "服务商官方价格";
   const tierRows = Array.isArray(pricing?.tiers) ? pricing.tiers.map((tier) => `<div><span>${formatTokenBound(tier.min_input_tokens_exclusive)} &lt; 输入 ≤ ${formatTokenBound(tier.max_input_tokens_inclusive)}</span><strong>输入 ${formatMoney(tier.input_micros)} · 输出 ${formatMoney(tier.output_micros)}</strong></div>`).join("") : "";
   const reference = pricing?.off_peak ? `
-    <div class="field-hint">官方成本参考价（人民币 / 1M Token，按 ${pricing.exchange_rate_usd_to_cny || "部署配置"} 汇率换算）</div>
-    <div class="key-detail-grid"><div><span>缓存命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>未命中 · 低峰</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出 · 低峰</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div><div><span>来源</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : hasOfficialPrice ? `
+    <section class="pricing-reference" aria-label="官方成本参考">
+      <div class="pricing-reference-heading"><div><span>官方成本参考</span><strong>人民币 / 1M Token</strong></div><div class="pricing-reference-actions"><span>低峰时段</span><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">查看官网价格<i data-lucide="external-link"></i></a></div></div>
+      <div class="pricing-reference-grid"><div><span>缓存命中输入</span><strong>${formatMoney(pricing.off_peak.input_cache_hit_micros)}</strong></div><div><span>缓存未命中输入</span><strong>${formatMoney(pricing.off_peak.input_cache_miss_micros)}</strong></div><div><span>输出价格</span><strong>${formatMoney(pricing.off_peak.output_micros)}</strong></div></div>
+    </section>` : hasOfficialPrice ? `
     <div class="field-hint">官方标准成本价（人民币 / 1M Token，不含活动优惠）</div>
     <div class="key-detail-grid pricing-tier-grid">${tierRows}<div><span>来源 · ${escapeHtml(pricing.region || "中国")}</span><strong><a href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(sourceLabel)}</a></strong></div></div>` : pricing?.unit === "per_image" ? `
     <div class="field-hint">官方图像成本价（按张计费，等待图像任务适配器）</div>
@@ -1162,7 +1225,7 @@ function modelPricingDialog(modelId, modelName, inputPriceMicros, outputPriceMic
         ${reference}
         ${hasOfficialPrice ? `<div class="field"><label for="model-pricing-mode">定价方式</label><select id="model-pricing-mode" name="pricing_mode"><option value="margin" selected>按官方价格和利润率自动定价</option><option value="manual">手工设置平台售价</option></select></div><div class="field" id="model-margin-field"><label for="model-margin">目标利润率（%）</label><input id="model-margin" name="margin" type="number" min="0.01" max="99" step="0.01" value="${initialMargin}" required><small class="field-hint">按毛利率计算：平台售价 = 官方价格 ÷（1 - 利润率）。阶梯模型以第一档标准原价生成基础售价，实际结算需按请求输入 Token 命中对应成本阶梯。</small></div>` : pricing?.unit === "per_image" ? '<p class="dialog-copy">该模型按张计费，图像任务适配器和独立计价字段启用前不能发布；此处不写入 Token 售价。</p>' : `<p class="dialog-copy">该模型尚无可核验的官方价格，请打开上方官方来源核对当前模型价格后，再手工设置 LokToken 平台售价。</p>`}
         <div class="field-row"><div class="field"><label for="model-input-price">平台输入售价 / 1M Token（元）</label><input id="model-input-price" name="input_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(inputPriceMicros)}" required></div><div class="field"><label for="model-output-price">平台输出售价 / 1M Token（元）</label><input id="model-output-price" name="output_price" type="number" min="0" step="0.001" value="${microsPerThousandToYuanPerMillion(outputPriceMicros)}" required></div></div>
-        <p class="dialog-copy">这里维护该模型面向 LokToken 用户的最终售价，按人民币 / 1M Token 计费。供应商采购成本请在该模型的“渠道”中单独维护。新价格只用于后续请求，已结算请求不会被修改。</p>
+        <p class="dialog-copy">设置 LokToken 面向用户的公开售价，按人民币 / 1M Token 计费。供应商采购成本请在“渠道”中维护；新价格仅对后续请求生效，不影响已结算记录。</p>
       </div>
       <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存定价</span></button></div>
     </form>`);
@@ -1200,43 +1263,58 @@ async function channelDialog(modelId, modelName) {
   const result = await api(`/admin/models/${modelId}/channels`);
   state.channels = result.data;
   const rows = result.data.length ? result.data.map((item) => `
-    <tr>
-      <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary mono">${escapeHtml(item.upstream_model)}</span></div></td>
-      <td><div class="primary-cell"><span>${escapeHtml(item.provider_base_url)}</span><span class="secondary">${escapeHtml(channelCredentialLabel(item))} · ${item.credentials_configured ? "密钥已配置" : "密钥未配置"}</span></div></td>
-      <td>${item.priority}</td>
-      <td>${item.weight}</td>
-      <td><div class="primary-cell"><span>输入 ${item.provider_input_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_input_cost_micros_per_1k) : "未配置"}</span><span class="secondary">输出 ${item.provider_output_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_output_cost_micros_per_1k) : "未配置"}</span></div></td>
-      <td>${channelStatusBadge(item.status)}<span class="secondary block-text">${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : item.health_source === "catalogue" ? "目录状态" : "尚未检测"}</span>${item.circuit_open_until ? `<span class="secondary block-text">熔断至 ${formatDate(item.circuit_open_until)}</span>` : ""}</td>
-      <td>${item.consecutive_failures}</td>
-      <td class="align-right"><div class="table-actions"><button class="table-button" data-action="edit-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="settings-2"></i><span>编辑</span></button><button class="table-button" data-action="check-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="activity"></i><span>检测</span></button><button class="table-button" data-action="toggle-channel" data-id="${item.id}" data-active="${!item.active}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}">${item.active ? "停用" : "启用"}</button></div></td>
-    </tr>
-  `).join("") : emptyRow(8, "还没有可用渠道");
+    <article class="channel-record">
+      <div class="channel-record-header"><div><strong>${escapeHtml(item.name)}</strong><code>${escapeHtml(item.upstream_model)}</code></div><div class="channel-record-state">${activeBadge(item.active)}${channelStatusBadge(item.status)}</div></div>
+      <div class="channel-record-grid">
+        <div><span>供应商地址</span><strong title="${escapeHtml(item.provider_base_url)}">${escapeHtml(item.provider_base_url)}</strong><small>${escapeHtml(channelCredentialLabel(item))} · ${item.credentials_configured ? "密钥已配置" : "密钥未配置"}</small></div>
+        <div><span>路由策略</span><strong>优先级 ${formatNumber(item.priority)}</strong><small>同级权重 ${formatNumber(item.weight)}</small></div>
+        <div><span>供应商成本 / 1M</span><strong>输入 ${item.provider_input_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_input_cost_micros_per_1k) : "未配置"}</strong><small>输出 ${item.provider_output_cost_micros_per_1k ? formatTokenPricePerMillion(item.provider_output_cost_micros_per_1k) : "未配置"}</small></div>
+        <div><span>检测状态</span><strong>${item.health_source === "provider" ? "真实检测" : item.health_source === "mock" ? "Mock 检测" : item.health_source === "catalogue" ? "目录状态" : "尚未检测"}</strong><small>连续失败 ${formatNumber(item.consecutive_failures)} 次${item.circuit_open_until ? ` · 熔断至 ${formatDate(item.circuit_open_until)}` : ""}</small></div>
+      </div>
+      <div class="channel-record-footer"><span>${item.circuit_open_until ? "该渠道当前处于熔断保护期" : "可通过检测确认当前上游可用性"}</span><div class="table-actions"><button class="table-button" data-action="edit-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="settings-2"></i><span>编辑</span></button><button class="table-button" data-action="check-channel" data-id="${item.id}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}"><i data-lucide="activity"></i><span>检测</span></button><button class="table-button" data-action="toggle-channel" data-id="${item.id}" data-active="${!item.active}" data-model-id="${modelId}" data-model-name="${escapeHtml(modelName)}">${item.active ? "停用" : "启用"}</button></div></div>
+    </article>
+  `).join("") : '<div class="channel-empty"><i data-lucide="route"></i><strong>尚未接入渠道</strong><span>新增一个上游连接后，该模型才可用于真实调用。</span></div>';
   openDialog(`渠道管理 · ${modelName}`, `
     <div class="channel-workspace">
-      <div class="table-wrap channel-table"><table><thead><tr><th>渠道 / 上游</th><th>供应商地址</th><th>优先级</th><th>权重</th><th>供应商成本 / 1M Token</th><th>健康</th><th>失败</th><th class="align-right">操作</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <form id="channel-form" class="channel-form">
-        <div class="section-header"><div><h2>新增渠道</h2><p>优先级数值越小越先尝试，同级按权重分配</p></div></div>
-        <div class="dialog-body">
-          <div class="field-row"><div class="field"><label for="channel-name">渠道名称</label><input id="channel-name" name="name" required maxlength="120" placeholder="例如：华东主线路"></div><div class="field"><label for="channel-upstream">上游模型</label><input id="channel-upstream" name="upstream_model" required maxlength="120"></div></div>
-          <div class="field"><label for="channel-url">供应商地址</label><input id="channel-url" name="provider_base_url" required maxlength="500" placeholder="https://api.example.com/v1"></div>
-          <div class="field-row"><div class="field"><label for="channel-key-env">密钥环境变量</label><input id="channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="DEEPSEEK_API_KEY"></div><div class="field"><label for="channel-provider-key">供应商 API Key</label><input id="channel-provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="可选，服务端加密保存"></div></div><small class="field-hint">二选一：填写环境变量名，或直接录入供应商 Key。Key 只在提交时传输，服务端加密保存且不会再次显示。</small>
-          <div class="field"><label for="channel-priority">优先级</label><input id="channel-priority" name="priority" type="number" min="0" max="10000" value="100" required></div>
-          <div class="field"><label for="channel-weight">同级权重</label><input id="channel-weight" name="weight" type="number" min="1" max="10000" value="100" required></div>
-          <div class="field-row"><div class="field"><label for="channel-provider-input-cost">供应商输入成本 / 1M Token（元）</label><input id="channel-provider-input-cost" name="provider_input_cost" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="channel-provider-output-cost">供应商输出成本 / 1M Token（元）</label><input id="channel-provider-output-cost" name="provider_output_cost" type="number" min="0" step="0.001" value="0"></div></div>
-          <small class="field-hint">填写供应商实际成本后，请求记录会计算平台毛利；留空或 0 表示暂不做成本对账。</small>
-        </div>
-        <div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="submit"><i data-lucide="plus"></i><span>新增渠道</span></button></div>
-      </form>
+      <section class="channel-overview"><div class="channel-overview-heading"><div><span>已接入渠道</span><p>按优先级路由；同优先级渠道按权重分配流量。</p></div><strong>${formatNumber(result.data.length)} 个</strong></div><div class="channel-record-list">${rows}</div></section>
+      <details class="channel-create-panel" ${result.data.length ? "" : "open"}>
+        <summary><div><strong>新增备用渠道</strong><span>添加可用于容灾或分流的上游连接</span></div><i data-lucide="chevron-down"></i></summary>
+        <form id="channel-form" class="channel-form">
+          <div class="channel-form-body">
+            <section class="channel-form-section"><div class="channel-form-section-heading"><div><strong>基础路由</strong><span>定义该连接指向的上游服务与模型。</span></div></div><div class="field-row"><div class="field"><label for="channel-name">渠道名称</label><input id="channel-name" name="name" required maxlength="120" placeholder="例如：华东备用线路"></div><div class="field"><label for="channel-upstream">上游模型</label><input id="channel-upstream" name="upstream_model" required maxlength="120" placeholder="例如：deepseek-v4-flash"></div></div><div class="field"><label for="channel-url">供应商地址</label><input id="channel-url" name="provider_base_url" required maxlength="500" placeholder="https://api.example.com/v1"></div></section>
+            <section class="channel-form-section"><div class="channel-form-section-heading"><div><strong>凭证配置</strong><span>选择一种凭证来源；密钥明文只在提交时传输。</span></div></div><div class="channel-credential-options"><label class="channel-credential-option"><input type="radio" name="credential_mode" value="environment" checked><span><strong>使用环境变量</strong><small>由部署环境注入，适合生产服务。</small></span></label><label class="channel-credential-option"><input type="radio" name="credential_mode" value="console"><span><strong>保存 API Key</strong><small>由控制台加密保管，不会再次显示。</small></span></label></div><div id="channel-env-credential" class="field"><label for="channel-key-env">密钥环境变量</label><input id="channel-key-env" name="provider_api_key_env" maxlength="120" pattern="[A-Z][A-Z0-9_]{1,119}" placeholder="DEEPSEEK_API_KEY" required></div><div id="channel-console-credential" class="field" hidden><label for="channel-provider-key">供应商 API Key</label><input id="channel-provider-key" name="provider_api_key" type="password" autocomplete="new-password" placeholder="输入后将由服务端加密保存"></div></section>
+            <section class="channel-form-section"><div class="channel-form-section-heading"><div><strong>调度策略</strong><span>数字越小越优先；仅同级渠道参与权重分流。</span></div></div><div class="field-row"><div class="field"><label for="channel-priority">优先级</label><input id="channel-priority" name="priority" type="number" min="0" max="10000" value="100" required></div><div class="field"><label for="channel-weight">同级权重</label><input id="channel-weight" name="weight" type="number" min="1" max="10000" value="100" required></div></div></section>
+            <section class="channel-form-section"><div class="channel-form-section-heading"><div><strong>采购成本</strong><span>用于毛利与供应商账单核对，不等同于面向用户的平台售价。</span></div></div><div class="field-row"><div class="field"><label for="channel-provider-input-cost">输入成本 / 1M Token（元）</label><input id="channel-provider-input-cost" name="provider_input_cost" type="number" min="0" step="0.001" value="0"></div><div class="field"><label for="channel-provider-output-cost">输出成本 / 1M Token（元）</label><input id="channel-provider-output-cost" name="provider_output_cost" type="number" min="0" step="0.001" value="0"></div></div></section>
+          </div>
+          <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="plus"></i><span>新增渠道</span></button></div>
+        </form>
+      </details>
     </div>`);
-  document.getElementById("channel-form").addEventListener("submit", async (event) => {
+  const channelForm = document.getElementById("channel-form");
+  const credentialModeInputs = channelForm.querySelectorAll('input[name="credential_mode"]');
+  const environmentCredential = document.getElementById("channel-env-credential");
+  const consoleCredential = document.getElementById("channel-console-credential");
+  const environmentInput = document.getElementById("channel-key-env");
+  const consoleInput = document.getElementById("channel-provider-key");
+  const syncCredentialMode = () => {
+    const useEnvironment = channelForm.querySelector('input[name="credential_mode"]:checked').value === "environment";
+    environmentCredential.hidden = !useEnvironment;
+    consoleCredential.hidden = useEnvironment;
+    environmentInput.required = useEnvironment;
+    consoleInput.required = !useEnvironment;
+  };
+  credentialModeInputs.forEach((input) => input.addEventListener("change", syncCredentialMode));
+  syncCredentialMode();
+  channelForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
+    const useEnvironment = data.credential_mode === "environment";
     const payload = {
       name: data.name,
       upstream_model: data.upstream_model,
       provider_base_url: data.provider_base_url,
-      provider_api_key_env: data.provider_api_key_env || null,
-      provider_api_key: data.provider_api_key || null,
+      provider_api_key_env: useEnvironment ? data.provider_api_key_env : null,
+      provider_api_key: useEnvironment ? null : data.provider_api_key,
       priority: Number(data.priority),
       weight: Number(data.weight),
       provider_input_cost_micros_per_1k: yuanPerMillionToMicrosPerThousand(data.provider_input_cost),
@@ -1503,10 +1581,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "account-detail") accountDetailDialog(target.dataset.id);
     if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
+    if (target.dataset.action === "create-provider-model") modelDialog(target.dataset.providerId);
     if (target.dataset.action === "model-detail-admin") modelAdminDetailDialog(target.dataset.id);
     if (target.dataset.action === "health-check-all") checkAllChannels().catch((error) => toast(error.message, true));
+    if (target.dataset.action === "health-check-provider") checkAllChannels(target.dataset.providerId).catch((error) => toast(error.message, true));
     if (target.dataset.action === "preflight-model") preflightModel(target.dataset.id, target.dataset.name);
-    if (target.dataset.action === "import-models") modelImportDialog().catch((error) => toast(error.message, true));
     if (target.dataset.action === "configure-provider") providerConnectionDialog(target.dataset.providerId);
     if (target.dataset.action === "manual-provider-balance") manualProviderBalanceDialog(target.dataset.providerId);
     if (target.dataset.action === "refresh-provider-balance") {

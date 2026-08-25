@@ -146,8 +146,9 @@ class ApiKeyResponse(BaseModel):
 
 
 class ModelCreate(BaseModel):
-    public_name: str = Field(min_length=1, max_length=120)
+    public_name: str | None = Field(default=None, min_length=1, max_length=120)
     upstream_model: str = Field(min_length=1, max_length=120)
+    provider_preset_id: str | None = Field(default=None, max_length=64)
     provider_base_url: str | None = None
     provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
     provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
@@ -188,6 +189,7 @@ class ModelUpdate(BaseModel):
     input_price_micros_per_1k: int | None = Field(default=None, ge=0)
     output_price_micros_per_1k: int | None = Field(default=None, ge=0)
     pricing_margin_bps: int | None = Field(default=None, ge=0, le=9900)
+    task_price_micros: int | None = Field(default=None, ge=0)
     active: bool | None = None
 
 
@@ -266,6 +268,29 @@ class ChatCompletionRequest(BaseModel):
     stream_options: dict[str, Any] | None = None
     stream: bool = False
     user: str | None = None
+
+
+class ImageGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1, max_length=4000)
+    n: int = Field(default=1, ge=1, le=4)
+    size: str | None = Field(default=None, max_length=32)
+    response_format: Literal["url", "b64_json"] | None = None
+    negative_prompt: str | None = Field(default=None, max_length=4000)
+    image: str | None = Field(default=None, max_length=4_000_000)
+
+
+class VideoGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(min_length=1, max_length=120)
+    prompt: str = Field(min_length=1, max_length=4000)
+    duration_seconds: int | None = Field(default=None, ge=1, le=30)
+    size: str | None = Field(default=None, max_length=32)
+    image: str | None = Field(default=None, max_length=4_000_000)
+    negative_prompt: str | None = Field(default=None, max_length=4000)
 
 
 class UsageSummary(BaseModel):

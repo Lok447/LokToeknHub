@@ -25,15 +25,15 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -1241,21 +1241,48 @@ def list_account_transactions(account_id: int, db: Session = Depends(get_db)) ->
 
 @app.post("/admin/models", dependencies=[Depends(require_operator)])
 def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[str, object]:
-    if db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.public_name)):
-        raise HTTPException(status_code=409, detail="model already exists")
     settings = get_settings()
+    preset = get_provider_preset(payload.provider_preset_id) if payload.provider_preset_id else None
+    if payload.provider_preset_id and not preset:
+        raise HTTPException(status_code=422, detail="provider preset not found")
+    preset_model = preset.get_model(payload.upstream_model) if preset else None
+    if preset and not preset_model:
+        raise HTTPException(status_code=422, detail="该模型尚未纳入已核验的服务商目录，不能自动带入参数")
+    public_name = preset_model.public_name if preset_model else payload.public_name
+    if not public_name:
+        raise HTTPException(status_code=422, detail="custom model requires public_name")
+    if db.scalar(select(ModelConfig).where(ModelConfig.public_name == public_name)):
+        raise HTTPException(status_code=409, detail="model already exists")
+    connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id)) if preset else None
+    provider_name = str(preset.models[0].catalog_metadata.get("provider") or preset.name) if preset and preset.models else None
+    provider_base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url if preset else settings.default_provider_base_url)
+    provider_api_key_env = payload.provider_api_key_env or (connection.provider_api_key_env if connection else preset.api_key_env if preset else None)
+    catalog_metadata = dict(preset_model.catalog_metadata) if preset_model else {
+        "display_name": payload.public_name,
+        "provider": provider_name,
+        "summary": f"通过 {provider_name} 服务商连接手工接入的模型。" if provider_name else "手工接入的自定义模型。",
+        "modalities": ["text"],
+        "capabilities": ["对话"],
+        "supported_parameters": ["stream", "temperature", "max_tokens"],
+        "context_window": "按上游配置",
+        "model_version": "",
+        "api_type": "chat_completions",
+    }
     record = ModelConfig(
-        public_name=payload.public_name,
-        upstream_model=payload.upstream_model,
-        provider_base_url=payload.provider_base_url or settings.default_provider_base_url,
-        provider_api_key_env=payload.provider_api_key_env,
-        input_price_micros_per_1k=payload.input_price_micros_per_1k,
-        output_price_micros_per_1k=payload.output_price_micros_per_1k,
+        public_name=public_name,
+        upstream_model=preset_model.model_id if preset_model else payload.upstream_model,
+        provider_base_url=provider_base_url,
+        provider_api_key_env=provider_api_key_env,
+        input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k if preset_model else payload.input_price_micros_per_1k,
+        output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k if preset_model else payload.output_price_micros_per_1k,
+        catalog_metadata_json=json.dumps(catalog_metadata, ensure_ascii=False),
+        official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model and preset_model.official_pricing else None,
     )
     db.add(record)
     db.flush()
     channel = ModelChannel(
         model_config_id=record.id,
+        provider_connection_id=connection.id if connection else None,
         name="Primary",
         upstream_model=record.upstream_model,
         provider_base_url=record.provider_base_url,
@@ -1268,6 +1295,8 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
             channel.encrypted_api_key = encrypt_provider_secret(payload.provider_api_key)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+    elif connection and connection.encrypted_api_key:
+        channel.encrypted_api_key = connection.encrypted_api_key
     db.add(channel)
     db.commit()
     db.refresh(record)
@@ -1527,6 +1556,7 @@ async def configure_provider_connection(
                 provider_api_key_env=env_name,
                 input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k or default_input_price,
                 output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k or default_output_price,
+                task_price_micros=preset_model.platform_task_price_micros,
                 catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
                 official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
                 active=False,
@@ -1544,6 +1574,8 @@ async def configure_provider_connection(
                 model.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k or default_input_price
             if model.output_price_micros_per_1k <= 0:
                 model.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k or default_output_price
+            if model.task_price_micros <= 0:
+                model.task_price_micros = preset_model.platform_task_price_micros
         channel = db.scalar(select(ModelChannel).where(
             ModelChannel.model_config_id == model.id,
             ModelChannel.provider_connection_id == connection.id,
@@ -1571,19 +1603,21 @@ async def configure_provider_connection(
             channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
         if not channel.provider_output_cost_micros_per_1k:
             channel.provider_output_cost_micros_per_1k = preset_model.platform_output_price_micros_per_1k
+        if not channel.provider_task_cost_micros and preset_model.provider_task_cost_micros:
+            channel.provider_task_cost_micros = preset_model.provider_task_cost_micros
         available = preset_model.model_id in discovered_ids
         metadata_api_type = preset_model.catalog_metadata.get("api_type", "chat_completions")
-        channel.active = available and metadata_api_type == "chat_completions"
-        channel.status = "healthy" if channel.active else "unavailable" if metadata_api_type == "chat_completions" else "pending_adapter"
+        task_adapter_ready = metadata_api_type in {"images_generations", "video_generations"}
+        channel.active = available and (metadata_api_type == "chat_completions" or task_adapter_ready)
+        channel.status = "healthy" if channel.active else "unavailable"
         channel.health_source = "provider"
         channel.consecutive_failures = 0 if available else channel.consecutive_failures
         channel.last_checked_at = connection.last_checked_at
         channel.last_error = (
-            None if available and metadata_api_type == "chat_completions"
-            else "等待统一调用适配器" if metadata_api_type != "chat_completions"
+            None if available and (metadata_api_type == "chat_completions" or task_adapter_ready)
             else f"当前服务商账号尚未开放上游模型: {preset_model.model_id}"
         )
-        price_ready = model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0
+        price_ready = model.input_price_micros_per_1k > 0 and model.output_price_micros_per_1k > 0 if metadata_api_type == "chat_completions" else model.task_price_micros > 0
         callable_now = channel.active and price_ready
         if not available:
             model.active = False
@@ -1595,10 +1629,11 @@ async def configure_provider_connection(
             "upstream_model": model.upstream_model,
             "input_price_micros_per_1k": model.input_price_micros_per_1k,
             "output_price_micros_per_1k": model.output_price_micros_per_1k,
+            "task_price_micros": model.task_price_micros,
             "pricing_margin_bps": model.pricing_margin_bps,
             "available": available,
             "callable": bool(model.active and callable_now),
-            "reason": None if callable_now else "等待统一调用适配器" if metadata_api_type != "chat_completions" else "请配置平台价格" if not price_ready else "尚未发布",
+            "reason": None if callable_now else "请配置任务价格" if metadata_api_type != "chat_completions" and not price_ready else "请配置平台价格" if not price_ready else "尚未发布",
         })
     connection.synced_model_count = len(synced)
     connection.callable_model_count = sum(1 for item in synced if item["callable"])
@@ -1776,16 +1811,14 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
     if changes.get("active"):
         catalog_metadata = parse_model_json(model.catalog_metadata_json) or {}
         api_type = catalog_metadata.get("api_type", "chat_completions")
-        if api_type != "chat_completions":
-            raise HTTPException(
-                status_code=422,
-                detail=f"当前网关尚未启用 {api_type} 统一调用适配器，不能发布该模型",
-            )
         settings = get_settings()
         input_price = changes.get("input_price_micros_per_1k", model.input_price_micros_per_1k)
         output_price = changes.get("output_price_micros_per_1k", model.output_price_micros_per_1k)
-        if input_price <= 0 or output_price <= 0:
+        task_price = changes.get("task_price_micros", model.task_price_micros)
+        if api_type == "chat_completions" and (input_price <= 0 or output_price <= 0):
             raise HTTPException(status_code=422, detail="configure positive platform input and output prices before publishing a model")
+        if api_type in {"images_generations", "video_generations"} and task_price <= 0:
+            raise HTTPException(status_code=422, detail="发布任务模型前需配置大于 0 的单次生成价格")
         channels = db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == model.id)).all()
         if settings.mock_mode:
             healthy_channel = any(channel.active and channel.status == "healthy" for channel in channels)
@@ -1969,8 +2002,22 @@ async def run_channel_health_check(channel_id: int, db: Session = Depends(get_db
 
 
 @app.post("/admin/models/health-check", dependencies=[Depends(require_operator)])
-async def run_all_channel_health_checks(db: Session = Depends(get_db)) -> dict[str, object]:
+async def run_all_channel_health_checks(provider_preset_id: str | None = None, db: Session = Depends(get_db)) -> dict[str, object]:
     channels = db.scalars(select(ModelChannel).where(ModelChannel.active.is_(True)).order_by(ModelChannel.priority, ModelChannel.id)).all()
+    if provider_preset_id:
+        preset = get_provider_preset(provider_preset_id)
+        if not preset:
+            raise HTTPException(status_code=422, detail="provider preset not found")
+        provider_name = str(preset.models[0].catalog_metadata.get("provider") or preset.name) if preset.models else preset.name
+        connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id))
+        model_providers = {
+            model.id: (parse_model_json(model.catalog_metadata_json) or {}).get("provider")
+            for model in db.scalars(select(ModelConfig)).all()
+        }
+        channels = [
+            channel for channel in channels
+            if (connection and channel.provider_connection_id == connection.id) or model_providers.get(channel.model_config_id) == provider_name
+        ]
     results = []
     for channel in channels:
         result = await check_channel_health(db, channel)
@@ -2077,6 +2124,7 @@ def list_models(authorization: str | None = Header(default=None), db: Session = 
             "pricing": {
                 "input_cny_per_1k": item.input_price_micros_per_1k,
                 "output_cny_per_1k": item.output_price_micros_per_1k,
+                "task_cny": item.task_price_micros,
             },
             "supported_parameters": metadata.get("supported_parameters", ["messages", "stream", "temperature", "max_tokens"]),
             "gateway_profile": metadata.get("gateway_profile"),
@@ -2103,6 +2151,172 @@ def account_balance(authorization: str | None = Header(default=None), db: Sessio
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
     return AccountBalance(account_id=account.id, external_user_id=account.external_user_id, api_key_id=api_key.id, balance_micros=account.balance_micros)
+
+
+def _generation_context(
+    authorization: str | None,
+    model_name: str,
+    expected_api_type: str,
+    db: Session,
+) -> tuple[ApiKey, BillingAccount, ModelConfig]:
+    api_key = require_api_key(authorization, db)
+    settings = get_settings()
+    rate_limiter.check("api", str(api_key.id), settings.api_rate_limit_requests, settings.api_rate_limit_window_seconds)
+    account = db.get(BillingAccount, api_key.account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
+    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_name, ModelConfig.active.is_(True)))
+    if not model:
+        raise HTTPException(status_code=404, detail=f"unknown model: {model_name}")
+    metadata = parse_model_json(model.catalog_metadata_json) or {}
+    if metadata.get("api_type") != expected_api_type:
+        raise HTTPException(status_code=422, detail=f"模型 {model_name} 不是当前生成协议可调用模型")
+    if not model_is_callable(db, model):
+        raise HTTPException(status_code=503, detail=f"model unavailable: {model_name}")
+    if model.task_price_micros <= 0:
+        raise HTTPException(status_code=503, detail=f"model pricing unavailable: {model_name}")
+    return api_key, account, model
+
+
+def _generation_response(task: GenerationTask, model: ModelConfig) -> dict[str, object]:
+    result = parse_model_json(task.result_json) or {}
+    return {
+        "id": task.task_id,
+        "object": "video.generation" if task.task_type == "video_generations" else "image.generation",
+        "created": int(task.created_at.timestamp()),
+        "model": model.public_name,
+        "status": task.status,
+        "data": result.get("data", []),
+        "error": task.error_message,
+    }
+
+
+def _settle_generation_task(db: Session, task: GenerationTask, account: BillingAccount, api_key: ApiKey, model: ModelConfig, *, success: bool, provider_cost_micros: int = 0) -> None:
+    if task.settled_at:
+        return
+    actual_amount = task.reserved_micros if success else 0
+    settle_balance(db, account, api_key, task.reserved_micros, actual_amount, task.request_id)
+    save_usage(
+        db, api_key, model, task.request_id, task.trace_id, 0, 0,
+        "success" if success else "error", 0, task.error_message,
+        provider_cost_micros=provider_cost_micros,
+        provider_channel_id=task.provider_channel_id,
+        provider_request_id=task.provider_task_id,
+        raw_usage={"task_id": task.task_id, "task_type": task.task_type, "quantity": task.quantity, "result": parse_model_json(task.result_json)},
+        amount_micros=actual_amount,
+    )
+    task.settled_at = utcnow()
+    db.commit()
+
+
+async def _create_generation(
+    payload: ImageGenerationRequest | VideoGenerationRequest,
+    expected_api_type: str,
+    authorization: str | None,
+    x_request_id: str | None,
+    x_trace_id: str | None,
+    db: Session,
+) -> JSONResponse:
+    api_key, account, model = _generation_context(authorization, payload.model, expected_api_type, db)
+    request_id = x_request_id or "req_" + uuid.uuid4().hex
+    trace_id = x_trace_id or request_id
+    if not _request_id_pattern.fullmatch(request_id) or not _request_id_pattern.fullmatch(trace_id):
+        raise HTTPException(status_code=422, detail="request and trace IDs must be 1-64 URL-safe characters")
+    if db.scalar(select(GenerationTask).where(GenerationTask.request_id == request_id)) or db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
+        raise HTTPException(status_code=409, detail="request id already used")
+    quantity = int(getattr(payload, "n", 1) or 1)
+    reservation = model.task_price_micros * quantity
+    try:
+        reserve_balance(db, account, api_key, reservation, request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
+    task = GenerationTask(
+        task_id="task_" + uuid.uuid4().hex,
+        account_id=account.id,
+        api_key_id=api_key.id,
+        model_config_id=model.id,
+        request_id=request_id,
+        trace_id=trace_id,
+        task_type=expected_api_type,
+        status="processing",
+        quantity=quantity,
+        reserved_micros=reservation,
+    )
+    db.add(task)
+    db.commit()
+    try:
+        upstream_payload = payload.model_dump(exclude_none=True)
+        detail = await create_provider_task(db, model, upstream_payload)
+        task.provider_channel_id = detail.channel_id
+        task.provider_task_id = detail.provider_task_id
+        task.status = detail.status
+        task.result_json = json.dumps(detail.result, ensure_ascii=False)
+        task.updated_at = utcnow()
+        db.commit()
+        if detail.status in {"completed", "failed"}:
+            task.error_message = None if detail.status == "completed" else "provider task failed"
+            _settle_generation_task(db, task, account, api_key, model, success=detail.status == "completed", provider_cost_micros=detail.provider_cost_micros)
+        response = _generation_response(task, model)
+        return JSONResponse(response, status_code=200 if detail.status == "completed" else 202, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
+    except HTTPException as exc:
+        task.status = "failed"
+        task.error_message = str(exc.detail)
+        task.updated_at = utcnow()
+        db.commit()
+        _settle_generation_task(db, task, account, api_key, model, success=False)
+        raise
+
+
+@app.post("/v1/images/generations")
+async def image_generations(
+    payload: ImageGenerationRequest,
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _create_generation(payload, "images_generations", authorization, x_request_id, x_trace_id, db)
+
+
+@app.post("/v1/videos/generations")
+async def video_generations(
+    payload: VideoGenerationRequest,
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _create_generation(payload, "video_generations", authorization, x_request_id, x_trace_id, db)
+
+
+@app.get("/v1/generation-tasks/{task_id}")
+async def generation_task(task_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = require_api_key(authorization, db)
+    task = db.scalar(select(GenerationTask).where(GenerationTask.task_id == task_id, GenerationTask.api_key_id == api_key.id))
+    if not task:
+        raise HTTPException(status_code=404, detail="generation task not found")
+    model = db.get(ModelConfig, task.model_config_id)
+    account = db.get(BillingAccount, task.account_id)
+    if not model or not account:
+        raise HTTPException(status_code=404, detail="generation task model or account not found")
+    if task.status == "processing":
+        try:
+            detail = await refresh_provider_task(db, task, model)
+            task.status = detail.status
+            task.provider_task_id = detail.provider_task_id
+            task.result_json = json.dumps(detail.result, ensure_ascii=False)
+            task.updated_at = utcnow()
+            db.commit()
+            if task.status in {"completed", "failed"}:
+                task.error_message = None if task.status == "completed" else "provider task failed"
+                _settle_generation_task(db, task, account, api_key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros)
+        except HTTPException as exc:
+            task.status = "failed"
+            task.error_message = str(exc.detail)
+            task.updated_at = utcnow()
+            db.commit()
+            _settle_generation_task(db, task, account, api_key, model, success=False)
+    return _generation_response(task, model)
 
 
 @app.post("/v1/chat/completions")

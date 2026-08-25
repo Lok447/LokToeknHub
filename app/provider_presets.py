@@ -129,6 +129,8 @@ class ProviderModelPreset:
     official_pricing: dict[str, object] | None = None
     platform_input_price_micros_per_1k: int = 0
     platform_output_price_micros_per_1k: int = 0
+    platform_task_price_micros: int = 0
+    provider_task_cost_micros: int = 0
 
 
 @dataclass(frozen=True)
@@ -387,6 +389,8 @@ def qwen_image_model(
         max_output_tokens=candidate.max_output_tokens,
         catalog_metadata=candidate.catalog_metadata,
         official_pricing=official_pricing,
+        platform_task_price_micros=official_pricing["input_per_image_micros"] + official_pricing["output_prices"][0]["output_per_image_micros"],
+        provider_task_cost_micros=official_pricing["input_per_image_micros"] + official_pricing["output_prices"][0]["output_per_image_micros"],
     )
 
 

@@ -806,6 +806,7 @@ def list_models(account: BillingAccount = Depends(portal_account), db: Session =
             "public_name": item.public_name,
             "input_price_micros_per_1k": item.input_price_micros_per_1k,
             "output_price_micros_per_1k": item.output_price_micros_per_1k,
+            "task_price_micros": item.task_price_micros,
             "rate_limit": {
                 "requests": settings.api_rate_limit_requests,
                 "window_seconds": settings.api_rate_limit_window_seconds,

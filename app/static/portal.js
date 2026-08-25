@@ -612,10 +612,31 @@ async function loadModels() {
 }
 
 const marketplaceFilters = [
-  ["all", "全部"], ["text", "文本"], ["reasoning", "推理"], ["code", "代码"], ["image", "视觉"], ["tool", "工具调用"],
+  ["all", "全部"], ["text", "文本"], ["reasoning", "推理"], ["code", "代码"], ["image", "图像"], ["video", "视频"], ["tool", "工具调用"],
 ];
 
+function modelApiType(item) {
+  return item.api_type || "chat_completions";
+}
+
+function modelProtocolLabel(item) {
+  if (modelApiType(item) === "images_generations") return "图像生成接口";
+  if (modelApiType(item) === "video_generations") return "视频异步任务接口";
+  return "聊天完成接口";
+}
+
+function taskPriceLabel(item) {
+  return modelApiType(item) === "video_generations" ? "每次视频生成" : "每张图片生成";
+}
+
+function modelPriceMarkup(item) {
+  if (modelApiType(item) !== "chat_completions") return `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div><div><span>调用方式</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div>`;
+  return `<div><span>输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div>`;
+}
+
 function modelIcon(item) {
+  if (modelApiType(item) === "video_generations") return "clapperboard";
+  if (modelApiType(item) === "images_generations") return "image-plus";
   if ((item.modalities || []).includes("image")) return "image";
   if ((item.modalities || []).includes("reasoning")) return "brain-circuit";
   if ((item.modalities || []).includes("code")) return "code-2";
@@ -674,7 +695,7 @@ function renderModelMarketplace() {
       <div class="model-card-heading"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span class="model-provider">${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
       <div class="model-capabilities">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
       <div class="model-card-id"><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div>
-      <div class="model-price-grid"><div><span>输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div></div>
+      <div class="model-price-grid">${modelPriceMarkup(item)}</div>
       <div class="model-card-footer"><span><i data-lucide="activity"></i> ${modelHealth(item)}</span><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}">查看详情<i data-lucide="arrow-up-right"></i></button></div>
     </article>
   `).join("") : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
@@ -687,7 +708,7 @@ function renderModelMarketplace() {
     container.classList.add("provider-catalog-grid");
     container.innerHTML = featured.length || otherModels.length ? featured.map((items) => {
       const provider = items[0].provider || "LokSystem";
-      const categories = [...new Set(items.map((item) => (item.modalities || []).includes("image") ? "图像" : (item.modalities || []).includes("reasoning") ? "推理" : "文本"))].join(" · ");
+      const categories = [...new Set(items.map((item) => modelApiType(item) === "video_generations" ? "视频" : modelApiType(item) === "images_generations" ? "图像" : (item.modalities || []).includes("image") ? "视觉" : (item.modalities || []).includes("reasoning") ? "推理" : "文本"))].join(" · ");
       const chips = items.slice(0, 3).map((item) => `<em>${escapeHtml(item.display_name || item.public_name)}</em>`).join("");
       return `<button class="portal-provider-card" type="button" data-model-provider="${escapeHtml(provider)}"><span class="portal-provider-logo">${portalProviderLogo(provider)}</span><span><strong>${escapeHtml(provider)}</strong><p>${escapeHtml(portalProviderDescription(provider))}</p><span class="portal-provider-chips">${chips}</span><small>${items.length} 个模型 · ${categories} · ${items.filter((item) => item.health_status === "healthy").length} 个健康模型</small><b>探索系列 <i data-lucide="arrow-right"></i></b></span></button>`;
     }).join("") + '<button class="portal-provider-card provider-more-card" type="button" data-model-provider-more><span class="portal-provider-logo"><i data-lucide="search"></i></span><span><strong>更多系列 / 厂商查询</strong><small>浏览其他第三方及新增模型</small><small>进入查询</small></span><i data-lucide="arrow-right"></i></button>' : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>未找到匹配模型</strong><span>尝试调整搜索词或筛选条件</span></div>';
@@ -696,10 +717,20 @@ function renderModelMarketplace() {
 }
 
 function modelCurlSnippet(item) {
+  if (modelApiType(item) === "images_generations") return `curl ${window.location.origin}/v1/images/generations \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${item.public_name}","prompt":"一幅现代城市夜景"}'`;
+  if (modelApiType(item) === "video_generations") return `curl ${window.location.origin}/v1/videos/generations \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${item.public_name}","prompt":"海边日出，电影感镜头"}'`;
   return `curl ${window.location.origin}/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${item.public_name}","messages":[{"role":"user","content":"你好"}]}'`;
 }
 
 function modelPythonSnippet(item) {
+  if (modelApiType(item) === "images_generations") return `import requests\n\nresponse = requests.post(\n    "${window.location.origin}/v1/images/generations",\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n    json={"model": "${item.public_name}", "prompt": "一幅现代城市夜景"},\n)\nprint(response.json()["data"][0]["url"])`;
+  if (modelApiType(item) === "video_generations") return `import requests\n\ncreated = requests.post(\n    "${window.location.origin}/v1/videos/generations",\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n    json={"model": "${item.public_name}", "prompt": "海边日出，电影感镜头"},\n).json()\ntask = requests.get(\n    "${window.location.origin}/v1/generation-tasks/" + created["id"],\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n).json()\nprint(task["status"], task["data"])`;
   return `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${window.location.origin}/v1",\n    api_key="YOUR_API_KEY",\n)\n\nresponse = client.chat.completions.create(\n    model="${item.public_name}",\n    messages=[{"role": "user", "content": "你好"}],\n)\nprint(response.choices[0].message.content)`;
 }
 
@@ -710,9 +741,9 @@ function modelDetailDialog(modelName) {
   openPortalDialog(`模型详情 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-detail-body">
     <div class="model-detail-hero"><div class="model-card-icon"><i data-lucide="${modelIcon(item)}"></i></div><div><div class="model-card-title"><h3>${escapeHtml(item.display_name || item.public_name)}</h3>${item.builtin ? '<span class="badge success">内置</span>' : ""}</div><span>${escapeHtml(item.provider || "LokSystem")}</span><p>${escapeHtml(item.summary)}</p></div></div>
     <div class="model-detail-tags">${(item.capabilities || []).map((capability) => `<span>${escapeHtml(capability)}</span>`).join("")}</div>
-    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按上游配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(item.max_output_tokens))}</strong></div><div><span>调用协议</span><strong>${escapeHtml(gatewayCapabilitySummary(item))}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div><div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div><div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · "))}</strong></div></div>
-    <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>OpenAI 兼容接口</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
-    <section class="model-code-section"><div class="model-code-heading"><div><strong>Python SDK</strong><span>使用 openai SDK</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
+    <div class="model-detail-grid"><div><span>模型 ID</span><strong class="mono">${escapeHtml(item.public_name)}</strong></div><div><span>渠道状态</span><strong>${modelHealth(item)} <small>${item.healthy_channel_count || 0} / ${item.active_channel_count || 0} 健康</small></strong></div><div><span>调用协议</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div><div><span>调用频率</span><strong>${formatNumber(limit.requests || 0)} 次 / ${formatNumber(limit.window_seconds || 60)} 秒</strong></div>${modelApiType(item) === "chat_completions" ? `<div><span>输入价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>输出价格 / 1M Token</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div>` : `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div>`}<div><span>支持参数</span><strong>${escapeHtml((item.supported_parameters || []).join(" · ") || "按任务协议")}</strong></div></div>
+    <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>${escapeHtml(modelProtocolLabel(item))}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
+    <section class="model-code-section"><div class="model-code-heading"><div><strong>Python 调用</strong><span>${modelApiType(item) === "chat_completions" ? "使用 OpenAI SDK" : "使用 HTTP 请求"}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
   </div><div class="dialog-actions"><button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
 }
 

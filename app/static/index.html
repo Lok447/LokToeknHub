@@ -7,7 +7,7 @@
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
   <link rel="stylesheet" href="/static/styles.css?v=console-20260824-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=console-20260824-4" defer></script>
+  <script src="/static/app.js?v=console-20260825-14" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -110,14 +110,14 @@
         </section>
 
         <section class="view" id="view-models">
-          <div class="section-header page-section-header model-page-header"><div class="model-page-heading"><button class="icon-button model-page-back" id="admin-model-page-back" type="button" data-model-page-back hidden title="返回模型管理" aria-label="返回模型管理"><i data-lucide="arrow-left"></i></button><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div></div><div class="table-actions"><button class="secondary-button" data-action="health-check-all"><i data-lucide="activity"></i><span>检测全部渠道</span></button><button class="secondary-button" data-action="import-models"><i data-lucide="list-plus"></i><span>批量接入</span></button></div></div>
+          <div class="section-header page-section-header model-page-header"><div class="model-page-heading"><button class="icon-button model-page-back" id="admin-model-page-back" type="button" data-model-page-back hidden title="返回模型管理" aria-label="返回模型管理"><i data-lucide="arrow-left"></i></button><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div></div></div>
           <section class="panel model-catalog-panel">
             <div class="model-catalog-toolbar">
               <div class="model-type-tabs" aria-label="模型类型筛选"><button class="active" type="button" data-model-type=""><i data-lucide="layout-grid"></i><span>全部</span><small data-model-type-count="all">0</small></button><button type="button" data-model-type="text"><i data-lucide="message-square-text"></i><span>文本</span><small data-model-type-count="text">0</small></button><button type="button" data-model-type="image"><i data-lucide="image"></i><span>图像</span><small data-model-type-count="image">0</small></button><button type="button" data-model-type="video"><i data-lucide="video"></i><span>视频</span><small data-model-type-count="video">0</small></button><button type="button" data-model-type="audio"><i data-lucide="audio-lines"></i><span>语音</span><small data-model-type-count="audio">0</small></button></div>
               <div class="input-with-icon"><i data-lucide="search"></i><input id="model-search" type="search" placeholder="搜索模型、上游 ID 或服务商" aria-label="搜索模型"></div>
               <select id="model-provider-filter" aria-label="服务商筛选"><option value="">全部服务商</option></select>
               <select id="model-state-filter" aria-label="发布状态筛选"><option value="">全部状态</option><option value="published">已上架</option><option value="candidate">候选</option><option value="blocked">待完善</option></select>
-              <span id="model-result-count">共 0 个模型</span><button class="primary-button compact-provider-button" id="admin-model-create-inline" type="button" data-action="create-model" hidden><i data-lucide="plus"></i><span>添加模型</span></button>
+              <span id="model-result-count">共 0 个模型</span>
             </div>
             <div class="admin-provider-grid" id="admin-provider-grid"></div>
             <div class="model-provider-overview" id="model-provider-overview" hidden></div><div class="admin-model-list" id="admin-model-list" hidden><div id="models-table"></div></div>

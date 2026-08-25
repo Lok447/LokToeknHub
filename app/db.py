@@ -121,6 +121,10 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN official_pricing_json TEXT"))
         if "pricing_margin_bps" not in model_columns:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN pricing_margin_bps INTEGER NOT NULL DEFAULT 0"))
+        if "task_price_micros" not in model_columns:
+            connection.execute(text("ALTER TABLE model_configs ADD COLUMN task_price_micros BIGINT NOT NULL DEFAULT 0"))
+        if "provider_task_cost_micros" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_task_cost_micros BIGINT"))
         for name, definition in {
             "balance_micros": "BIGINT",
             "balance_currency": "VARCHAR(12)",
@@ -389,11 +393,15 @@ def seed_provider_catalogue() -> None:
                         existing.input_price_micros_per_1k = preset_model.platform_input_price_micros_per_1k
                     if (legacy_deepseek_pricing or existing.output_price_micros_per_1k <= 0) and preset_model.platform_output_price_micros_per_1k > 0:
                         existing.output_price_micros_per_1k = preset_model.platform_output_price_micros_per_1k
+                    if existing.task_price_micros <= 0 and preset_model.platform_task_price_micros > 0:
+                        existing.task_price_micros = preset_model.platform_task_price_micros
                     for channel in db.scalars(select(ModelChannel).where(ModelChannel.model_config_id == existing.id)).all():
                         if legacy_deepseek_pricing or not channel.provider_input_cost_micros_per_1k:
                             channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
                         if legacy_deepseek_pricing or not channel.provider_output_cost_micros_per_1k:
                             channel.provider_output_cost_micros_per_1k = preset_model.platform_output_price_micros_per_1k
+                        if not channel.provider_task_cost_micros and preset_model.provider_task_cost_micros > 0:
+                            channel.provider_task_cost_micros = preset_model.provider_task_cost_micros
                     continue
                 record = ModelConfig(
                     public_name=preset_model.public_name,
@@ -402,6 +410,7 @@ def seed_provider_catalogue() -> None:
                     provider_api_key_env=preset.api_key_env,
                     input_price_micros_per_1k=preset_model.platform_input_price_micros_per_1k,
                     output_price_micros_per_1k=preset_model.platform_output_price_micros_per_1k,
+                    task_price_micros=preset_model.platform_task_price_micros,
                     catalog_metadata_json=json.dumps(preset_model.catalog_metadata, ensure_ascii=False),
                     official_pricing_json=json.dumps(preset_model.official_pricing, ensure_ascii=False) if preset_model.official_pricing else None,
                     active=False,
@@ -414,6 +423,7 @@ def seed_provider_catalogue() -> None:
                     provider_base_url=preset.base_url,
                     upstream_model=preset_model.model_id,
                     provider_api_key_env=preset.api_key_env,
+                    provider_task_cost_micros=preset_model.provider_task_cost_micros or None,
                     active=False,
                 ))
                 existing_models[preset_model.public_name] = record

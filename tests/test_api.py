@@ -75,7 +75,14 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
         assert metadata["deepseek-v4-flash-vision-exp"]["provider"] == "DeepSeek"
         assert metadata["deepseek-v4-flash-vision-exp"]["modalities"] == ["text", "image"]
         assert metadata["deepseek-v4-flash-vision-exp"]["max_output_tokens"] == 384000
-        assert metadata["deepseek-v4-flash-vision-exp"]["model_version"] == "DeepSeek-V4-Flash-Vision-Exp"
+        assert {
+            model_id: metadata[model_id]["model_version"]
+            for model_id in ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp")
+        } == {
+            "deepseek-v4-flash": "DeepSeek-V4-Flash-0731",
+            "deepseek-v4-pro": "DeepSeek-V4-Pro-0813",
+            "deepseek-v4-flash-vision-exp": "DeepSeek-V4-Flash-Vision-Exp",
+        }
 
 
 def test_qwen_preset_includes_sota_and_task_model_candidates() -> None:
@@ -220,6 +227,47 @@ async def test_task_model_is_rejected_by_chat_contract() -> None:
         validate_model_request(model, request)
 
 
+@pytest.mark.asyncio
+async def test_image_and_video_task_models_use_generation_contracts_in_mock_mode() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=admin_headers, json={"external_user_id": "task-api-user", "name": "Task API User"})
+        key = await client.post("/admin/api-keys", headers=admin_headers, json={"account_id": account.json()["id"], "name": "task-api-key"})
+        await client.post(f"/admin/accounts/{account.json()['id']}/balance", headers=admin_headers, json={"amount_micros": 2_000_000, "idempotency_key": "task-api-topup"})
+        from app.models import ModelChannel, ModelConfig
+
+        with SessionLocal() as db:
+            image_model = db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/qwen-image-3.0").one()
+            image_channel = db.query(ModelChannel).filter(ModelChannel.model_config_id == image_model.id).one()
+            image_model.active = True
+            image_channel.active = True
+            image_channel.status = "healthy"
+            video_model = db.query(ModelConfig).filter(ModelConfig.public_name == "qwen/wan2.1-t2v-turbo").one()
+            video_channel = db.query(ModelChannel).filter(ModelChannel.model_config_id == video_model.id).one()
+            video_model.task_price_micros = 300_000
+            video_model.active = True
+            video_channel.active = True
+            video_channel.status = "healthy"
+            db.commit()
+        headers = {"Authorization": f"Bearer {key.json()['key']}"}
+        image = await client.post("/v1/images/generations", headers=headers, json={"model": "qwen/qwen-image-3.0", "prompt": "a blue lighthouse"})
+        assert image.status_code == 200
+        assert image.json()["object"] == "image.generation"
+        assert image.json()["status"] == "completed"
+        assert image.json()["data"][0]["url"].startswith("https://mock.loktoken.local/images_generations/")
+        video = await client.post("/v1/videos/generations", headers=headers, json={"model": "qwen/wan2.1-t2v-turbo", "prompt": "waves at dawn"})
+        assert video.status_code == 202
+        assert video.json()["status"] == "processing"
+        polled = await client.get(f"/v1/generation-tasks/{video.json()['id']}", headers=headers)
+        assert polled.status_code == 200
+        assert polled.json()["status"] == "completed"
+        assert polled.json()["data"][0]["url"].startswith("https://mock.loktoken.local/video_generations/")
+
+
 def test_deprecated_qwen_candidates_are_removed_with_their_channels() -> None:
     from app.db import remove_deprecated_provider_models
 
@@ -345,6 +393,46 @@ async def test_provider_secret_cannot_be_stored_as_environment_variable_name() -
             },
         )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_provider_scoped_model_is_grouped_under_its_provider_preset() -> None:
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        created = await client.post(
+            "/admin/models",
+            headers=headers,
+            json={
+                "upstream_model": "deepseek-v4-flash",
+                "provider_preset_id": "deepseek",
+            },
+        )
+        assert created.status_code == 200
+        models = (await client.get("/admin/models", headers=headers)).json()["data"]
+    model = next(item for item in models if item["id"] == created.json()["id"])
+    assert model["public_name"] == "deepseek-v4-flash"
+    assert model["upstream_model"] == "deepseek-v4-flash"
+    assert model["catalog_metadata"]["provider"] == "DeepSeek"
+    assert model["catalog_metadata"]["model_version"] == "DeepSeek-V4-Flash-0731"
+    assert model["official_pricing"]["currency"] == "CNY"
+    assert model["input_price_micros_per_1k"] == 1500
+    assert model["output_price_micros_per_1k"] == 4500
+    assert model["provider_base_url"] == "https://api.deepseek.com/v1"
+    assert model["provider_api_key_env"] == "DEEPSEEK_API_KEY"
+
+
+@pytest.mark.asyncio
+async def test_provider_scoped_model_rejects_unknown_catalog_model() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/admin/models",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"provider_preset_id": "deepseek", "upstream_model": "deepseek-custom-test"},
+        )
+    assert response.status_code == 422
+    assert "已核验" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -566,6 +654,28 @@ async def test_channel_health_check_updates_model_marketplace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_scoped_health_check_only_checks_that_provider_channels() -> None:
+    from app.db import init_db
+
+    init_db()
+    with SessionLocal() as db:
+        model = db.query(ModelConfig).filter(ModelConfig.public_name == "deepseek-v4-pro").one()
+        channel = db.query(ModelChannel).filter(ModelChannel.model_config_id == model.id).one()
+        channel.active = True
+        db.commit()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/admin/models/health-check?provider_preset_id=deepseek",
+            headers={"X-Admin-Token": "test-admin"},
+            json={},
+        )
+    assert response.status_code == 200
+    assert response.json()["checked"] == 1
+    assert response.json()["data"][0]["model_config_id"] == model.id
+
+
+@pytest.mark.asyncio
 async def test_registered_user_can_complete_first_call_journey() -> None:
     from app.db import init_db
 
@@ -702,7 +812,7 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         }.items())
         assert 'id="admin-provider-grid"' in admin_page
         assert 'id="admin-model-page-back"' in admin_page
-        assert 'id="admin-model-create-inline"' in admin_page
+        assert 'id="admin-model-create-inline"' not in admin_page
         assert 'id="model-marketplace-provider-back"' in portal_page
         assert "portal-provider-card" in portal_script
         assert "admin-provider-card" in admin_script
@@ -1050,7 +1160,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken 用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260821-2"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260825-1"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
@@ -1492,9 +1602,9 @@ async def test_task_model_cannot_be_published_before_gateway_adapter() -> None:
             json={"active": True},
         )
     assert checked.status_code == 200
-    assert checked.json()["status"] == "pending_adapter"
+    assert checked.json()["status"] == "healthy"
     assert updated.status_code == 422
-    assert "统一调用适配器" in updated.json()["detail"]
+    assert "单次生成价格" in updated.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -1702,10 +1812,11 @@ async def test_provider_connection_syncs_entire_preset_and_publishes_callable_te
         from app.provider_presets import get_provider_preset
 
         assert result["connection"]["synced_model_count"] == len(get_provider_preset("qwen").models)
-        assert result["connection"]["callable_model_count"] == 8
+        assert result["connection"]["callable_model_count"] == 10
         assert {item["public_name"] for item in result["models"] if item["callable"]} == {
             "qwen/qwen3.8-max", "qwen/qwen3.8-2.4t-a95b", "qwen/qwen3.8-27b", "qwen/qwen3.7-plus",
             "qwen/qwen3-coder-next", "qwen/qwen3-coder-plus", "qwen/qwen3-vl-flash", "qwen/qwen3-vl-plus",
+            "qwen/qwen-image-3.0", "qwen/qwen-image-3.0-pro",
         }
         listed = await client.get("/admin/models", headers={"X-Admin-Token": "test-admin"})
         qwen = {item["public_name"]: item for item in listed.json()["data"] if item["public_name"].startswith("qwen/") or item["public_name"].startswith("qwen")}

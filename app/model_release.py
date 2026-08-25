@@ -39,10 +39,14 @@ def model_publication_state(
         except json.JSONDecodeError:
             reasons.append("模型目录元数据格式无效")
     api_type = catalog_metadata.get("api_type", "chat_completions")
-    if api_type != "chat_completions":
+    if api_type == "chat_completions":
+        if model.input_price_micros_per_1k <= 0 or model.output_price_micros_per_1k <= 0:
+            reasons.append("平台输入和输出价格均需大于 0")
+    elif api_type in {"images_generations", "video_generations"}:
+        if model.task_price_micros <= 0:
+            reasons.append("任务模型需配置单次生成价格")
+    else:
         reasons.append(f"当前网关尚未启用 {api_type} 统一调用适配器")
-    if model.input_price_micros_per_1k <= 0 or model.output_price_micros_per_1k <= 0:
-        reasons.append("平台输入和输出价格均需大于 0")
     active_channels = [channel for channel in channels if channel.active]
     if not active_channels:
         reasons.append("没有启用渠道")

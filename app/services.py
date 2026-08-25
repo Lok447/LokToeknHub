@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import get_settings
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ModelChannel, ModelConfig, Project, ProviderConnection, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, GenerationTask, ModelChannel, ModelConfig, Project, ProviderConnection, UsageRecord, utcnow
 from .provider_presets import get_provider_preset, provider_catalogue_matches
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret
 from .schemas import ChatCompletionRequest
@@ -117,6 +117,16 @@ class ProviderCallDetails:
     provider_cost_micros: int = 0
     usage_details: dict[str, int] = field(default_factory=dict)
     raw_usage: dict[str, Any] = field(default_factory=dict)
+    route_attempts: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ProviderTaskDetails:
+    status: str
+    result: dict[str, Any]
+    channel_id: int | None = None
+    provider_task_id: str | None = None
+    provider_cost_micros: int = 0
     route_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -316,6 +326,107 @@ def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     return channel.provider_base_url.rstrip("/") + "/chat/completions", headers
 
 
+def _task_endpoint(channel: ModelChannel, model: ModelConfig, suffix: str = "") -> tuple[str, dict[str, str]]:
+    _, headers = _provider_auth(channel)
+    metadata = _catalog_metadata(model)
+    profile = metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else {}
+    request_path = str(profile.get("request_path") or ("/images/generations" if metadata.get("api_type") == "images_generations" else "/videos/generations"))
+    return channel.provider_base_url.rstrip("/") + "/" + request_path.lstrip("/") + suffix, headers
+
+
+def _task_status(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"completed", "complete", "succeeded", "success", "done", "finished"}:
+        return "completed"
+    if normalized in {"failed", "error", "cancelled", "canceled", "expired"}:
+        return "failed"
+    return "processing"
+
+
+def _task_result(data: dict[str, Any]) -> tuple[str, str | None, dict[str, Any]]:
+    body = data.get("data") if isinstance(data.get("data"), dict) else data
+    task_id = next((str(value) for value in (
+        data.get("task_id"), data.get("id"), body.get("task_id") if isinstance(body, dict) else None, body.get("id") if isinstance(body, dict) else None,
+    ) if value), None)
+    state = data.get("status") or data.get("state") or (body.get("status") if isinstance(body, dict) else None)
+    result_data = data.get("data") if isinstance(data.get("data"), list) else (body.get("output") if isinstance(body, dict) else None)
+    if isinstance(result_data, list) and result_data:
+        return "completed", task_id, {"data": result_data}
+    url = data.get("url") or data.get("video_url") or (body.get("url") if isinstance(body, dict) else None)
+    if url:
+        return "completed", task_id, {"data": [{"url": url}]}
+    return _task_status(state), task_id, data
+
+
+async def create_provider_task(db: Session, model: ModelConfig, payload: dict[str, Any]) -> ProviderTaskDetails:
+    settings = get_settings()
+    metadata = _catalog_metadata(model)
+    api_type = metadata.get("api_type")
+    channels = select_channels(db, model)
+    if not channels:
+        raise HTTPException(status_code=502, detail="no available channel for model")
+    if settings.mock_mode:
+        channel = channels[0]
+        mark_channel_success(db, channel, "mock")
+        result = {"data": [{"url": f"https://mock.loktoken.local/{api_type}/{uuid.uuid4().hex}"}]}
+        return ProviderTaskDetails("completed" if api_type == "images_generations" else "processing", result, channel_id=channel.id, provider_task_id="task_" + uuid.uuid4().hex)
+    attempts: list[dict[str, Any]] = []
+    last_detail = "all available channels failed"
+    for channel in channels:
+        endpoint, headers = _task_endpoint(channel, model)
+        request_payload = dict(payload)
+        request_payload["model"] = channel.upstream_model
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
+                response = await client.post(endpoint, json=request_payload, headers=headers)
+            if response.is_error:
+                raise ProviderCallError(f"{channel.name}: HTTP {response.status_code}: {response.text[:500]}", _retryable_status(response.status_code))
+            status, provider_task_id, result = _task_result(response.json())
+            attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - started) * 1000)})
+            mark_channel_success(db, channel)
+            return ProviderTaskDetails(status, result, channel.id, provider_task_id, int(channel.provider_task_cost_micros or 0), attempts)
+        except ProviderCallError as exc:
+            last_detail = exc.detail
+            mark_channel_failure(db, channel, exc.detail)
+            if not exc.retryable:
+                break
+        except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            last_detail = f"{channel.name}: task provider response failed: {exc}"
+            attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - started) * 1000)})
+            mark_channel_failure(db, channel, last_detail)
+    raise HTTPException(status_code=502, detail=last_detail)
+
+
+async def refresh_provider_task(db: Session, task: GenerationTask, model: ModelConfig) -> ProviderTaskDetails:
+    if task.status in {"completed", "failed"}:
+        result = json.loads(task.result_json or "{}")
+        return ProviderTaskDetails(task.status, result, task.provider_channel_id, task.provider_task_id)
+    channel = db.get(ModelChannel, task.provider_channel_id) if task.provider_channel_id else None
+    if not channel or not task.provider_task_id:
+        raise HTTPException(status_code=502, detail="task has no provider polling route")
+    settings = get_settings()
+    if settings.mock_mode:
+        mark_channel_success(db, channel, "mock")
+        return ProviderTaskDetails("completed", {"data": [{"url": f"https://mock.loktoken.local/{task.task_type}/{task.task_id}"}]}, channel.id, task.provider_task_id)
+    endpoint, headers = _task_endpoint(channel, model, "/" + task.provider_task_id)
+    try:
+        async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
+            response = await client.get(endpoint, headers=headers)
+        if response.is_error:
+            raise ProviderCallError(f"{channel.name}: HTTP {response.status_code}: {response.text[:500]}", _retryable_status(response.status_code))
+        status, provider_task_id, result = _task_result(response.json())
+        mark_channel_success(db, channel)
+        return ProviderTaskDetails(status, result, channel.id, provider_task_id or task.provider_task_id, int(channel.provider_task_cost_micros or 0))
+    except ProviderCallError as exc:
+        mark_channel_failure(db, channel, exc.detail)
+        raise HTTPException(status_code=502, detail=exc.detail) from exc
+    except (httpx.HTTPError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        detail = f"{channel.name}: task polling failed: {exc}"
+        mark_channel_failure(db, channel, detail)
+        raise HTTPException(status_code=502, detail=detail) from exc
+
+
 async def discover_upstream_models(
     provider_base_url: str,
     provider_api_key_env: str | None,
@@ -395,6 +506,10 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     except json.JSONDecodeError:
         metadata = {}
     api_type = metadata.get("api_type", "chat_completions") if isinstance(metadata, dict) else "chat_completions"
+    if api_type in {"images_generations", "video_generations"}:
+        detail = "任务适配器已启用；健康检查不创建可能产生费用的生成任务"
+        mark_channel_success(db, channel, "adapter")
+        return {"healthy": True, "status": "healthy", "latency_ms": 0, "detail": detail}
     if api_type != "chat_completions":
         detail = f"等待 {api_type} 统一调用适配器"
         mark_channel_catalogue_state(db, channel, "pending_adapter", detail, "catalogue")
@@ -637,6 +752,7 @@ def save_usage(
     raw_usage: dict[str, Any] | None = None,
     route_attempts: list[dict[str, Any]] | None = None,
     price_version: str | None = None,
+    amount_micros: int | None = None,
 ) -> UsageRecord:
     tracked_key = db.get(ApiKey, api_key.id)
     if tracked_key:
@@ -653,7 +769,7 @@ def save_usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
-        amount_micros=calculate_amount(model, input_tokens, output_tokens),
+        amount_micros=calculate_amount(model, input_tokens, output_tokens) if amount_micros is None else amount_micros,
         provider_cost_micros=provider_cost_micros,
         provider_channel_id=provider_channel_id,
         provider_request_id=provider_request_id,

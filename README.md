@@ -47,7 +47,7 @@ python scripts/cleanup_uat_data.py --execute
 
 生产环境不要使用该脚本；生产数据应通过环境隔离、数据库权限和正式迁移管理。
 
-管理台的 DeepSeek 预设已提供 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`（实验性视觉候选）与 `deepseek-v4-pro`。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型；视觉候选还需单独核验当前目录和官方价格。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
+管理台的 DeepSeek 预设已提供 `deepseek-v4-flash`（`DeepSeek-V4-Flash-0731`）、`deepseek-v4-pro`（`DeepSeek-V4-Pro-0813`）与 `deepseek-v4-flash-vision-exp`（`DeepSeek-V4-Flash-Vision-Exp`，实验性视觉候选）。安装后模型保持停用，管理员需要在服务端配置 `DEEPSEEK_API_KEY`，执行渠道检测和预检，再启用模型；视觉候选还需单独核验当前目录和官方价格。旧的 `lok-*` 模拟模型在非 Mock 启动时会自动停用，不会进入用户中心。
 
 真实模型调用示例（将 `$key.key` 替换为用户自己的 API Key）：
 
@@ -143,7 +143,7 @@ DeepSeek、Qwen、GLM、Kimi、MiniMax、Doubao 等内置服务商卡片由预�
 
 服务商卡片还提供上游余额管理。DeepSeek 使用官方余额 API 查询；Qwen、GLM、Kimi、MiniMax、Doubao 等服务商若当前没有可验证的公开余额 API，页面会明确显示“需控制台查询”，运营人员可从服务商控制台读取余额后手工录入。余额快照包含金额、币种、来源、查询时间和错误状态，可设置采购预警阈值；上游余额与 LokToken 用户额度完全隔离，不会被模型健康检查推断。
 
-图像/视频生成模型采用任务型接入，不与文本 `/v1/chat/completions` 共用调用协议：图像模型需要 `/v1/images/generations` 适配器和按图片/分辨率计费，视频模型需要异步任务创建、状态轮询或回调、结果地址过期管理及按时长/分辨率计费。当前 Wan 视频等任务型模型可以在管理控制台同步为候选、维护服务商渠道和平台价格，但在对应适配器、失败退款和账本测试完成前不会上架，也不会被标记为聊天模型可调用。
+图像/视频生成模型采用任务型接入，不与文本 `/v1/chat/completions` 共用调用协议：图像模型使用 `POST /v1/images/generations`，视频模型使用 `POST /v1/videos/generations` 创建任务并通过 `GET /v1/generation-tasks/{task_id}` 轮询。任务模型按张或按次配置平台售价，创建时预扣额度，供应商失败时自动退回预扣额度；文本、图像与视频模型均由各自协议返回结果，互不伪装为聊天模型。服务商仍需先核验模型目录、配置单次任务价格并启用健康渠道，才可上架。
 
 管理接口：
 

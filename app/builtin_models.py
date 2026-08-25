@@ -84,6 +84,7 @@ def model_metadata(public_name: str, catalog_metadata_json: str | None = None) -
                 "modalities": list(model.modalities),
                 "supported_parameters": list(model.supported_parameters),
                 "context_window": model.context_window,
+                "api_type": "chat_completions",
                 "builtin": True,
             }
     return {
@@ -114,6 +115,7 @@ def _normalize_catalog_metadata(public_name: str, metadata: dict[str, Any]) -> d
         "model_version": metadata.get("model_version") if isinstance(metadata.get("model_version"), str) else None,
         "max_output_tokens": metadata.get("max_output_tokens") if isinstance(metadata.get("max_output_tokens"), int) else None,
         "gateway_profile": metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else None,
+        "api_type": metadata.get("api_type") if isinstance(metadata.get("api_type"), str) else "chat_completions",
         "pricing_source_url": metadata.get("pricing_source_url") if isinstance(metadata.get("pricing_source_url"), str) else None,
         "builtin": False,
     }
