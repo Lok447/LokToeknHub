@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=console-20260824-1">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260824-3">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=console-20260825-14" defer></script>
+  <script src="/static/app.js?v=console-20260825-16" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -67,21 +67,9 @@
     </aside>
 
     <main>
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">LOKTOKEN / MANAGER</p>
-          <h1 id="page-title">管理概览</h1>
-        </div>
-        <div class="topbar-actions">
-          <button class="icon-button" id="admin-back-button" type="button" title="返回上一页" aria-label="返回上一页"><i data-lucide="arrow-left"></i></button>
-          <a class="secondary-button topbar-doc-link" id="admin-guide-link" href="/guide/admin" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>管理文档</span></a>
-          <span class="environment" id="environment-badge"><span class="status-dot"></span>读取环境</span>
-          <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
-        </div>
-      </header>
-
       <div class="content">
         <section class="view active" id="view-overview">
+          <div class="section-header page-section-header"><div><h2>管理概览</h2><p>平台运营状态、模型调用与待办事项</p></div><div class="content-page-actions" id="admin-page-actions-overview"></div></div>
           <div class="metric-grid" id="overview-metrics"></div>
           <section class="panel operational-alerts-panel">
             <div class="section-header"><div><h2>运营告警</h2><p>余额、渠道、失败率、成本与待办</p></div><span class="badge neutral" id="operational-alert-count">读取中</span></div>
@@ -100,17 +88,17 @@
         </section>
 
         <section class="view" id="view-accounts">
-          <div class="section-header page-section-header"><div><h2>账户管理</h2><p>客户账户与共享余额</p></div><button class="primary-button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button></div>
+          <div class="section-header page-section-header"><div><h2>账户管理</h2><p>客户账户与共享余额</p></div><div class="content-page-actions" id="admin-page-actions-accounts"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>项目数</th><th>Key 数量</th><th>余额</th><th>近 30 天消费</th><th>最近活动</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-keys">
-          <div class="section-header page-section-header"><div><h2>密钥管理</h2><p>账户访问凭证</p></div><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button></div>
+          <div class="section-header page-section-header"><div><h2>密钥管理</h2><p>账户访问凭证</p></div><div class="content-page-actions" id="admin-page-actions-keys"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-models">
-          <div class="section-header page-section-header model-page-header"><div class="model-page-heading"><button class="icon-button model-page-back" id="admin-model-page-back" type="button" data-model-page-back hidden title="返回模型管理" aria-label="返回模型管理"><i data-lucide="arrow-left"></i></button><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div></div></div>
+          <div class="section-header page-section-header model-page-header"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="content-page-actions" id="admin-page-actions-models"></div></div>
           <section class="panel model-catalog-panel">
             <div class="model-catalog-toolbar">
               <div class="model-type-tabs" aria-label="模型类型筛选"><button class="active" type="button" data-model-type=""><i data-lucide="layout-grid"></i><span>全部</span><small data-model-type-count="all">0</small></button><button type="button" data-model-type="text"><i data-lucide="message-square-text"></i><span>文本</span><small data-model-type-count="text">0</small></button><button type="button" data-model-type="image"><i data-lucide="image"></i><span>图像</span><small data-model-type-count="image">0</small></button><button type="button" data-model-type="video"><i data-lucide="video"></i><span>视频</span><small data-model-type-count="video">0</small></button><button type="button" data-model-type="audio"><i data-lucide="audio-lines"></i><span>语音</span><small data-model-type-count="audio">0</small></button></div>
@@ -125,24 +113,24 @@
         </section>
 
         <section class="view" id="view-payments">
-          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><div class="table-actions"><button class="secondary-button" data-action="reconcile-ledger"><i data-lucide="scale"></i><span>账本对账</span></button><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button></div></div>
+          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><div class="content-page-actions" id="admin-page-actions-payments"></div></div>
           <div class="metric-grid compact" id="payment-metrics"></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>订单号</th><th>账户</th><th>渠道</th><th>金额</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="payments-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-redemptions">
-          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>创建、发放和管理账户福利额度</p></div><button class="primary-button" data-action="create-redemption"><i data-lucide="plus"></i><span>创建兑换码</span></button></div>
+          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>创建、发放和管理账户福利额度</p></div><div class="content-page-actions" id="admin-page-actions-redemptions"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换码前缀</th><th>额度</th><th>领取进度</th><th>有效期</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="redemptions-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-usage">
-          <div class="section-header page-section-header"><div><h2>用量明细</h2><p>最近 100 条调用记录</p></div><button class="secondary-button" data-action="provider-bills"><i data-lucide="file-check-2"></i><span>供应商账单</span></button></div>
+          <div class="section-header page-section-header"><div><h2>用量明细</h2><p>最近 100 条调用记录</p></div><div class="content-page-actions" id="admin-page-actions-usage"></div></div>
           <div class="metric-grid compact" id="usage-metrics"></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>账户 / Key</th><th>模型</th><th>输入 / 输出</th><th>耗时</th><th>费用</th><th>状态</th></tr></thead><tbody id="usage-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-audit">
-          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div><button class="secondary-button" data-action="manage-admins"><i data-lucide="users-round"></i><span>管理员与角色</span></button></div>
+          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div><div class="content-page-actions" id="admin-page-actions-audit"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>摘要</th></tr></thead><tbody id="audit-table"></tbody></table></div></section>
         </section>
       </div>

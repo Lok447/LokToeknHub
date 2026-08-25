@@ -761,11 +761,10 @@ function renderMarketplaceModelCard(item) {
   const chatCompatible = modelApiType(item) === "chat_completions";
   return `<article class="admin-model-card portal-model-card ${selected ? "is-compared" : ""}">
     <div class="admin-model-card-header"><span class="admin-model-icon">${portalProviderLogo(item.provider || "第三方模型", "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(item.display_name || item.public_name)}</h3><div class="admin-model-version"><span>模型版本</span><strong>${escapeHtml(modelVersionLabel(item))}</strong></div><code>调用 ID：${escapeHtml(item.public_name)}</code></div><span class="badge success">可调用</span></div></div>
-    <div class="admin-model-card-meta">${marketplaceModelTypeBadge(item)}<span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.active_channel_count)} 健康</span></div>
-    <div class="admin-model-tags">${capabilities || '<span class="empty">能力待补充</span>'}</div>
+    <div class="admin-model-card-meta">${marketplaceModelTypeBadge(item)}<div class="admin-model-tags inline">${capabilities || '<span class="empty">能力待补充</span>'}</div><span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.active_channel_count)} 健康</span></div>
     <div class="admin-model-card-stats"><div><span>上下文</span><strong>${escapeHtml(item.context_window || "按任务配置")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(modelMaxOutputLabel(item))}</strong></div><div><span>参数</span><strong title="${escapeHtml(parameters)}">${escapeHtml(parameters || "按任务协议")}</strong></div></div>
     <div class="admin-model-card-pricing">${chatCompatible ? `<div><span>平台输入 / 1M</span><strong>${formatTokenPricePerMillion(item.input_price_micros_per_1k)}</strong></div><div><span>平台输出 / 1M</span><strong>${formatTokenPricePerMillion(item.output_price_micros_per_1k)}</strong></div>` : `<div><span>${taskPriceLabel(item)}</span><strong>${formatMoney(item.task_price_micros || 0)}</strong></div><div><span>调用方式</span><strong>${escapeHtml(modelProtocolLabel(item))}</strong></div>`}</div>
-    <div class="admin-model-card-footer"><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}"><i data-lucide="file-text"></i><span>完整参数</span></button><div class="admin-model-actions"><button class="table-button ${selected ? "selected" : ""}" type="button" data-model-compare="${escapeHtml(item.public_name)}" aria-pressed="${selected}"><i data-lucide="columns-2"></i><span>${selected ? "已选对比" : "加入对比"}</span></button><button class="table-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制 ID</span></button></div></div>
+    <div class="admin-model-card-footer"><button class="text-button" type="button" data-model-detail="${escapeHtml(item.public_name)}"><i data-lucide="file-text"></i><span>完整参数</span></button><div class="admin-model-actions"><button class="table-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button><button class="table-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="table-button" type="button" data-model-onboard="${escapeHtml(item.public_name)}"><i data-lucide="plug-zap"></i><span>开始接入</span></button></div></div>
   </article>`;
 }
 
@@ -797,12 +796,12 @@ function renderModelMarketplace() {
   if (portalState.marketplace.provider) {
     const detailModels = portalState.marketplace.provider === "__more__" ? visibleModels.filter((item) => !isFeaturedProvider(item.provider)) : visibleModels.filter((item) => (item.provider || "第三方模型") === portalState.marketplace.provider);
     const providerName = portalState.marketplace.provider === "__more__" ? "更多系列 / 厂商查询" : portalState.marketplace.provider;
-    document.getElementById("model-marketplace-count").textContent = `筛选后 · ${providerName} · ${detailModels.length} 个模型`;
+    document.getElementById("model-marketplace-count").textContent = `${providerName} · ${detailModels.length} 个模型`;
     providerBack.hidden = false;
     providerGrid.hidden = true;
     providerOverview.hidden = false;
     modelList.hidden = false;
-    providerOverview.innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${portalState.marketplace.provider === "__more__" ? '<i data-lucide="search"></i>' : portalProviderLogo(providerName)}</span><div><span class="eyebrow">MODEL CATALOG</span><h3>${escapeHtml(providerName)}</h3><p>${escapeHtml(portalState.marketplace.provider === "__more__" ? "浏览其他第三方及新接入的可调用模型。" : portalProviderDescription(providerName))}</p></div></div><div class="model-provider-overview-actions"><button class="secondary-button compact-provider-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button></div></div>`;
+    providerOverview.innerHTML = `<div class="model-provider-overview-main"><div class="model-provider-overview-title"><span class="admin-provider-logo">${portalState.marketplace.provider === "__more__" ? '<i data-lucide="search"></i>' : portalProviderLogo(providerName)}</span><div><span class="eyebrow">MODEL CATALOG</span><h3>${escapeHtml(providerName)}</h3><p>${escapeHtml(portalState.marketplace.provider === "__more__" ? "浏览其他第三方及新接入的可调用模型。" : portalProviderDescription(providerName))}</p></div></div><div class="model-provider-overview-actions"><button class="primary-button compact-provider-button" type="button" data-model-compare-provider="${escapeHtml(providerName)}"><i data-lucide="columns-2"></i><span>模型对比</span></button><button class="primary-button compact-provider-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button></div></div>`;
     container.innerHTML = detailModels.length ? `<div class="admin-model-card-grid">${detailModels.map(renderMarketplaceModelCard).join("")}</div>` : '<div class="model-catalog-empty"><i data-lucide="search-x"></i><strong>没有符合筛选条件的模型</strong><span>调整搜索、类型或状态筛选后重试</span><button class="secondary-button" type="button" data-model-filter-reset><i data-lucide="rotate-ccw"></i><span>重置筛选</span></button></div>';
   } else {
     const providerMap = new Map();
@@ -814,7 +813,7 @@ function renderModelMarketplace() {
     const providers = [...providerMap.values()];
     const featured = providers.filter((items) => isFeaturedProvider(items[0].provider)).sort((a, b) => marketplaceProviderRank(a[0].provider) - marketplaceProviderRank(b[0].provider));
     const otherModels = providers.filter((items) => !isFeaturedProvider(items[0].provider)).flat();
-    document.getElementById("model-marketplace-count").textContent = `筛选后 · ${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
+    document.getElementById("model-marketplace-count").textContent = `${providers.length} 家供应商 · ${visibleModels.length} 个模型`;
     providerBack.hidden = true;
     providerGrid.hidden = false;
     providerOverview.hidden = true;
@@ -883,6 +882,28 @@ function modelTestDialog(modelName) {
   });
 }
 
+function usablePortalKeys() {
+  return portalState.keys.filter((key) => key.active && (!keyExpiry(key) || keyExpiry(key) > new Date()));
+}
+
+function modelOnboardingDialog(modelName, createdKey = "") {
+  const item = portalState.models.find((model) => model.public_name === modelName);
+  if (!item) return;
+  const keys = usablePortalKeys();
+  const endpoint = modelEndpoint(item);
+  const keyMarkup = createdKey
+    ? `<div class="model-onboarding-secret"><div class="model-onboarding-secret-head"><strong>新建 API Key</strong><span>完整密钥只展示这一次，请立即保存。</span></div><div class="secret-box mono" id="model-onboarding-secret">${escapeHtml(createdKey)}</div><button class="secondary-button" type="button" data-copy-onboarding-key="${escapeHtml(createdKey)}"><i data-lucide="copy"></i><span>复制完整 Key</span></button></div>`
+    : keys.length
+      ? `<div class="field"><label for="model-onboarding-key">使用 API Key</label><select id="model-onboarding-key">${keys.map((key) => `<option value="${key.id}">${escapeHtml(key.name)} · ${escapeHtml(key.key_prefix)}...</option>`).join("")}</select><small class="field-hint">已创建的完整 Key 不会再次显示，请从你的密钥管理系统中读取。</small></div>`
+      : `<div class="model-onboarding-warning"><i data-lucide="key-round"></i><div><strong>还没有可用的 API Key</strong><span>创建后即可把下面的接入信息配置到应用中。API Key 只在创建成功时完整展示一次。</span></div></div>`;
+  openPortalDialog(`开始接入 · ${item.display_name || item.public_name}`, `<div class="dialog-body model-onboarding-body">
+    <div class="model-onboarding-summary"><div class="model-card-icon">${portalProviderLogo(item.provider || "第三方模型", "model-detail-logo-image")}</div><div><span class="eyebrow">MODEL ONBOARDING</span><h3>${escapeHtml(item.display_name || item.public_name)}</h3><p>将 API Key、统一端点和模型 ID 配置到你的应用中，即可开始调用。</p></div></div>
+    <section class="model-onboarding-step"><div class="model-onboarding-step-title"><span>1</span><div><strong>准备 API Key</strong><small>用于鉴权并记录调用用量</small></div></div>${keyMarkup}</section>
+    <section class="model-onboarding-step"><div class="model-onboarding-step-title"><span>2</span><div><strong>配置调用信息</strong><small>以下信息适用于当前模型</small></div></div><div class="model-onboarding-grid"><div class="model-endpoint-row"><div><span>统一端点</span><code>${escapeHtml(endpoint)}</code></div><button class="icon-button compact-icon" type="button" data-copy-endpoint="${escapeHtml(endpoint)}" title="复制统一端点" aria-label="复制统一端点"><i data-lucide="copy"></i></button></div><div class="model-endpoint-row"><div><span>模型 ID</span><code>${escapeHtml(item.public_name)}</code></div><button class="icon-button compact-icon" type="button" data-copy-model="${escapeHtml(item.public_name)}" title="复制模型 ID" aria-label="复制模型 ID"><i data-lucide="copy"></i></button></div></div></section>
+    <section class="model-onboarding-step"><div class="model-onboarding-step-title"><span>3</span><div><strong>复制示例代码</strong><small>${escapeHtml(modelProtocolLabel(item))}</small></div></div><section class="model-code-section"><div class="model-code-heading"><div><strong>cURL</strong><span>适合快速验证</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section><section class="model-code-section"><div class="model-code-heading"><div><strong>Python</strong><span>${modelApiType(item) === "chat_completions" ? "使用 OpenAI SDK" : "使用 HTTP 请求"}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section></section>
+  </div><div class="dialog-actions">${keys.length || createdKey ? `<button class="secondary-button" type="button" data-go="keys"><i data-lucide="key-round"></i><span>管理 API Key</span></button>` : `<button class="primary-button" type="button" data-action="model-onboarding-create-key" data-model-name="${escapeHtml(item.public_name)}"><i data-lucide="key-round"></i><span>先创建 API Key</span></button>`}<button class="${keys.length || createdKey ? "primary-button" : "secondary-button"} " type="button" data-close>完成</button></div>`);
+}
+
 function modelDetailDialog(modelName) {
   const item = portalState.models.find((model) => model.public_name === modelName);
   if (!item) return;
@@ -895,7 +916,7 @@ function modelDetailDialog(modelName) {
     <p class="model-pricing-note">平台价格由管理控制台根据官方价格和目标利润率统一计算，调整后仅对新请求生效。</p>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>${escapeHtml(modelProtocolLabel(item))}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python 调用</strong><span>${modelApiType(item) === "chat_completions" ? "使用 OpenAI SDK" : "使用 HTTP 请求"}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
-  </div><div class="dialog-actions">${modelApiType(item) === "chat_completions" ? `<button class="secondary-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button>` : ""}<button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
+  </div><div class="dialog-actions">${modelApiType(item) === "chat_completions" ? `<button class="secondary-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button>` : ""}<button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-model-onboard="${escapeHtml(item.public_name)}"><i data-lucide="plug-zap"></i><span>开始接入</span></button></div>`);
 }
 
 function modelComparisonPrice(item) {
@@ -920,6 +941,43 @@ function modelCompareDialog() {
     ["渠道状态", (item) => item.health_status === "healthy" ? "渠道健康" : item.health_status === "degraded" ? "部分异常" : item.health_status === "checking" ? "待检测" : "暂不可用"],
   ];
   openPortalDialog("模型对比", `<div class="dialog-body model-compare-body"><p class="dialog-copy">对比信息来自管理控制台当前已发布配置，实际费用按调用用量或任务次数结算。</p><div class="model-compare-table-wrap"><table class="model-compare-table"><thead><tr><th>对比项</th>${items.map((item) => `<th><span>${escapeHtml(item.provider || "第三方模型")}</span><strong>${escapeHtml(item.display_name || item.public_name)}</strong><code>${escapeHtml(item.public_name)}</code></th>`).join("")}</tr></thead><tbody>${rows.map(([label, value]) => `<tr><th>${escapeHtml(label)}</th>${items.map((item) => `<td>${escapeHtml(value(item))}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button><button class="primary-button" type="button" data-action="model-create-key"><i data-lucide="key-round"></i><span>密钥管理</span></button></div>`);
+}
+
+function comparisonCandidates(providerName) {
+  return providerName === "更多系列 / 厂商查询"
+    ? portalState.models.filter((item) => !isFeaturedProvider(item.provider))
+    : portalState.models.filter((item) => (item.provider || "第三方模型") === providerName);
+}
+
+function compareProviderModels(providerName) {
+  const items = comparisonCandidates(providerName);
+  if (items.length < 2) {
+    portalToast("当前供应商至少需要两个可用模型才能对比", true);
+    return;
+  }
+  const selected = new Set(portalState.marketplace.compare.filter((name) => items.some((item) => item.public_name === name)));
+  openPortalDialog("选择模型对比", `<form id="model-compare-select-form"><div class="dialog-body model-compare-select-body"><p class="dialog-copy">请选择 2～3 个模型进行对比，模型名称较长时会自动换行显示。</p><div class="model-compare-select-list">${items.map((item) => `<label class="model-compare-select-item"><input type="checkbox" name="model" value="${escapeHtml(item.public_name)}" ${selected.has(item.public_name) ? "checked" : ""}><span><strong>${escapeHtml(item.display_name || item.public_name)}</strong><small>${escapeHtml(item.public_name)} · ${escapeHtml(modelVersionLabel(item))}</small></span></label>`).join("")}</div><small class="field-hint" id="model-compare-select-hint">已选择 ${selected.size} 个，最多选择 3 个</small></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit" id="model-compare-submit" ${selected.size < 2 ? "disabled" : ""}><i data-lucide="columns-2"></i><span>开始对比</span></button></div></form>`);
+  const form = document.getElementById("model-compare-select-form");
+  const submit = document.getElementById("model-compare-submit");
+  const hint = document.getElementById("model-compare-select-hint");
+  const syncSelection = () => {
+    const count = form.querySelectorAll('input[name="model"]:checked').length;
+    hint.textContent = `已选择 ${count} 个，最多选择 3 个`;
+    submit.disabled = count < 2 || count > 3;
+  };
+  form.addEventListener("change", (event) => {
+    if (event.target.name !== "model") return;
+    const checked = [...form.querySelectorAll('input[name="model"]:checked')];
+    if (checked.length > 3) event.target.checked = false;
+    syncSelection();
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const names = [...new FormData(form).getAll("model")];
+    if (names.length < 2 || names.length > 3) return;
+    portalState.marketplace.compare = names;
+    modelCompareDialog();
+  });
 }
 
 function toggleModelComparison(modelName) {
@@ -1193,16 +1251,27 @@ async function redeemBenefit(form) {
 
 const portalLoaders = { overview: loadOverview, keys: loadKeys, models: loadModels, usage: loadUsage, quota: loadQuota, orders: loadOrders, redeem: loadRedeem };
 
+function renderPortalTopbarContext(view) {
+  const target = document.querySelector(`#portal-view-${view} .content-page-actions`);
+  if (!target) return;
+  const actions = {
+    keys: '<button class="secondary-button topbar-context-button" type="button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button topbar-context-button" type="button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button>',
+    models: '<button class="icon-button model-page-back" id="model-marketplace-provider-back" type="button" data-model-provider-back hidden title="返回模型广场" aria-label="返回模型广场"><i data-lucide="arrow-left"></i></button>',
+    quota: '<button class="primary-button topbar-context-button" type="button" data-action="create-payment"><i data-lucide="plus"></i><span>充值额度</span></button>',
+    orders: '<button class="primary-button topbar-context-button" type="button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button>',
+  };
+  const globalActions = `${view === "overview" ? '<a class="secondary-button topbar-doc-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a>' : ""}<button class="icon-button" type="button" data-action="portal-back" title="返回上一页" aria-label="返回上一页" ${view === "overview" ? "disabled" : ""}><i data-lucide="arrow-left"></i></button><button class="icon-button" type="button" data-action="portal-refresh" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button>`;
+  target.innerHTML = `${actions[view] || ""}${globalActions}`;
+  portalIcons();
+}
+
 async function switchPortalView(view, { historyMode = "push" } = {}) {
   if (!Object.prototype.hasOwnProperty.call(portalTitles, view)) view = "overview";
   portalState.view = view;
   updatePortalHistory(view, historyMode);
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `portal-view-${view}`));
-  document.getElementById("portal-page-title").textContent = portalTitles[view];
-  document.getElementById("portal-guide-link").hidden = view !== "overview";
-  const backButton = document.getElementById("portal-back-button");
-  if (backButton) backButton.disabled = view === "overview";
+  renderPortalTopbarContext(view);
   try { await portalLoaders[view](); } catch (error) { portalToast(error.message, true); }
 }
 
@@ -1253,7 +1322,7 @@ function keyColumnsDialog() {
   });
 }
 
-function keyDialog() {
+function keyDialog(options = {}) {
   const minimumDate = new Date();
   minimumDate.setDate(minimumDate.getDate() + 1);
   const minimumDateText = minimumDate.toISOString().slice(0, 10);
@@ -1283,6 +1352,7 @@ function keyDialog() {
        const integrationCopy = document.querySelector("#portal-dialog-content .dialog-copy");
        if (integrationCopy) integrationCopy.textContent = "请将密钥保存到你的应用或服务端密钥管理系统中。";
       await loadKeys();
+      if (typeof options.onCreated === "function") options.onCreated(result.key);
     } catch (error) { portalToast(error.message, true); }
   });
 }
@@ -1412,8 +1482,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("portal-logout").addEventListener("click", () => {
     sessionStorage.removeItem("token_portal_access"); portalState.token = ""; closePortalAccountMenu(); document.getElementById("portal-token").value = ""; showPortalAuth();
   });
-  document.getElementById("portal-refresh").addEventListener("click", () => switchPortalView(portalState.view, { historyMode: "none" }));
-  document.getElementById("portal-back-button").addEventListener("click", navigatePortalBack);
   document.getElementById("portal-security").addEventListener("click", () => { closePortalAccountMenu(); portalSecurityDialog(); });
   document.getElementById("portal-workspace-manager").addEventListener("click", () => { closePortalAccountMenu(); workspaceManagerDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
@@ -1423,7 +1491,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("model-marketplace-search").addEventListener("input", (event) => { portalState.marketplace.query = event.target.value; renderModelMarketplace(); });
   document.getElementById("model-marketplace-provider-filter").addEventListener("change", (event) => { portalState.marketplace.providerFilter = event.target.value; portalState.marketplace.provider = ""; renderModelMarketplace(); });
   document.getElementById("model-marketplace-health").addEventListener("change", (event) => { portalState.marketplace.health = event.target.value; renderModelMarketplace(); });
-  document.getElementById("model-marketplace-sort").addEventListener("change", (event) => { portalState.marketplace.sort = event.target.value; renderModelMarketplace(); });
   document.getElementById("order-status-filter").addEventListener("change", renderOrders);
   document.getElementById("portal-redeem-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1452,8 +1519,15 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!target) return;
     if (target.dataset.close !== undefined) closePortalDialog();
     if (target.dataset.go) switchPortalView(target.dataset.go);
+    if (target.dataset.action === "portal-back") navigatePortalBack();
+    if (target.dataset.action === "portal-refresh") switchPortalView(portalState.view, { historyMode: "none" });
     if (target.dataset.action === "create-key") keyDialog();
     if (target.dataset.action === "model-create-key") { closePortalDialog(); await switchPortalView("keys"); keyDialog(); }
+    if (target.dataset.action === "model-onboarding-create-key") {
+      const modelName = target.dataset.modelName;
+      closePortalDialog();
+      keyDialog({ onCreated: (key) => modelOnboardingDialog(modelName, key) });
+    }
     if (target.dataset.action === "key-columns") keyColumnsDialog();
     if (target.dataset.action === "create-payment") paymentDialog().catch((error) => portalToast(error.message, true));
     if (target.dataset.toggleKey) {
@@ -1464,6 +1538,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.copyKeyPrefix) { await navigator.clipboard.writeText(target.dataset.copyKeyPrefix); portalToast("Key 前缀已复制"); }
     if (target.dataset.copyModel) { await navigator.clipboard.writeText(target.dataset.copyModel); portalToast("模型 ID 已复制"); }
     if (target.dataset.copyEndpoint) { await navigator.clipboard.writeText(target.dataset.copyEndpoint); portalToast("调用地址已复制"); }
+    if (target.dataset.copyOnboardingKey) { await navigator.clipboard.writeText(target.dataset.copyOnboardingKey); portalToast("完整 API Key 已复制"); }
     if (target.dataset.modelFilter) { portalState.marketplace.modality = target.dataset.modelFilter; renderModelMarketplace(); }
     if (target.dataset.modelProvider) { portalState.marketplace.provider = target.dataset.modelProvider; renderModelMarketplace(); }
     if (target.dataset.modelProviderMore !== undefined) { portalState.marketplace.provider = "__more__"; renderModelMarketplace(); }
@@ -1477,13 +1552,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("model-marketplace-search").value = "";
       document.getElementById("model-marketplace-provider-filter").value = "";
       document.getElementById("model-marketplace-health").value = "all";
-      document.getElementById("model-marketplace-sort").value = "default";
       renderModelMarketplace();
     }
     if (target.dataset.modelDetail) modelDetailDialog(target.dataset.modelDetail);
     if (target.dataset.modelTest) modelTestDialog(target.dataset.modelTest);
+    if (target.dataset.modelOnboard) modelOnboardingDialog(target.dataset.modelOnboard);
     if (target.dataset.modelCompare) toggleModelComparison(target.dataset.modelCompare);
     if (target.dataset.modelCompareClear !== undefined) { portalState.marketplace.compare = []; renderModelMarketplace(); }
+    if (target.dataset.modelCompareProvider) compareProviderModels(target.dataset.modelCompareProvider);
     if (target.dataset.modelCompareOpen !== undefined) modelCompareDialog();
     if (target.dataset.copyModelCode) {
       const model = portalState.models.find((item) => item.public_name === target.dataset.modelName);

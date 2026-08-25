@@ -803,8 +803,7 @@ function renderModels() {
     return `
       <article class="admin-model-card">
         <div class="admin-model-card-header"><span class="admin-model-icon">${providerLogo(provider, "admin-model-logo-image")}</span><div class="admin-model-card-title"><div><h3>${escapeHtml(metadata.display_name || item.public_name)}</h3><div class="admin-model-version"><span>模型版本</span><strong>${escapeHtml(metadata.model_version || "待上游确认")}</strong></div><code>调用 ID：${escapeHtml(item.public_name)}</code></div><div>${modelPublicationBadge(item)}</div></div></div>
-        <div class="admin-model-card-meta">${modelTypeBadge(item)}<span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)} 健康</span></div>
-        <div class="admin-model-tags">${capabilities || '<span class="empty">能力待补充</span>'}</div>
+        <div class="admin-model-card-meta">${modelTypeBadge(item)}<div class="admin-model-tags inline">${capabilities || '<span class="empty">能力待补充</span>'}</div><span class="admin-model-health"><i data-lucide="activity"></i>${formatNumber(item.healthy_channel_count)} / ${formatNumber(item.channel_count)} 健康</span></div>
         <div class="admin-model-card-stats"><div><span>上下文</span><strong>${escapeHtml(metadata.context_window || "按上游")}</strong></div><div><span>最大输出</span><strong>${escapeHtml(formatMaxOutputTokens(metadata.max_output_tokens, "按上游"))}</strong></div><div><span>参数</span><strong title="${escapeHtml(parameters)}">${escapeHtml(parameters || "待补充")}</strong></div></div>
         <div class="admin-model-card-pricing"><div><span>平台输入 / 1M</span><strong>${chatCompatible ? modelPriceText(item.input_price_micros_per_1k) : "按任务计费"}</strong></div><div><span>平台输出 / 1M</span><strong>${chatCompatible ? modelPriceText(item.output_price_micros_per_1k) : "按任务计费"}</strong></div></div>
         <div class="admin-model-card-footer"><button class="text-button" type="button" data-action="model-detail-admin" data-id="${item.id}"><i data-lucide="file-text"></i><span>完整参数</span></button><div class="admin-model-actions">${canOperate() ? `${channelButton}${pricingButton}${preflightButton}${publishButton}${deleteButton}` : '<span class="secondary">只读</span>'}</div></div>
@@ -932,16 +931,31 @@ async function providerBillsDialog() {
 
 const loaders = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, models: loadModels, payments: loadPayments, redemptions: loadRedemptions, usage: loadUsage, audit: loadAudit };
 
+function renderAdminPageActions(view) {
+  const target = document.getElementById(`admin-page-actions-${view}`);
+  if (!target) return;
+  const pageActions = {
+    accounts: '<button class="primary-button content-page-button" type="button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button>',
+    keys: '<button class="primary-button content-page-button" type="button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button>',
+    models: '<button class="icon-button model-page-back" id="admin-model-page-back" type="button" data-model-page-back hidden title="返回模型管理" aria-label="返回模型管理"><i data-lucide="arrow-left"></i></button>',
+    payments: '<button class="secondary-button content-page-button" type="button" data-action="reconcile-ledger"><i data-lucide="scale"></i><span>账本对账</span></button><button class="primary-button content-page-button" type="button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button>',
+    redemptions: '<button class="primary-button content-page-button" type="button" data-action="create-redemption"><i data-lucide="plus"></i><span>创建兑换码</span></button>',
+    usage: '<button class="secondary-button content-page-button" type="button" data-action="provider-bills"><i data-lucide="file-check-2"></i><span>供应商账单</span></button>',
+    audit: '<button class="secondary-button content-page-button" type="button" data-action="manage-admins"><i data-lucide="users-round"></i><span>管理员与角色</span></button>',
+  };
+  const globalActions = `${view === "overview" ? '<a class="secondary-button content-page-button" href="/guide/admin" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>管理文档</span></a><span class="environment" id="environment-badge"><span class="status-dot"></span>读取环境</span>' : ""}<button class="icon-button" type="button" data-action="admin-back" title="返回上一页" aria-label="返回上一页" ${view === "overview" ? "disabled" : ""}><i data-lucide="arrow-left"></i></button><button class="icon-button" type="button" data-action="admin-refresh" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>`;
+  target.innerHTML = `${pageActions[view] || ""}${globalActions}`;
+  icons();
+  applyRoleUi();
+}
+
 async function switchView(view, { historyMode = "push" } = {}) {
   if (!Object.prototype.hasOwnProperty.call(titles, view)) view = "overview";
   state.view = view;
   updateAdminHistory(view, historyMode);
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
   document.querySelectorAll(".view").forEach((item) => item.classList.toggle("active", item.id === `view-${view}`));
-  document.getElementById("page-title").textContent = titles[view];
-  document.getElementById("admin-guide-link").hidden = view !== "overview";
-  const backButton = document.getElementById("admin-back-button");
-  if (backButton) backButton.disabled = view === "overview";
+  renderAdminPageActions(view);
   try { await loaders[view](); } catch (error) { toast(error.message, true); }
 }
 
@@ -1553,8 +1567,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     api("/admin/auth/logout", { method: "POST", body: "{}" }).catch(() => {});
     sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; state.identity = null; closeAdminAccountMenu(); document.getElementById("admin-password").value = ""; showAuth();
   });
-  document.getElementById("refresh-button").addEventListener("click", () => switchView(state.view, { historyMode: "none" }));
-  document.getElementById("admin-back-button").addEventListener("click", navigateAdminBack);
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
   document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; state.modelProviderDetail = ""; renderModels(); });
   document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
@@ -1567,6 +1579,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (!target) return;
     if (target.dataset.close !== undefined) closeDialog();
     if (target.dataset.go) switchView(target.dataset.go);
+    if (target.dataset.action === "admin-back") navigateAdminBack();
+    if (target.dataset.action === "admin-refresh") switchView(state.view, { historyMode: "none" });
     if (target.dataset.modelPageBack !== undefined) {
       state.modelProviderDetail = "";
       state.modelFilters.provider = "";

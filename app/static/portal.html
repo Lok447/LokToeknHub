@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken 用户中心</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=portal-20260825-2">
-  <link rel="stylesheet" href="/static/portal.css?v=portal-20260826-2">
+  <link rel="stylesheet" href="/static/styles.css?v=portal-20260825-3">
+  <link rel="stylesheet" href="/static/portal.css?v=portal-20260826-10">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/portal.js?v=portal-20260826-1" defer></script>
+  <script src="/static/portal.js?v=portal-20260826-12" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="portal-auth">
@@ -92,16 +92,9 @@
     </aside>
 
     <main>
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">LOKTOKEN / USER</p>
-          <h1 id="portal-page-title">用户概览</h1>
-        </div>
-        <div class="topbar-actions"><button class="icon-button" id="portal-back-button" type="button" title="返回上一页" aria-label="返回上一页"><i data-lucide="arrow-left"></i></button><a class="secondary-button topbar-doc-link" id="portal-guide-link" href="/guide/user" target="_blank" rel="noopener"><i data-lucide="book-open"></i><span>用户文档</span></a><button class="icon-button" id="portal-refresh" type="button" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
-      </header>
-
       <div class="content">
         <section class="view active" id="portal-view-overview">
+          <div class="section-header page-section-header"><div><h2>用户概览</h2><p>查看账户状态、模型调用与近期用量</p></div><div class="content-page-actions"></div></div>
           <section class="panel integration-guide" id="portal-integration-guide" aria-label="应用接入指引" hidden></section>
 
           <section class="overview-quickbar panel" aria-label="账户摘要">
@@ -149,7 +142,7 @@
         </section>
 
         <section class="view" id="portal-view-keys">
-          <div class="section-header page-section-header key-page-header"><div><h2>API Key</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="key-page-actions"><button class="secondary-button" data-action="key-columns"><i data-lucide="columns-3"></i><span>列设置</span></button><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>创建 Key</span></button></div></div>
+          <div class="section-header page-section-header key-page-header"><div><h2>密钥管理</h2><p>管理账户访问凭证、额度与使用状态</p></div><div class="content-page-actions"></div></div>
           <div class="metric-grid compact key-metrics" id="portal-keys-metrics"></div>
           <section class="panel key-workspace">
             <div class="key-toolbar">
@@ -163,14 +156,13 @@
         </section>
 
         <section class="view" id="portal-view-models">
-          <div class="section-header page-section-header model-page-header"><div class="model-page-heading"><button class="icon-button model-page-back" id="model-marketplace-provider-back" type="button" data-model-provider-back hidden title="返回模型广场" aria-label="返回模型广场"><i data-lucide="arrow-left"></i></button><div><h2>模型广场</h2><p>浏览可调用模型、比较能力与平台价格</p></div></div></div>
+          <div class="section-header page-section-header model-page-header"><div><h2>模型广场</h2><p>浏览可调用模型、比较能力与平台价格</p></div><div class="content-page-actions"></div></div>
           <section class="panel model-catalog-panel portal-model-catalog-panel">
             <div class="model-catalog-toolbar">
               <div class="model-type-tabs" id="model-marketplace-tabs" aria-label="模型类型筛选"></div>
               <div class="input-with-icon"><i data-lucide="search"></i><input id="model-marketplace-search" type="search" placeholder="搜索模型、调用 ID 或服务商" aria-label="搜索模型"></div>
               <select id="model-marketplace-provider-filter" aria-label="服务商筛选"><option value="">全部服务商</option></select>
               <select id="model-marketplace-health" aria-label="可用状态筛选"><option value="all">全部状态</option><option value="healthy">渠道健康</option><option value="attention">需要关注</option></select>
-              <select id="model-marketplace-sort" aria-label="模型排序"><option value="default">默认排序</option><option value="price-asc">价格升序</option><option value="context-desc">上下文降序</option><option value="name-asc">名称 A-Z</option></select>
               <span id="model-marketplace-count">共 0 个模型</span>
             </div>
             <div class="admin-provider-grid" id="portal-provider-grid"></div>
@@ -181,7 +173,7 @@
         </section>
 
         <section class="view" id="portal-view-usage">
-          <div class="section-header page-section-header"><div><h2>请求记录</h2><p>查看和分析账户 API 调用情况</p></div></div>
+          <div class="section-header page-section-header"><div><h2>请求记录</h2><p>查看和分析账户 API 调用情况</p></div><div class="content-page-actions"></div></div>
           <div class="metric-grid compact" id="portal-usage-metrics"></div>
           <form class="usage-filter-bar" id="portal-usage-filter">
             <div class="field"><label for="usage-range-filter">时间范围</label><select id="usage-range-filter" name="range"><option value="24h">近 24 小时</option><option value="7d" selected>近 7 天</option><option value="30d">近 30 天</option><option value="custom">自定义</option></select></div>
@@ -223,7 +215,7 @@
         </section>
 
         <section class="view" id="portal-view-quota">
-          <div class="section-header page-section-header"><div><h2>额度管理</h2><p>查看可用余额、充值记录与消费情况</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>充值额度</span></button></div>
+          <div class="section-header page-section-header"><div><h2>额度管理</h2><p>查看可用余额、充值记录与消费情况</p></div><div class="content-page-actions"></div></div>
           <section class="panel quota-hero">
             <div><span>当前可用余额</span><strong id="quota-balance">-</strong><p>调用模型时按实际 Token 用量结算</p></div>
             <div class="quota-hero-stats"><div><span>累计充值与福利</span><strong id="quota-total-credit">-</strong></div><div><span>累计消费</span><strong id="quota-total-consumed">-</strong></div><div><span>余额变动</span><strong id="quota-transaction-count">-</strong></div></div>
@@ -236,12 +228,12 @@
         </section>
 
         <section class="view" id="portal-view-orders">
-          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="order-page-actions"><button class="primary-button" data-go="quota"><i data-lucide="plus"></i><span>创建充值申请</span></button></div></div>
+          <div class="section-header page-section-header"><div><h2>订单管理</h2><p>查看充值申请、到账与退款状态</p></div><div class="content-page-actions"></div></div>
           <section class="panel orders-workspace"><div class="orders-toolbar"><div class="field"><label for="order-status-filter">订单状态</label><select id="order-status-filter"><option value="">全部订单</option><option value="pending">待处理</option><option value="paid">已入账</option><option value="refunded">已退款</option></select></div><span id="order-result-count">共 0 个订单</span></div><div class="table-wrap"><table class="orders-table"><thead><tr><th>订单号</th><th>支付方式</th><th>金额</th><th>状态</th><th>创建时间</th><th>到账时间</th></tr></thead><tbody id="portal-orders-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="portal-view-redeem">
-          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>输入有效兑换码，将福利额度存入当前账户</p></div></div>
+          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>输入有效兑换码，将福利额度存入当前账户</p></div><div class="content-page-actions"></div></div>
           <div class="redeem-layout">
             <section class="redeem-balance-panel"><i data-lucide="wallet-cards"></i><span>当前可用余额</span><strong id="redeem-balance">-</strong><small id="redeem-claim-count">暂无兑换记录</small></section>
             <section class="panel redeem-form-panel"><div class="section-header"><div><h2>兑换码</h2><p>兑换码区分大小写</p></div></div><form id="portal-redeem-form"><div class="input-with-icon"><i data-lucide="gift"></i><input id="redeem-code" name="code" autocomplete="off" required minlength="8" maxlength="120" placeholder="请输入兑换码"></div><button class="primary-button" type="submit"><i data-lucide="circle-check-big"></i><span>立即兑换</span></button></form></section>

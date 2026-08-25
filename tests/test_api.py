@@ -821,14 +821,14 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'id="portal-workspace-manager"' in portal_account_menu
         assert 'id="portal-security"' in portal_account_menu
         assert 'id="workspace-manager-select"' in portal_script
-        assert 'id="admin-guide-link"' in admin_page and 'id="portal-guide-link"' in portal_page
-        assert 'href="/guide/admin"' in admin_page and 'href="/guide/user"' in portal_page
+        assert 'href="/guide/admin"' in admin_script
         assert 'id="portal-register-link"' in portal_page and "无法登录" not in portal_page
         assert 'data-auth-mode="register"' not in portal_page
         assert 'id="portal-register-form"' in portal_page
         assert 'setAuthMode("register")' in portal_script
-        assert 'document.getElementById("admin-guide-link").hidden = view !== "overview";' in admin_script
-        assert 'document.getElementById("portal-guide-link").hidden = view !== "overview";' in portal_script
+        assert 'data-action="admin-refresh"' in admin_script
+        assert 'class="content-page-actions"' in admin_page
+        assert 'data-action="portal-refresh"' in portal_script
 
         admin_nav = ["管理概览", "账户管理", "模型管理", "密钥管理", "订单管理", "福利管理", "用量管理", "安全审计"]
         portal_nav = ["用户概览", "模型广场", "额度管理", "密钥管理", "请求记录", "订单管理", "兑换福利"]
@@ -845,9 +845,12 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
             "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
         }.items())
         assert 'id="admin-provider-grid"' in admin_page
-        assert 'id="admin-model-page-back"' in admin_page
+        assert 'id="admin-model-page-back"' in admin_script
         assert 'id="admin-model-create-inline"' not in admin_page
-        assert 'id="model-marketplace-provider-back"' in portal_page
+        assert 'id="model-marketplace-provider-back"' in portal_script
+        assert 'class="content-page-actions"' in portal_page
+        assert '<h2>模型广场</h2>' in portal_page
+        assert '浏览可调用模型、比较能力与平台价格' in portal_page
         assert 'class="panel model-catalog-panel portal-model-catalog-panel"' in portal_page
         assert 'class="model-catalog-toolbar"' in portal_page
         assert 'class="model-type-tabs" id="model-marketplace-tabs"' in portal_page
@@ -856,7 +859,7 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'id="portal-model-list"' in portal_page
         assert 'id="model-marketplace-provider-filter"' in portal_page
         assert 'id="model-marketplace-health"' in portal_page
-        assert 'id="model-marketplace-sort"' in portal_page
+        assert 'id="model-marketplace-sort"' not in portal_page
         assert 'id="model-compare-dock"' in portal_page
         assert "admin-provider-card" in portal_script
         assert "admin-model-card portal-model-card" in portal_script
@@ -865,6 +868,18 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert "统一调用地址" in portal_script
         assert "/portal/model-tests" in portal_script
         assert "本次测试会消耗额度" in portal_script
+        assert "开始接入" in portal_script
+        assert "modelOnboardingDialog" in portal_script
+        assert "data-model-onboard" in portal_script
+        assert "统一端点" in portal_script
+        assert "<span>模型对比</span>" in portal_script
+        assert "data-model-compare-open" in portal_script
+        assert "class=\"primary-button compact-provider-button\" type=\"button\" data-model-compare-provider" in portal_script
+        assert "选择模型对比" in portal_script
+        assert "model-compare-select-form" in portal_script
+        assert "data-model-test=\"${escapeHtml(item.public_name)}\"" in portal_script
+        assert "复制模型 ID" in portal_script
+        assert "data-model-onboard=\"${escapeHtml(item.public_name)}\"" in portal_script
         assert "admin-provider-card" in admin_script
         assert "更多系列 / 厂商查询" in admin_script
         assert "更多系列 / 厂商查询" in portal_script
@@ -1210,8 +1225,8 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken 用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260826-1"' in portal_page.text
-        assert 'href="/static/portal.css?v=portal-20260826-2"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260826-12"' in portal_page.text
+        assert 'href="/static/portal.css?v=portal-20260826-10"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text
         assert 'id="portal-register-contact"' in portal_page.text
@@ -1219,10 +1234,10 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert portal_page.text.index('id="portal-integration-guide"') < portal_page.text.index('class="overview-quickbar panel"')
         assert '<strong>LokToken</strong>' in portal_page.text
         assert '<p class="sidebar-section-label">工作台</p>' not in portal_page.text
-        assert 'class="topbar-actions"' in portal_page.text
+        assert 'class="topbar-actions"' not in portal_page.text
         assert 'id="portal-workspace-manager"' in portal_page.text
         assert 'id="portal-security"' in portal_page.text
-        assert 'id="portal-refresh"' in portal_page.text
+        assert 'class="content-page-actions"' in portal_page.text
         for local_refresh_id in ("keys-refresh", "quota-refresh", "orders-refresh", "redeem-refresh", "usage-refresh"):
             assert f'id="{local_refresh_id}"' not in portal_page.text
         assert "使用外部身份登录" in portal_page.text

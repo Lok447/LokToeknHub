@@ -145,6 +145,9 @@ main { min-width: 0; }
 .section-header p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .page-section-header { min-height: auto; padding: 0 0 18px; border: 0; }
 .page-section-header h2 { font-size: 18px; }
+.content-page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.content-page-button { min-height: 32px; padding: 0 10px; gap: 5px; border-radius: 4px; font-size: 10px; }
+.content-page-button svg { width: 13px; height: 13px; }
 
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }
@@ -359,6 +362,7 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .admin-model-health { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
 .admin-model-health svg { width: 13px; height: 13px; color: var(--success); }
 .admin-model-tags { min-height: 24px; display: flex; flex-wrap: wrap; gap: 5px; }
+.admin-model-tags.inline { min-height: 0; display: contents; }
 .admin-model-tags span { padding: 4px 7px; border-radius: 4px; color: #2856d8; background: var(--signal-soft); font-size: 9px; font-weight: 700; }
 .admin-model-tags span.empty { color: var(--muted); background: var(--surface-muted); font-weight: 500; }
 .admin-model-card-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--line); border-radius: 5px; }
@@ -369,9 +373,9 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
 .admin-model-card-pricing { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .admin-model-card-pricing > div { display: grid; gap: 4px; padding: 9px 10px; border-radius: 5px; background: var(--surface-soft); }
 .admin-model-card-pricing strong { color: var(--ink); font-size: 12px; }
-.admin-model-card-footer { display: grid; gap: 10px; padding-top: 2px; }
-.admin-model-card-footer > .text-button { justify-self: start; padding: 0; }
-.admin-model-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.admin-model-card-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding-top: 2px; }
+.admin-model-card-footer > .text-button { padding: 0; }
+.admin-model-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
 .admin-model-actions .table-button { min-height: 28px; padding: 0 8px; }
 .admin-model-detail-dialog { gap: 18px; }
 .admin-model-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
