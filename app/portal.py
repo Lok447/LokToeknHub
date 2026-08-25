@@ -24,11 +24,11 @@ from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
 from .model_release import model_is_callable
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
 from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
 from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, verify_password
-from .services import call_provider_details, calculate_amount, estimate_tokens, reserve_balance, save_usage, settle_balance, validate_model_request
+from .services import call_provider_details, calculate_amount, create_provider_task, estimate_tokens, reserve_balance, save_usage, settle_balance, validate_model_request
 from .workspaces import accessible_workspaces, create_organization, create_project, ensure_default_project, ensure_personal_workspace, project_access, require_workspace_manager, workspace_access, workspace_data
 
 
@@ -676,6 +676,15 @@ def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_acc
     return {"id": replacement.id, "name": replacement.name, "key": raw_key, "key_prefix": replacement.key_prefix, "replaced_api_key_id": api_key.id}
 
 
+@router.get("/portal/api-keys/{api_key_id}/transactions")
+def api_key_transactions(api_key_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
+    if not key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    rows = db.scalars(select(AccountBalanceTransaction).where(AccountBalanceTransaction.account_id == account.id, AccountBalanceTransaction.api_key_id == api_key_id).order_by(AccountBalanceTransaction.id.desc()).limit(100)).all()
+    return {"data": [{"id": row.id, "amount_micros": row.amount_micros, "type": row.transaction_type, "reference_id": row.reference_id, "description": row.description, "created_at": row.created_at.isoformat()} for row in rows]}
+
+
 @router.put("/portal/security/contact")
 def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
     if not account.password_hash or not verify_password(payload.password, account.password_hash):
@@ -800,18 +809,60 @@ async def test_model(
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
     if not model:
         raise HTTPException(status_code=404, detail="model not found")
+    try:
+        metadata = json.loads(model.catalog_metadata_json) if model.catalog_metadata_json else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    api_type = metadata.get("api_type", "chat_completions")
+    if api_type in {"images_generations", "video_generations"}:
+        if not model_is_callable(db, model):
+            raise HTTPException(status_code=503, detail="model unavailable")
+        request_id = "test_" + uuid.uuid4().hex
+        trace_id = request_id
+        quantity = payload.n if api_type == "images_generations" else 1
+        reservation = model.task_price_micros * quantity
+        try:
+            reserve_balance(db, account, api_key, reservation, request_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        task = GenerationTask(task_id="task_" + uuid.uuid4().hex, account_id=account.id, api_key_id=api_key.id, model_config_id=model.id, request_id=request_id, trace_id=trace_id, task_type=api_type, status="processing", quantity=quantity, reserved_micros=reservation)
+        db.add(task)
+        db.commit()
+        try:
+            task_payload = {"model": model.public_name, "prompt": payload.prompt.strip(), "n": payload.n}
+            if payload.size:
+                task_payload["size"] = payload.size
+            if payload.duration_seconds:
+                task_payload["duration_seconds"] = payload.duration_seconds
+            detail = await create_provider_task(db, model, task_payload)
+            task.provider_channel_id = detail.channel_id
+            task.provider_task_id = detail.provider_task_id
+            task.status = detail.status
+            task.result_json = json.dumps(detail.result, ensure_ascii=False)
+            task.updated_at = utcnow()
+            if detail.status in {"completed", "failed"}:
+                task.error_message = None if detail.status == "completed" else "provider task failed"
+                settle_balance(db, account, api_key, reservation, reservation if detail.status == "completed" else 0, request_id)
+                save_usage(db, api_key, model, request_id, trace_id, 0, 0, "success" if detail.status == "completed" else "error", 0, task.error_message, provider_cost_micros=detail.provider_cost_micros, provider_channel_id=detail.channel_id, provider_request_id=detail.provider_task_id, raw_usage={"task_id": task.task_id, "task_type": api_type, "quantity": quantity, "result": detail.result}, amount_micros=reservation if detail.status == "completed" else 0)
+                task.settled_at = utcnow()
+            db.commit()
+            return {"request_id": request_id, "model": model.public_name, "status": task.status, "response": detail.result, "amount_micros": reservation if detail.status == "completed" else 0}
+        except Exception as exc:
+            task.status = "failed"
+            task.error_message = str(exc)
+            db.commit()
+            settle_balance(db, account, api_key, reservation, 0, request_id)
+            raise HTTPException(status_code=502, detail="模型测试调用失败，请稍后重试") from exc
     request = ChatCompletionRequest(
         model=model.public_name,
         messages=[{"role": "user", "content": payload.prompt.strip()}],
         max_tokens=payload.max_tokens,
         stream=False,
     )
-    try:
-        metadata = json.loads(model.catalog_metadata_json) if model.catalog_metadata_json else {}
-    except json.JSONDecodeError:
-        metadata = {}
-    if not isinstance(metadata, dict) or metadata.get("api_type", "chat_completions") != "chat_completions":
-        raise HTTPException(status_code=422, detail="当前测试入口暂支持对话模型，图像和视频模型请按调用示例接入")
+    if api_type != "chat_completions":
+        raise HTTPException(status_code=422, detail="当前模型的统一调用适配器尚未启用")
     if not model_is_callable(db, model):
         raise HTTPException(status_code=503, detail="model unavailable")
     validate_model_request(model, request)
@@ -891,6 +942,7 @@ def list_models(account: BillingAccount = Depends(portal_account), db: Session =
             "channel_count": len(channels),
             "active_channel_count": len(active_channels),
             "healthy_channel_count": len(healthy_channels),
+            "health_details": [{"name": channel.name, "status": channel.status, "health_source": channel.health_source, "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None, "last_latency_ms": channel.last_latency_ms, "last_status_code": channel.last_status_code, "last_error": channel.last_error} for channel in active_channels],
             "last_checked_at": max((channel.last_checked_at for channel in active_channels if channel.last_checked_at), default=None).isoformat() if any(channel.last_checked_at for channel in active_channels) else None,
             **model_metadata(item.public_name, item.catalog_metadata_json),
         })
@@ -927,6 +979,7 @@ def usage_summary(
         "output_tokens": outputs,
         "total_tokens": total,
         "amount_micros": amount,
+        "provider_cost_micros": db.scalar(select(func.coalesce(func.sum(UsageRecord.provider_cost_micros), 0)).where(UsageRecord.id.in_(record_ids), UsageRecord.status == "success")) or 0,
         "average_latency_ms": round(float(average_latency), 1),
         "success_count": success_count,
         "failed_count": failed_count,

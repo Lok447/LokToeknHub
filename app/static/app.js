@@ -303,14 +303,23 @@ function modelCardIcon(item) {
   return "message-square-text";
 }
 
-function modelAdminDetailDialog(modelId) {
+async function modelAdminDetailDialog(modelId) {
   const item = state.models.find((model) => String(model.id) === String(modelId));
   if (!item) return;
+  let history = [];
+  let channels = [];
+  try {
+    const [historyResult, channelResult] = await Promise.all([api(`/admin/models/${item.id}/history`), api(`/admin/models/${item.id}/channels`)]);
+    history = historyResult.data || [];
+    channels = channelResult.data || [];
+  } catch (_) { /* detail view remains useful when history is unavailable */ }
   const metadata = item.catalog_metadata || {};
   const pricing = item.official_pricing || {};
   const profile = metadata.gateway_profile || {};
   const parameterTags = (metadata.supported_parameters || []).map((value) => `<span>${escapeHtml(value)}</span>`).join("") || '<span class="empty">按上游配置</span>';
   const capabilityTags = (metadata.capabilities || []).map((value) => `<span>${escapeHtml(value)}</span>`).join("") || '<span class="empty">待补充</span>';
+  const healthRows = channels.map((channel) => `<div class="admin-model-health-row"><strong>${escapeHtml(channel.name)}</strong><span>${escapeHtml(channel.status)} · ${formatNumber(channel.last_latency_ms || 0)} ms</span><small>${escapeHtml(channel.last_error || channel.last_checked_at || "尚未检测")}</small></div>`).join("") || '<p class="field-hint">暂无渠道明细</p>';
+  const historyRows = history.slice(0, 8).map((record) => `<div class="admin-model-history-row"><strong>${escapeHtml(record.change_type)}</strong><span>${escapeHtml((record.changed_fields || []).join("、") || "状态")}</span><small>${escapeHtml(record.created_at || "")}</small></div>`).join("") || '<p class="field-hint">暂无变更记录</p>';
   const priceRows = pricing.off_peak || pricing.peak ? `
     <div class="admin-model-price-table"><div><span>价格时段</span><span>缓存命中输入</span><span>未命中输入</span><span>输出</span></div>
       ${["off_peak", "peak"].filter((period) => pricing[period]).map((period) => `<div><strong>${period === "off_peak" ? "低峰" : "高峰"}</strong><span>${modelPriceText(pricing[period].input_cache_hit_micros ? Math.round(pricing[period].input_cache_hit_micros / 1000) : 0)}</span><span>${modelPriceText(pricing[period].input_cache_miss_micros ? Math.round(pricing[period].input_cache_miss_micros / 1000) : 0)}</span><span>${modelPriceText(pricing[period].output_micros ? Math.round(pricing[period].output_micros / 1000) : 0)}</span></div>`).join("")}
@@ -323,6 +332,8 @@ function modelAdminDetailDialog(modelId) {
       <section class="admin-model-detail-section"><h4>能力</h4><div class="admin-model-tags">${capabilityTags}</div></section>
       <section class="admin-model-detail-section"><h4>支持参数</h4><div class="admin-model-tags">${parameterTags}</div></section>
       <section class="admin-model-detail-section"><h4>官方价格参考</h4>${pricing.source_url ? `<a class="admin-model-source" href="${escapeHtml(pricing.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(pricing.source || "查看官方价格")}</a>` : ""}${priceRows}</section>
+      <section class="admin-model-detail-section"><h4>渠道健康明细</h4><div class="admin-model-health-list">${healthRows}</div></section>
+      <section class="admin-model-detail-section"><h4>价格与配置变更</h4><div class="admin-model-history-list">${historyRows}</div></section>
       ${item.publication_reasons?.length ? `<div class="callout warning"><strong>发布检查</strong><span>${escapeHtml(item.publication_reasons.join("；"))}</span></div>` : ""}
     </div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>关闭</button></div>
   `);

@@ -271,7 +271,7 @@ def select_channels(db: Session, model: ModelConfig) -> list[ModelChannel]:
     return ordered[:settings.max_channel_attempts]
 
 
-def mark_channel_success(db: Session, channel: ModelChannel, source: str = "provider") -> None:
+def mark_channel_success(db: Session, channel: ModelChannel, source: str = "provider", *, latency_ms: int | None = None, status_code: int | None = None) -> None:
     tracked = db.get(ModelChannel, channel.id)
     if not tracked:
         return
@@ -281,10 +281,13 @@ def mark_channel_success(db: Session, channel: ModelChannel, source: str = "prov
     tracked.circuit_open_until = None
     tracked.last_checked_at = utcnow()
     tracked.last_error = None
+    if latency_ms is not None:
+        tracked.last_latency_ms = max(0, int(latency_ms))
+    tracked.last_status_code = status_code
     db.commit()
 
 
-def mark_channel_failure(db: Session, channel: ModelChannel, detail: str) -> None:
+def mark_channel_failure(db: Session, channel: ModelChannel, detail: str, *, latency_ms: int | None = None, status_code: int | None = None) -> None:
     settings = get_settings()
     tracked = db.get(ModelChannel, channel.id)
     if not tracked:
@@ -293,12 +296,15 @@ def mark_channel_failure(db: Session, channel: ModelChannel, detail: str) -> Non
     tracked.consecutive_failures += 1
     tracked.last_checked_at = utcnow()
     tracked.last_error = detail[:1000]
+    if latency_ms is not None:
+        tracked.last_latency_ms = max(0, int(latency_ms))
+    tracked.last_status_code = status_code
     if tracked.consecutive_failures >= settings.channel_failure_threshold:
         tracked.circuit_open_until = utcnow() + timedelta(seconds=settings.channel_circuit_cooldown_seconds)
     db.commit()
 
 
-def mark_channel_catalogue_state(db: Session, channel: ModelChannel, status: str, detail: str, source: str = "provider") -> None:
+def mark_channel_catalogue_state(db: Session, channel: ModelChannel, status: str, detail: str, source: str = "provider", *, latency_ms: int | None = None, status_code: int | None = None) -> None:
     """Record catalogue/configuration problems without opening the runtime circuit."""
     tracked = db.get(ModelChannel, channel.id)
     if not tracked:
@@ -309,6 +315,9 @@ def mark_channel_catalogue_state(db: Session, channel: ModelChannel, status: str
     tracked.circuit_open_until = None
     tracked.last_checked_at = utcnow()
     tracked.last_error = detail[:1000]
+    if latency_ms is not None:
+        tracked.last_latency_ms = max(0, int(latency_ms))
+    tracked.last_status_code = status_code
     db.commit()
 
 
@@ -528,7 +537,7 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
             response = await client.get(endpoint, headers=headers)
         if response.is_error:
             detail = f"HTTP {response.status_code}: {response.text[:500]}"
-            mark_channel_failure(db, channel, detail)
+            mark_channel_failure(db, channel, detail, latency_ms=int((time.perf_counter() - started) * 1000), status_code=response.status_code)
             return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
         try:
             payload = response.json()
@@ -542,24 +551,24 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
         }
         if not provider_model_ids:
             detail = "供应商模型目录响应无有效模型"
-            mark_channel_failure(db, channel, detail)
+            mark_channel_failure(db, channel, detail, latency_ms=int((time.perf_counter() - started) * 1000), status_code=response.status_code)
             return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
         connection = db.get(ProviderConnection, channel.provider_connection_id) if channel.provider_connection_id else None
         preset = get_provider_preset(connection.preset_id) if connection else None
         if preset and not provider_catalogue_matches(preset.id, provider_model_ids):
             available = ", ".join(sorted(provider_model_ids)[:6])
             detail = f"服务商目录与 {preset.name} 不匹配，请检查 API 地址和 API Key；返回样例: {available}"
-            mark_channel_catalogue_state(db, channel, "misconfigured", detail)
+            mark_channel_catalogue_state(db, channel, "misconfigured", detail, latency_ms=int((time.perf_counter() - started) * 1000), status_code=getattr(response, "status_code", 200))
             return {"healthy": False, "status": "misconfigured", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
         if channel.upstream_model not in provider_model_ids:
             detail = f"当前服务商账号尚未开放上游模型: {channel.upstream_model}"
-            mark_channel_catalogue_state(db, channel, "unavailable", detail)
+            mark_channel_catalogue_state(db, channel, "unavailable", detail, latency_ms=int((time.perf_counter() - started) * 1000), status_code=getattr(response, "status_code", 200))
             return {"healthy": False, "status": "unavailable", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
     except httpx.HTTPError as exc:
         detail = f"provider unavailable: {exc}"
         mark_channel_failure(db, channel, detail)
         return {"healthy": False, "latency_ms": int((time.perf_counter() - started) * 1000), "detail": detail}
-    mark_channel_success(db, channel)
+    mark_channel_success(db, channel, latency_ms=int((time.perf_counter() - started) * 1000), status_code=200)
     return {"healthy": True, "status": "healthy", "latency_ms": int((time.perf_counter() - started) * 1000), "detail": "OK"}
 
 

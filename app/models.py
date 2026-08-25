@@ -113,6 +113,20 @@ class ModelConfig(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ModelChangeRecord(Base):
+    __tablename__ = "model_change_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_config_id: Mapped[int] = mapped_column(ForeignKey("model_configs.id", ondelete="CASCADE"), index=True)
+    actor_type: Mapped[str] = mapped_column(String(24), default="admin")
+    actor_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    change_type: Mapped[str] = mapped_column(String(32), index=True)
+    changed_fields_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class ProviderConnection(Base):
     __tablename__ = "provider_connections"
 
@@ -176,6 +190,8 @@ class ModelChannel(Base):
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
     circuit_open_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_input_cost_micros_per_1k: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     provider_output_cost_micros_per_1k: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

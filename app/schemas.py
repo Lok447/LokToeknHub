@@ -24,6 +24,9 @@ class PortalModelTestRequest(BaseModel):
     api_key_id: int = Field(gt=0)
     prompt: str = Field(min_length=1, max_length=2000)
     max_tokens: int = Field(default=256, gt=0, le=4096)
+    n: int = Field(default=1, ge=1, le=4)
+    size: str | None = Field(default=None, max_length=32)
+    duration_seconds: int | None = Field(default=None, ge=1, le=30)
 
 
 class TrialLinkCreate(BaseModel):

@@ -125,6 +125,18 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_configs ADD COLUMN task_price_micros BIGINT NOT NULL DEFAULT 0"))
         if "provider_task_cost_micros" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_task_cost_micros BIGINT"))
+        if "last_latency_ms" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN last_latency_ms INTEGER NOT NULL DEFAULT 0"))
+        if "last_status_code" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN last_status_code INTEGER"))
+        connection.execute(text(
+            "CREATE TABLE IF NOT EXISTS model_change_records ("
+            "id INTEGER PRIMARY KEY, model_config_id INTEGER NOT NULL, actor_type VARCHAR(24) NOT NULL DEFAULT 'admin', "
+            "actor_id VARCHAR(120), change_type VARCHAR(32) NOT NULL, changed_fields_json TEXT, before_json TEXT, "
+            "after_json TEXT, created_at DATETIME NOT NULL)"
+        ))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_change_records_model_config_id ON model_change_records (model_config_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_model_change_records_change_type ON model_change_records (change_type)"))
         for name, definition in {
             "balance_micros": "BIGINT",
             "balance_currency": "VARCHAR(12)",
@@ -249,9 +261,9 @@ def init_db() -> None:
         connection.execute(text(
             "INSERT INTO model_channels "
             "(model_config_id, name, provider_base_url, upstream_model, provider_api_key_env, priority, weight, "
-            "active, status, health_source, consecutive_failures, created_at) "
+            "active, status, health_source, consecutive_failures, last_latency_ms, created_at) "
             "SELECT model_configs.id, 'Primary', model_configs.provider_base_url, model_configs.upstream_model, "
-            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 'unknown', 0, :created_at "
+            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 'unknown', 0, 0, :created_at "
             "FROM model_configs WHERE NOT EXISTS ("
             "SELECT 1 FROM model_channels WHERE model_channels.model_config_id = model_configs.id)"
         ), {"created_at": now})

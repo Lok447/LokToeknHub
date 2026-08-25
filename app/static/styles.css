@@ -148,6 +148,9 @@ main { min-width: 0; }
 .content-page-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .content-page-button { min-height: 32px; padding: 0 10px; gap: 5px; border-radius: 4px; font-size: 10px; }
 .content-page-button svg { width: 13px; height: 13px; }
+.admin-model-health-list, .admin-model-history-list { display: grid; gap: 6px; }
+.admin-model-health-row, .admin-model-history-row { display: grid; grid-template-columns: minmax(110px, .7fr) minmax(150px, 1fr) minmax(180px, 1.4fr); gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; }
+.admin-model-health-row small, .admin-model-history-row small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; }

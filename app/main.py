@@ -25,7 +25,7 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
@@ -1801,6 +1801,7 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
                 ModelChannel.active.is_(True),
                 ModelChannel.status == "healthy",
             )) or 0,
+            "health_details": [{"channel_id": channel.id, "name": channel.name, "status": channel.status, "health_source": channel.health_source, "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None, "last_latency_ms": channel.last_latency_ms, "last_status_code": channel.last_status_code, "last_error": channel.last_error} for channel in channels],
             "created_at": model.created_at.isoformat(),
         }
         for model in models
@@ -1809,12 +1810,57 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
+def _model_snapshot(model: ModelConfig) -> dict[str, object]:
+    return {
+        "public_name": model.public_name,
+        "upstream_model": model.upstream_model,
+        "provider_base_url": model.provider_base_url,
+        "input_price_micros_per_1k": model.input_price_micros_per_1k,
+        "output_price_micros_per_1k": model.output_price_micros_per_1k,
+        "task_price_micros": model.task_price_micros,
+        "pricing_margin_bps": model.pricing_margin_bps,
+        "active": model.active,
+        "catalog_metadata": parse_model_json(model.catalog_metadata_json),
+        "official_pricing": parse_model_json(model.official_pricing_json),
+    }
+
+
+def _record_model_change(db: Session, model: ModelConfig, change_type: str, before: dict[str, object], after: dict[str, object], fields: list[str]) -> None:
+    db.add(ModelChangeRecord(
+        model_config_id=model.id,
+        actor_type="admin",
+        actor_id="token-admin",
+        change_type=change_type,
+        changed_fields_json=json.dumps(fields, ensure_ascii=False),
+        before_json=json.dumps(before, ensure_ascii=False, default=str),
+        after_json=json.dumps(after, ensure_ascii=False, default=str),
+    ))
+
+
+@app.get("/admin/models/{model_id}/history", dependencies=[Depends(require_admin)])
+def list_model_history(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    if not db.get(ModelConfig, model_id):
+        raise HTTPException(status_code=404, detail="model not found")
+    rows = db.scalars(select(ModelChangeRecord).where(ModelChangeRecord.model_config_id == model_id).order_by(ModelChangeRecord.created_at.desc(), ModelChangeRecord.id.desc()).limit(100)).all()
+    data = []
+    for row in rows:
+        try:
+            before = json.loads(row.before_json) if row.before_json else None
+            after = json.loads(row.after_json) if row.after_json else None
+            fields = json.loads(row.changed_fields_json) if row.changed_fields_json else []
+        except json.JSONDecodeError:
+            before, after, fields = None, None, []
+        data.append({"id": row.id, "change_type": row.change_type, "actor_type": row.actor_type, "actor_id": row.actor_id, "changed_fields": fields, "before": before, "after": after, "created_at": row.created_at.isoformat()})
+    return {"data": data}
+
+
 @app.patch("/admin/models/{model_id}", dependencies=[Depends(require_operator)])
 def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
     model = db.get(ModelConfig, model_id)
     if not model:
         raise HTTPException(status_code=404, detail="model not found")
     changes = payload.model_dump(exclude_unset=True)
+    before_snapshot = _model_snapshot(model)
     if not changes:
         raise HTTPException(status_code=422, detail="no model changes provided")
     if "pricing_margin_bps" in changes and changes["pricing_margin_bps"]:
@@ -1848,6 +1894,9 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
             raise HTTPException(status_code=422, detail="run a successful real provider health check with configured credentials before publishing a model")
     for field, value in changes.items():
         setattr(model, field, value)
+    after_snapshot = _model_snapshot(model)
+    change_type = "publication" if "active" in changes and len(changes) == 1 else "pricing" if any(field in changes for field in ("input_price_micros_per_1k", "output_price_micros_per_1k", "task_price_micros", "pricing_margin_bps")) else "configuration"
+    _record_model_change(db, model, change_type, before_snapshot, after_snapshot, list(changes))
     record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model.updated", target_type="model", target_id=model.id, details=changes)
     db.commit()
     return {
@@ -1857,6 +1906,16 @@ def update_model(model_id: int, payload: ModelUpdate, db: Session = Depends(get_
         "output_price_micros_per_1k": model.output_price_micros_per_1k,
         "pricing_margin_bps": model.pricing_margin_bps,
     }
+
+
+@app.post("/admin/models/{model_id}/publish", dependencies=[Depends(require_operator)])
+def publish_model(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    return update_model(model_id, ModelUpdate(active=True), db)
+
+
+@app.post("/admin/models/{model_id}/unpublish", dependencies=[Depends(require_operator)])
+def unpublish_model(model_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    return update_model(model_id, ModelUpdate(active=False), db)
 
 
 @app.delete("/admin/models/{model_id}", dependencies=[Depends(require_superadmin)])
@@ -1938,6 +1997,8 @@ def channel_data(channel: ModelChannel) -> dict[str, object]:
         "consecutive_failures": channel.consecutive_failures,
         "circuit_open_until": channel.circuit_open_until.isoformat() if channel.circuit_open_until else None,
         "last_checked_at": channel.last_checked_at.isoformat() if channel.last_checked_at else None,
+        "last_latency_ms": channel.last_latency_ms,
+        "last_status_code": channel.last_status_code,
         "last_error": channel.last_error,
         "provider_input_cost_micros_per_1k": channel.provider_input_cost_micros_per_1k,
         "provider_output_cost_micros_per_1k": channel.provider_output_cost_micros_per_1k,
@@ -2135,7 +2196,7 @@ def list_models(authorization: str | None = Header(default=None), db: Session = 
             "context_length": metadata.get("context_window"),
             "architecture": {
                 "input_modalities": metadata.get("modalities", ["text"]),
-                "output_modalities": ["text"],
+                "output_modalities": metadata.get("output_modalities", ["text"]),
             },
             "pricing": {
                 "input_cny_per_1k": item.input_price_micros_per_1k,
