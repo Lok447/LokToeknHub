@@ -276,6 +276,8 @@ function modelTypeLabels(item) {
   const modalities = item.catalog_metadata?.modalities || [];
   if (type === "images_generations") return ["图像生成"];
   if (type === "video_generations") return ["视频生成"];
+  if (type === "audio_speech") return ["语音合成"];
+  if (type === "audio_transcriptions") return ["语音识别"];
   if (type.startsWith("audio_") || modalities.includes("audio")) return ["语音"];
   const labels = [];
   if (modalities.includes("text") || !modalities.length) labels.push("文本");

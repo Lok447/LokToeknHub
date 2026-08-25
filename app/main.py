@@ -31,7 +31,7 @@ from .payment_providers import payment_providers, require_available_provider
 from .portal import router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
+from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
@@ -1623,7 +1623,7 @@ async def configure_provider_connection(
             channel.provider_task_cost_micros = preset_model.provider_task_cost_micros
         available = preset_model.model_id in discovered_ids
         metadata_api_type = preset_model.catalog_metadata.get("api_type", "chat_completions")
-        task_adapter_ready = metadata_api_type in {"images_generations", "video_generations"}
+        task_adapter_ready = metadata_api_type in {"images_generations", "video_generations", "audio_speech", "audio_transcriptions"}
         channel.active = available and (metadata_api_type == "chat_completions" or task_adapter_ready)
         channel.status = "healthy" if channel.active else "unavailable"
         channel.health_source = "provider"
@@ -2259,7 +2259,7 @@ def _generation_response(task: GenerationTask, model: ModelConfig) -> dict[str, 
     result = parse_model_json(task.result_json) or {}
     return {
         "id": task.task_id,
-        "object": "video.generation" if task.task_type == "video_generations" else "image.generation",
+        "object": {"video_generations": "video.generation", "audio_speech": "audio.speech", "audio_transcriptions": "audio.transcription"}.get(task.task_type, "image.generation"),
         "created": int(task.created_at.timestamp()),
         "model": model.public_name,
         "status": task.status,
@@ -2364,6 +2364,28 @@ async def video_generations(
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     return await _create_generation(payload, "video_generations", authorization, x_request_id, x_trace_id, db)
+
+
+@app.post("/v1/audio/speech")
+async def audio_speech(
+    payload: AudioSpeechRequest,
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _create_generation(payload, "audio_speech", authorization, x_request_id, x_trace_id, db)
+
+
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(
+    payload: AudioTranscriptionRequest,
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _create_generation(payload, "audio_transcriptions", authorization, x_request_id, x_trace_id, db)
 
 
 @app.get("/v1/generation-tasks/{task_id}")

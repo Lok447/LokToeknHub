@@ -832,6 +832,12 @@ async def test_model(
         db.commit()
         try:
             task_payload = {"model": model.public_name, "prompt": payload.prompt.strip(), "n": payload.n}
+            if api_type == "audio_speech":
+                task_payload = {"model": model.public_name, "input": payload.prompt.strip(), "voice": "alloy"}
+            elif api_type == "audio_transcriptions":
+                if not payload.audio:
+                    raise HTTPException(status_code=422, detail="语音识别测试需要提供音频内容")
+                task_payload = {"model": model.public_name, "audio": payload.audio, "filename": "test-audio.wav"}
             if payload.size:
                 task_payload["size"] = payload.size
             if payload.duration_seconds:

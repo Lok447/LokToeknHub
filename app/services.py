@@ -339,7 +339,13 @@ def _task_endpoint(channel: ModelChannel, model: ModelConfig, suffix: str = "") 
     _, headers = _provider_auth(channel)
     metadata = _catalog_metadata(model)
     profile = metadata.get("gateway_profile") if isinstance(metadata.get("gateway_profile"), dict) else {}
-    request_path = str(profile.get("request_path") or ("/images/generations" if metadata.get("api_type") == "images_generations" else "/videos/generations"))
+    default_paths = {
+        "images_generations": "/images/generations",
+        "video_generations": "/videos/generations",
+        "audio_speech": "/audio/speech",
+        "audio_transcriptions": "/audio/transcriptions",
+    }
+    request_path = str(profile.get("request_path") or default_paths.get(metadata.get("api_type"), "/audio/speech"))
     return channel.provider_base_url.rstrip("/") + "/" + request_path.lstrip("/") + suffix, headers
 
 
@@ -361,6 +367,12 @@ def _task_result(data: dict[str, Any]) -> tuple[str, str | None, dict[str, Any]]
     result_data = data.get("data") if isinstance(data.get("data"), list) else (body.get("output") if isinstance(body, dict) else None)
     if isinstance(result_data, list) and result_data:
         return "completed", task_id, {"data": result_data}
+    audio_url = data.get("audio_url") or data.get("url") or (body.get("audio_url") if isinstance(body, dict) else None) or (body.get("url") if isinstance(body, dict) else None)
+    transcript = data.get("text") or (body.get("text") if isinstance(body, dict) else None)
+    if audio_url:
+        return "completed", task_id, {"data": [{"url": audio_url}]}
+    if transcript is not None:
+        return "completed", task_id, {"text": str(transcript), "data": [{"text": str(transcript)}]}
     url = data.get("url") or data.get("video_url") or (body.get("url") if isinstance(body, dict) else None)
     if url:
         return "completed", task_id, {"data": [{"url": url}]}
@@ -377,8 +389,11 @@ async def create_provider_task(db: Session, model: ModelConfig, payload: dict[st
     if settings.mock_mode:
         channel = channels[0]
         mark_channel_success(db, channel, "mock")
-        result = {"data": [{"url": f"https://mock.loktoken.local/{api_type}/{uuid.uuid4().hex}"}]}
-        return ProviderTaskDetails("completed" if api_type == "images_generations" else "processing", result, channel_id=channel.id, provider_task_id="task_" + uuid.uuid4().hex)
+        if api_type == "audio_transcriptions":
+            result = {"text": "TOKEN mock transcription", "data": [{"text": "TOKEN mock transcription"}]}
+        else:
+            result = {"data": [{"url": f"https://mock.loktoken.local/{api_type}/{uuid.uuid4().hex}"}]}
+        return ProviderTaskDetails("completed" if api_type in {"images_generations", "audio_speech", "audio_transcriptions"} else "processing", result, channel_id=channel.id, provider_task_id="task_" + uuid.uuid4().hex)
     attempts: list[dict[str, Any]] = []
     last_detail = "all available channels failed"
     for channel in channels:
@@ -515,7 +530,7 @@ async def check_channel_health(db: Session, channel: ModelChannel) -> dict[str, 
     except json.JSONDecodeError:
         metadata = {}
     api_type = metadata.get("api_type", "chat_completions") if isinstance(metadata, dict) else "chat_completions"
-    if api_type in {"images_generations", "video_generations"}:
+    if api_type in {"images_generations", "video_generations", "audio_speech", "audio_transcriptions"}:
         detail = "任务适配器已启用；健康检查不创建可能产生费用的生成任务"
         mark_channel_success(db, channel, "adapter")
         return {"healthy": True, "status": "healthy", "latency_ms": 0, "detail": detail}

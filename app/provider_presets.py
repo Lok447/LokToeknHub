@@ -90,12 +90,18 @@ def gateway_profile(provider: str, api_type: str) -> dict[str, object]:
         "parameter_aliases": {"max_completion_tokens": "max_tokens"},
     }))
     if api_type != "chat_completions":
+        task_paths = {
+            "images_generations": "/images/generations",
+            "video_generations": "/videos/generations",
+            "audio_speech": "/audio/speech",
+            "audio_transcriptions": "/audio/transcriptions",
+        }
         profile.update({
             "protocol": "async_task",
-            "request_path": "/images/generations" if api_type == "images_generations" else "/videos/generations",
+            "request_path": task_paths.get(api_type, "/audio/speech"),
             "stream_transport": "none",
             "usage_source": "task_result",
-            "parameter_policy": "task_specific_pending_adapter",
+            "parameter_policy": "task_specific" if api_type.startswith("audio_") else "task_specific_pending_adapter",
             "parameter_aliases": {},
         })
     else:

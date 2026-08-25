@@ -58,7 +58,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/chat/completions -Method Post -Header
 
 用户中心的“模型广场”会展示模型提供方、能力标签、上下文长度、输入/输出价格、支持参数和当前 API 限流，并支持按模型类型、服务商、健康状态和价格排序筛选。点击模型卡片可查看模型 ID、cURL 和 Python SDK 调用示例；示例中的 `YOUR_API_KEY` 只需替换为用户自己的 Key。文本对话模型详情还提供“测试调用”入口：选择账户下有效的 API Key、输入简短提示词即可在页面内验证模型，测试请求会按当前平台价格消耗额度并写入请求记录；没有有效 Key 时需先创建 Key。
 
-模型发布采用“候选 -> 已发布/Mock 已发布 -> 下架”的显式闭环。发布前必须满足价格、适配器、启用渠道和健康检查条件，可使用 `POST /admin/models/{model_id}/publish` 与 `POST /admin/models/{model_id}/unpublish` 管理状态；`GET /admin/models/{model_id}/history` 提供价格、配置和发布变更记录。图像与视频模型的测试入口会创建生成任务并按任务价格结算，音频等未接入统一适配器的模型会明确标记为待适配。渠道健康记录包含检测来源、状态码、延迟、最近错误和连续失败次数，管理端与用户中心均可查看相应明细。
+模型发布采用“候选 -> 已发布/Mock 已发布 -> 下架”的显式闭环。发布前必须满足价格、适配器、启用渠道和健康检查条件，可使用 `POST /admin/models/{model_id}/publish` 与 `POST /admin/models/{model_id}/unpublish` 管理状态；`GET /admin/models/{model_id}/history` 提供价格、配置和发布变更记录。图像、视频和音频模型的测试入口会创建生成任务并按任务价格结算。音频适配器提供 `POST /v1/audio/speech`（语音合成）和 `POST /v1/audio/transcriptions`（语音识别），识别请求支持 Base64 音频或供应商可访问的音频 URL；异步供应商仍可通过统一任务查询接口获取结果。渠道健康记录包含检测来源、状态码、延迟、最近错误和连续失败次数，管理端与用户中心均可查看相应明细。
 
 ## 用户试用闭环 v0.2
 

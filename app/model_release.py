@@ -42,7 +42,7 @@ def model_publication_state(
     if api_type == "chat_completions":
         if model.input_price_micros_per_1k <= 0 or model.output_price_micros_per_1k <= 0:
             reasons.append("平台输入和输出价格均需大于 0")
-    elif api_type in {"images_generations", "video_generations"}:
+    elif api_type in {"images_generations", "video_generations", "audio_speech", "audio_transcriptions"}:
         if model.task_price_micros <= 0:
             reasons.append("任务模型需配置单次生成价格")
     else:

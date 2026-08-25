@@ -645,17 +645,24 @@ function marketplaceModelTypeBadge(item) {
 function modelProtocolLabel(item) {
   if (modelApiType(item) === "images_generations") return "图像生成接口";
   if (modelApiType(item) === "video_generations") return "视频异步任务接口";
+  if (modelApiType(item) === "audio_speech") return "语音合成接口";
+  if (modelApiType(item) === "audio_transcriptions") return "语音识别接口";
   return "对话接口（Chat Completions）";
 }
 
 function modelEndpoint(item) {
   if (modelApiType(item) === "images_generations") return `${window.location.origin}/v1/images/generations`;
   if (modelApiType(item) === "video_generations") return `${window.location.origin}/v1/videos/generations`;
+  if (modelApiType(item) === "audio_speech") return `${window.location.origin}/v1/audio/speech`;
+  if (modelApiType(item) === "audio_transcriptions") return `${window.location.origin}/v1/audio/transcriptions`;
   return `${window.location.origin}/v1/chat/completions`;
 }
 
 function taskPriceLabel(item) {
-  return modelApiType(item) === "video_generations" ? "每次视频生成" : "每张图片生成";
+  if (modelApiType(item) === "video_generations") return "每次视频生成";
+  if (modelApiType(item) === "audio_speech") return "每次语音合成";
+  if (modelApiType(item) === "audio_transcriptions") return "每次语音识别";
+  return "每张图片生成";
 }
 
 function modelPriceValue(item) {
@@ -681,6 +688,7 @@ function modelMaxOutputLabel(item) {
 function modelIcon(item) {
   if (modelApiType(item) === "video_generations") return "clapperboard";
   if (modelApiType(item) === "images_generations") return "image-plus";
+  if (modelApiType(item).startsWith("audio_")) return "audio-lines";
   if ((item.modalities || []).includes("image")) return "image";
   if ((item.modalities || []).includes("reasoning")) return "brain-circuit";
   if ((item.modalities || []).includes("code")) return "code-2";
@@ -833,6 +841,8 @@ function renderModelMarketplace() {
 }
 
 function modelCurlSnippet(item) {
+  if (modelApiType(item) === "audio_speech") return `curl ${window.location.origin}/v1/audio/speech -H "Authorization: Bearer YOUR_API_KEY" -H "Content-Type: application/json" -d '{"model":"${item.public_name}","input":"你好，欢迎使用 LokToken","voice":"alloy"}'`;
+  if (modelApiType(item) === "audio_transcriptions") return `curl ${window.location.origin}/v1/audio/transcriptions -H "Authorization: Bearer YOUR_API_KEY" -H "Content-Type: application/json" -d '{"model":"${item.public_name}","audio":"BASE64_AUDIO"}'`;
   if (modelApiType(item) === "images_generations") return `curl ${window.location.origin}/v1/images/generations \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -H "Content-Type: application/json" \\
@@ -845,6 +855,8 @@ function modelCurlSnippet(item) {
 }
 
 function modelPythonSnippet(item) {
+  if (modelApiType(item) === "audio_speech") return `import requests\n\nresponse = requests.post("${window.location.origin}/v1/audio/speech", headers={"Authorization": "Bearer YOUR_API_KEY"}, json={"model": "${item.public_name}", "input": "你好，欢迎使用 LokToken", "voice": "alloy"})\nprint(response.json()["data"][0]["url"])`;
+  if (modelApiType(item) === "audio_transcriptions") return `import requests\n\nresponse = requests.post("${window.location.origin}/v1/audio/transcriptions", headers={"Authorization": "Bearer YOUR_API_KEY"}, json={"model": "${item.public_name}", "audio": "BASE64_AUDIO"})\nprint(response.json()["data"][0]["text"])`;
   if (modelApiType(item) === "images_generations") return `import requests\n\nresponse = requests.post(\n    "${window.location.origin}/v1/images/generations",\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n    json={"model": "${item.public_name}", "prompt": "一幅现代城市夜景"},\n)\nprint(response.json()["data"][0]["url"])`;
   if (modelApiType(item) === "video_generations") return `import requests\n\ncreated = requests.post(\n    "${window.location.origin}/v1/videos/generations",\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n    json={"model": "${item.public_name}", "prompt": "海边日出，电影感镜头"},\n).json()\ntask = requests.get(\n    "${window.location.origin}/v1/generation-tasks/" + created["id"],\n    headers={"Authorization": "Bearer YOUR_API_KEY"},\n).json()\nprint(task["status"], task["data"])`;
   return `from openai import OpenAI\n\nclient = OpenAI(\n    base_url="${window.location.origin}/v1",\n    api_key="YOUR_API_KEY",\n)\n\nresponse = client.chat.completions.create(\n    model="${item.public_name}",\n    messages=[{"role": "user", "content": "你好"}],\n)\nprint(response.choices[0].message.content)`;
@@ -853,8 +865,9 @@ function modelPythonSnippet(item) {
 function modelTestDialog(modelName) {
   const item = portalState.models.find((model) => model.public_name === modelName);
   if (!item) return;
-  if (modelApiType(item) !== "chat_completions") {
-    portalToast("当前测试入口暂支持对话模型，请按详情中的调用示例接入", true);
+  const apiType = modelApiType(item);
+  if (!["chat_completions", "images_generations", "video_generations", "audio_speech", "audio_transcriptions"].includes(apiType)) {
+    portalToast("当前模型的统一调用适配器尚未启用", true);
     return;
   }
   const keys = portalState.keys.filter((key) => key.active && (!keyExpiry(key) || keyExpiry(key) > new Date()));
@@ -862,14 +875,16 @@ function modelTestDialog(modelName) {
     openPortalDialog("测试调用 · 需要 API Key", `<div class="dialog-body"><div class="model-test-warning"><i data-lucide="key-round"></i><div><strong>请先创建一个有效的 API Key</strong><span>测试调用会消耗账户额度，并写入请求记录。创建完成后再从模型详情进入测试。</span></div></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后处理</button><button class="primary-button" type="button" data-action="create-key"><i data-lucide="key-round"></i><span>创建 API Key</span></button></div>`);
     return;
   }
-  openPortalDialog(`测试调用 · ${item.display_name || item.public_name}`, `<form id="model-test-form"><div class="dialog-body"><div class="model-test-warning"><i data-lucide="triangle-alert"></i><div><strong>本次测试会消耗额度</strong><span>请求将使用所选 API Key，并按模型当前平台价格计费，结果会写入请求记录。</span></div></div><div class="field"><label for="model-test-key">API Key</label><select id="model-test-key" name="api_key_id" required>${keys.map((key) => `<option value="${key.id}">${escapeHtml(key.name)} · ${escapeHtml(key.key_prefix)}...</option>`).join("")}</select></div><div class="field"><label for="model-test-prompt">测试提示词</label><textarea id="model-test-prompt" name="prompt" rows="4" maxlength="2000" required placeholder="例如：用一句话介绍这个模型适合什么场景"></textarea><small class="field-hint">最多 2,000 个字符，建议使用简短问题。</small></div><div class="field"><label for="model-test-max-tokens">最大输出 Token</label><input id="model-test-max-tokens" name="max_tokens" type="number" min="32" max="4096" step="1" value="256" required></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="play"></i><span>开始测试</span></button></div></form>`);
+  const promptLabel = apiType === "audio_speech" ? "合成文本" : "测试提示词";
+  const audioField = apiType === "audio_transcriptions" ? `<div class="field"><label for="model-test-audio">音频内容（Base64 或 URL）</label><textarea id="model-test-audio" name="audio" rows="3" maxlength="16000000" required placeholder="粘贴音频 Base64 或供应商可访问的音频 URL"></textarea></div>` : "";
+  openPortalDialog(`测试调用 · ${item.display_name || item.public_name}`, `<form id="model-test-form"><div class="dialog-body"><div class="model-test-warning"><i data-lucide="triangle-alert"></i><div><strong>本次测试会消耗额度</strong><span>请求将使用所选 API Key，并按模型当前平台价格计费，结果会写入请求记录。</span></div></div><div class="field"><label for="model-test-key">API Key</label><select id="model-test-key" name="api_key_id" required>${keys.map((key) => `<option value="${key.id}">${escapeHtml(key.name)} · ${escapeHtml(key.key_prefix)}...</option>`).join("")}</select></div><div class="field"><label for="model-test-prompt">${promptLabel}</label><textarea id="model-test-prompt" name="prompt" rows="4" maxlength="2000" ${apiType === "audio_transcriptions" ? "" : "required"} placeholder="${apiType === "audio_speech" ? "例如：欢迎使用 LokToken" : "例如：用一句话介绍这个模型适合什么场景"}"></textarea><small class="field-hint">最多 2,000 个字符，建议使用简短内容。</small></div>${audioField}<div class="field"><label for="model-test-max-tokens">最大输出 Token</label><input id="model-test-max-tokens" name="max_tokens" type="number" min="32" max="4096" step="1" value="256"></div></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit"><i data-lucide="play"></i><span>开始测试</span></button></div></form>`);
   document.getElementById("model-test-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const submit = event.submitter;
     if (submit) submit.disabled = true;
     try {
       const data = Object.fromEntries(new FormData(event.currentTarget));
-      const result = await portalApi("/portal/model-tests", { method: "POST", body: JSON.stringify({ model: item.public_name, api_key_id: Number(data.api_key_id), prompt: data.prompt, max_tokens: Number(data.max_tokens) }) });
+      const result = await portalApi("/portal/model-tests", { method: "POST", body: JSON.stringify({ model: item.public_name, api_key_id: Number(data.api_key_id), prompt: data.prompt || "", audio: data.audio || null, max_tokens: Number(data.max_tokens || 256) }) });
       const choice = result.response?.choices?.[0];
       const output = choice?.message?.content || choice?.text || JSON.stringify(result.response || {}, null, 2);
       openPortalDialog("测试调用结果", `<div class="dialog-body"><div class="model-test-success"><i data-lucide="circle-check"></i><div><strong>调用成功</strong><span>请求已完成并按实际用量结算。</span></div></div><div class="model-test-output"><pre>${escapeHtml(String(output))}</pre></div><div class="key-detail-grid"><div><span>输入 Token</span><strong>${formatNumber(result.input_tokens)}</strong></div><div><span>输出 Token</span><strong>${formatNumber(result.output_tokens)}</strong></div><div><span>本次扣费</span><strong>${formatMoney(result.amount_micros)}</strong></div></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
@@ -916,7 +931,7 @@ function modelDetailDialog(modelName) {
     <p class="model-pricing-note">平台价格由管理控制台根据官方价格和目标利润率统一计算，调整后仅对新请求生效。</p>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>cURL 调用</strong><span>${escapeHtml(modelProtocolLabel(item))}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="curl" data-model-name="${escapeHtml(item.public_name)}" title="复制 cURL 示例" aria-label="复制 cURL 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelCurlSnippet(item))}</code></pre></section>
     <section class="model-code-section"><div class="model-code-heading"><div><strong>Python 调用</strong><span>${modelApiType(item) === "chat_completions" ? "使用 OpenAI SDK" : "使用 HTTP 请求"}</span></div><button class="icon-button compact-icon" type="button" data-copy-model-code="python" data-model-name="${escapeHtml(item.public_name)}" title="复制 Python 示例" aria-label="复制 Python 示例"><i data-lucide="copy"></i></button></div><pre><code>${escapeHtml(modelPythonSnippet(item))}</code></pre></section>
-  </div><div class="dialog-actions">${modelApiType(item) === "chat_completions" ? `<button class="secondary-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button>` : ""}<button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-model-onboard="${escapeHtml(item.public_name)}"><i data-lucide="plug-zap"></i><span>开始接入</span></button></div>`);
+  </div><div class="dialog-actions">${["chat_completions", "images_generations", "video_generations", "audio_speech", "audio_transcriptions"].includes(modelApiType(item)) ? `<button class="secondary-button" type="button" data-model-test="${escapeHtml(item.public_name)}"><i data-lucide="play"></i><span>测试调用</span></button>` : ""}<button class="secondary-button" type="button" data-copy-model="${escapeHtml(item.public_name)}"><i data-lucide="copy"></i><span>复制模型 ID</span></button><button class="primary-button" type="button" data-model-onboard="${escapeHtml(item.public_name)}"><i data-lucide="plug-zap"></i><span>开始接入</span></button></div>`);
 }
 
 function modelComparisonPrice(item) {

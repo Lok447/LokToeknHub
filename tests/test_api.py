@@ -268,6 +268,33 @@ async def test_image_and_video_task_models_use_generation_contracts_in_mock_mode
         assert polled.json()["data"][0]["url"].startswith("https://mock.loktoken.local/video_generations/")
 
 
+@pytest.mark.asyncio
+async def test_audio_speech_and_transcription_use_generation_contracts_in_mock_mode() -> None:
+    from app.db import init_db
+    from app.models import ModelChannel, ModelConfig
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=admin_headers, json={"external_user_id": "audio-task-user", "name": "Audio Task User"})
+        key = await client.post("/admin/api-keys", headers=admin_headers, json={"account_id": account.json()["id"], "name": "audio-task-key"})
+        await client.post(f"/admin/accounts/{account.json()['id']}/balance", headers=admin_headers, json={"amount_micros": 2_000_000, "idempotency_key": "audio-task-topup"})
+        with SessionLocal() as db:
+            speech = ModelConfig(public_name="audio-speech-contract", upstream_model="tts-1", provider_base_url="https://provider.example/v1", task_price_micros=100_000, active=True, catalog_metadata_json=json.dumps({"api_type": "audio_speech", "modalities": ["audio"]}))
+            transcribe = ModelConfig(public_name="audio-transcription-contract", upstream_model="whisper-1", provider_base_url="https://provider.example/v1", task_price_micros=100_000, active=True, catalog_metadata_json=json.dumps({"api_type": "audio_transcriptions", "modalities": ["audio"]}))
+            db.add_all([speech, transcribe]); db.flush()
+            db.add_all([ModelChannel(model_config_id=speech.id, name="speech", provider_base_url=speech.provider_base_url, upstream_model=speech.upstream_model, active=True, status="healthy"), ModelChannel(model_config_id=transcribe.id, name="transcribe", provider_base_url=transcribe.provider_base_url, upstream_model=transcribe.upstream_model, active=True, status="healthy")]); db.commit()
+        headers = {"Authorization": f"Bearer {key.json()['key']}"}
+        speech_result = await client.post("/v1/audio/speech", headers=headers, json={"model": "audio-speech-contract", "input": "hello"})
+        assert speech_result.status_code == 200
+        assert speech_result.json()["object"] == "audio.speech"
+        transcription = await client.post("/v1/audio/transcriptions", headers=headers, json={"model": "audio-transcription-contract", "audio": "BASE64_AUDIO"})
+        assert transcription.status_code == 200
+        assert transcription.json()["object"] == "audio.transcription"
+        assert transcription.json()["data"][0]["text"]
+
+
 def test_deprecated_qwen_candidates_are_removed_with_their_channels() -> None:
     from app.db import remove_deprecated_provider_models
 
@@ -1225,7 +1252,7 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
         assert "LokToken 用户中心" in portal_page.text
         assert '<span>密钥管理</span>' in portal_page.text
         assert '<span>API管理</span>' not in portal_page.text
-        assert 'src="/static/portal.js?v=portal-20260826-12"' in portal_page.text
+        assert 'src="/static/portal.js?v=portal-20260826-13"' in portal_page.text
         assert 'href="/static/portal.css?v=portal-20260826-10"' in portal_page.text
         assert '<button type="button" class="active" data-auth-mode="login">账号登录</button>' in portal_page.text
         assert 'id="portal-forgot-password"' in portal_page.text

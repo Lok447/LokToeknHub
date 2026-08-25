@@ -27,6 +27,7 @@ class PortalModelTestRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = Field(default=None, max_length=32)
     duration_seconds: int | None = Field(default=None, ge=1, le=30)
+    audio: str | None = Field(default=None, max_length=16_000_000)
 
 
 class TrialLinkCreate(BaseModel):
@@ -301,6 +302,26 @@ class VideoGenerationRequest(BaseModel):
     size: str | None = Field(default=None, max_length=32)
     image: str | None = Field(default=None, max_length=4_000_000)
     negative_prompt: str | None = Field(default=None, max_length=4000)
+
+
+class AudioSpeechRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(min_length=1, max_length=120)
+    input: str = Field(min_length=1, max_length=8000)
+    voice: str | None = Field(default=None, max_length=64)
+    response_format: str | None = Field(default=None, max_length=16)
+    speed: float | None = Field(default=None, gt=0, le=4)
+
+
+class AudioTranscriptionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(min_length=1, max_length=120)
+    audio: str = Field(min_length=1, max_length=16_000_000, description="Base64 编码音频内容或供应商可访问的音频 URL")
+    filename: str | None = Field(default=None, max_length=255)
+    language: str | None = Field(default=None, max_length=16)
+    prompt: str | None = Field(default=None, max_length=4000)
 
 
 class UsageSummary(BaseModel):
