@@ -8,6 +8,7 @@ const state = {
   providerPresets: [],
   channels: [],
   identity: null,
+  accountAccessTab: "accounts",
   modelFilters: { query: "", provider: "", type: "", publicationState: "" },
   modelProviderDetail: "",
 };
@@ -39,7 +40,7 @@ function setAdminIdentity(identity) {
 function applyRoleUi() {
   const hiddenActions = new Set(isAuditor() ? [
     "create-account", "create-key", "health-check-all", "create-model",
-    "create-payment", "create-redemption", "trial-link", "topup", "confirm-payment",
+    "create-payment", "create-redemption", "trial-link", "resend-invitation", "topup", "confirm-payment",
     "refund-payment", "toggle-redemption", "edit-model-pricing", "manage-channels",
     "preflight-model", "delete-model", "edit-channel", "check-channel", "toggle-channel", "toggle-entity",
   ] : [
@@ -65,8 +66,7 @@ function applyRoleUi() {
 const titles = {
   overview: "管理概览",
   models: "模型管理",
-  accounts: "账户管理",
-  keys: "密钥管理",
+  accounts: "账户与访问",
   payments: "订单管理",
   redemptions: "福利管理",
   usage: "用量管理",
@@ -75,12 +75,20 @@ const titles = {
 
 const adminViewFromUrl = () => {
   const view = new URLSearchParams(window.location.search).get("view");
+  if (view === "keys") return "accounts";
   return Object.prototype.hasOwnProperty.call(titles, view) ? view : "overview";
+};
+
+const accountAccessTabFromUrl = () => {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("view") === "keys" || params.get("tab") === "keys" ? "keys" : "accounts";
 };
 
 function adminViewUrl(view) {
   const params = new URLSearchParams(window.location.search);
   params.set("view", view);
+  if (view === "accounts" && state.accountAccessTab === "keys") params.set("tab", "keys");
+  else params.delete("tab");
   return `${window.location.pathname}?${params.toString()}`;
 }
 
@@ -201,7 +209,12 @@ function accountSourceBadge(item) {
 }
 
 function accountTypeBadge(item) {
-  return `<span class="badge neutral">${escapeHtml(item.account_type || "客户账户")}</span>`;
+  return `<span class="badge neutral">${escapeHtml(item.access_mode_label || item.account_type || "API 服务账户")}</span>`;
+}
+
+function accountAccessBadge(item) {
+  const kinds = { api_ready: "success", portal_ready: "success", invitation_pending: "warning", invitation_expired: "error", inactive: "neutral" };
+  return `<span class="badge ${kinds[item.access_status] || "warning"}">${escapeHtml(item.access_status_label || "待配置")}</span>`;
 }
 
 function paymentBadge(status) {
@@ -345,6 +358,21 @@ function emptyRow(columns, label = "暂无数据") {
   return `<tr><td class="empty-row" colspan="${columns}">${escapeHtml(label)}</td></tr>`;
 }
 
+function apiErrorMessage(detail, fallback) {
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail.map((item) => {
+      if (typeof item === "string") return item;
+      const location = Array.isArray(item?.loc) ? item.loc.filter((part) => part !== "body").join(".") : "";
+      const message = item?.msg || "请求参数无效";
+      return location ? `${location}: ${message}` : message;
+    }).filter(Boolean);
+    if (messages.length) return messages.join("；");
+  }
+  if (detail && typeof detail === "object" && typeof detail.message === "string") return detail.message;
+  return fallback;
+}
+
 async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -360,7 +388,7 @@ async function api(path, options = {}) {
       state.token = "";
       showAuth();
     }
-    throw new Error(data.detail || `请求失败 (${response.status})`);
+    throw new Error(apiErrorMessage(data.detail, `请求失败 (${response.status})`));
   }
   return data;
 }
@@ -378,6 +406,25 @@ function showAuth(message = "") {
   document.getElementById("app-shell").hidden = true;
   document.getElementById("auth-screen").hidden = false;
   document.getElementById("auth-error").textContent = message;
+}
+
+function completeAdminAuth(data) {
+  state.token = data.access_token;
+  setAdminIdentity(data.admin);
+  sessionStorage.setItem("token_admin_token", state.token);
+}
+
+async function loadAdminAuthMode() {
+  const response = await fetch("/admin/auth/bootstrap-status");
+  const data = await response.json();
+  if (!response.ok) throw new Error(apiErrorMessage(data.detail, "无法读取管理员初始化状态"));
+  const bootstrapAvailable = data.bootstrap_available;
+  document.getElementById("auth-form").hidden = bootstrapAvailable;
+  document.getElementById("bootstrap-form").hidden = !bootstrapAvailable;
+  document.getElementById("auth-kicker").textContent = bootstrapAvailable ? "LOKTOKEN / SETUP" : "LOKTOKEN / ADMIN";
+  document.getElementById("auth-title").textContent = bootstrapAvailable ? "初始化管理控制台" : "管理控制台";
+  document.getElementById("auth-description").textContent = bootstrapAvailable ? "创建首个超级管理员后即可进入控制台。" : "使用管理员账号进入服务运营与配置界面。";
+  return bootstrapAvailable;
 }
 
 function showApp() {
@@ -449,15 +496,14 @@ async function loadAccounts() {
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
       <td>${accountTypeBadge(item)}</td>
-      <td>${formatNumber(item.project_count)}</td>
-      <td>${formatNumber(item.api_key_count)}</td>
+      <td><div class="primary-cell">${accountAccessBadge(item)}<span class="secondary">${formatNumber(item.project_count)} 个项目 · ${formatNumber(item.active_api_key_count)} 个有效 Key</span></div></td>
       <td><strong>${formatMoney(item.balance_micros)}</strong></td>
       <td>${formatMoney(item.recent_spend_micros)}</td>
       <td class="secondary">${formatDate(item.last_activity_at)}</td>
       <td>${activeBadge(item.active)}</td>
       <td class="align-right"><button class="table-button" data-action="account-detail" data-id="${item.id}"><i data-lucide="arrow-up-right"></i><span>详情</span></button></td>
     </tr>
-  `).join("") : emptyRow(9);
+  `).join("") : emptyRow(8);
   icons();
 }
 
@@ -466,11 +512,19 @@ function accountDetailDialog(accountId) {
   if (!item) { toast("账户信息已更新，请刷新后重试", true); return; }
   const safeName = escapeHtml(item.name);
   const operations = canOperate() ? `
+    <button class="secondary-button" type="button" data-action="create-key" data-account-id="${item.id}" data-close><i data-lucide="key-round"></i><span>生成 Key</span></button>
+    ${item.access_mode === "portal" && !item.readiness_checks?.portal_login_ready ? `<button class="secondary-button" type="button" data-action="resend-invitation" data-id="${item.id}" data-close><i data-lucide="send"></i><span>重新发送邀请</span></button>` : ""}
     <button class="secondary-button" type="button" data-action="trial-link" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="link"></i><span>试用链接</span></button>
     <button class="secondary-button" type="button" data-action="topup" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="wallet-cards"></i><span>充值</span></button>
     <button class="secondary-button" type="button" data-toggle="accounts" data-id="${item.id}" data-active="${!item.active}" data-close><i data-lucide="${item.active ? "pause" : "play"}"></i><span>${item.active ? "停用" : "启用"}</span></button>
     ${isSuperadmin() && !item.active ? `<button class="danger-button" type="button" data-action="delete-account" data-id="${item.id}" data-name="${safeName}" data-close><i data-lucide="trash-2"></i><span>删除账户</span></button>` : ""}
   ` : '<span class="secondary">当前角色仅可查看账户信息</span>';
+  const readinessLabels = item.access_mode === "portal" ? [
+    ["account_active", "账户已启用"], ["portal_login_ready", "用户中心登录"], ["project_ready", "默认项目"], ["api_key_ready", "API Key"], ["balance_ready", "账户余额"], ["model_ready", "可用模型"],
+  ] : [
+    ["account_active", "账户已启用"], ["project_ready", "默认项目"], ["api_key_ready", "API Key"], ["balance_ready", "账户余额"], ["model_ready", "可用模型"],
+  ];
+  const readiness = readinessLabels.map(([key, label]) => `<span class="readiness-item ${item.readiness_checks?.[key] ? "ready" : "pending"}"><i data-lucide="${item.readiness_checks?.[key] ? "circle-check" : "circle-dashed"}"></i>${label}</span>`).join("");
   openDialog(`账户详情 · ${safeName}`, `
     <div class="dialog-body account-detail-dialog">
       <div class="account-detail-heading"><div><strong>${safeName}</strong><span>账户 ID ${item.id}</span></div>${activeBadge(item.active)}</div>
@@ -480,11 +534,14 @@ function accountDetailDialog(accountId) {
         <div><span>账户余额</span><strong>${formatMoney(item.balance_micros)}</strong></div>
         <div><span>近 30 天消费</span><strong>${formatMoney(item.recent_spend_micros)}</strong></div>
       </div>
+      <div class="account-readiness"><div><span>访问状态</span>${accountAccessBadge(item)}</div><div class="readiness-list">${readiness}</div></div>
       <div class="account-profile-grid">
-        <div><span>账户类型</span><strong>${escapeHtml(item.account_type || "客户账户")}</strong></div>
+        <div><span>账户类型</span><strong>${escapeHtml(item.access_mode_label || item.account_type || "API 服务账户")}</strong></div>
         <div><span>账户来源</span><strong>${accountSourceBadge(item)}</strong></div>
         <div><span>外部用户 ID</span><strong class="mono" title="${escapeHtml(item.external_user_id)}">${escapeHtml(item.external_user_id || "-")}</strong></div>
         <div><span>登录标识</span><strong>${escapeHtml(item.login_id || "未绑定用户中心登录")}</strong></div>
+        <div><span>安全联系方式</span><strong>${escapeHtml(item.security_contact || "未绑定")}</strong></div>
+        ${item.invitation_expires_at && !item.readiness_checks?.portal_login_ready ? `<div><span>邀请有效期</span><strong>${formatDate(item.invitation_expires_at)}</strong></div>` : ""}
         <div><span>最近活动</span><strong>${formatDate(item.last_activity_at)}</strong></div>
         <div><span>创建时间</span><strong>${formatDate(item.created_at)}</strong></div>
       </div>
@@ -507,6 +564,32 @@ async function loadKeys() {
       <td class="align-right">${canOperate() && !item.revoked_at ? `<button class="table-button" data-rotate-admin-key="${item.id}">轮换</button><button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button><button class="table-button danger" data-revoke-admin-key="${item.id}">撤销</button>` : '<span class="secondary">只读</span>'}</td>
     </tr>
   `).join("") : emptyRow(8);
+}
+
+function renderAccountAccessTab() {
+  const tab = state.accountAccessTab === "keys" ? "keys" : "accounts";
+  document.querySelectorAll("[data-account-access-tab]").forEach((button) => {
+    const active = button.dataset.accountAccessTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.getElementById("account-access-accounts").hidden = tab !== "accounts";
+  document.getElementById("account-access-keys").hidden = tab !== "keys";
+}
+
+async function loadAccountAccess() {
+  renderAccountAccessTab();
+  if (state.accountAccessTab === "keys") await loadKeys();
+  else await loadAccounts();
+}
+
+function setAccountAccessTab(tab, { historyMode = "push" } = {}) {
+  state.accountAccessTab = tab === "keys" ? "keys" : "accounts";
+  renderAccountAccessTab();
+  if (state.view !== "accounts") return;
+  updateAdminHistory("accounts", historyMode);
+  renderAdminPageActions("accounts");
+  loadAccountAccess().catch((error) => toast(error.message, true));
 }
 
 async function loadModels() {
@@ -944,14 +1027,13 @@ async function providerBillsDialog() {
   });
 }
 
-const loaders = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, models: loadModels, payments: loadPayments, redemptions: loadRedemptions, usage: loadUsage, audit: loadAudit };
+const loaders = { overview: loadOverview, accounts: loadAccountAccess, models: loadModels, payments: loadPayments, redemptions: loadRedemptions, usage: loadUsage, audit: loadAudit };
 
 function renderAdminPageActions(view) {
   const target = document.getElementById(`admin-page-actions-${view}`);
   if (!target) return;
   const pageActions = {
-    accounts: '<button class="primary-button content-page-button" type="button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button>',
-    keys: '<button class="primary-button content-page-button" type="button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button>',
+    accounts: '<button class="secondary-button content-page-button" type="button" data-action="create-key"><i data-lucide="key-round"></i><span>生成 Key</span></button><button class="primary-button content-page-button" type="button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button>',
     models: '<button class="icon-button model-page-back" id="admin-model-page-back" type="button" data-model-page-back hidden title="返回模型管理" aria-label="返回模型管理"><i data-lucide="arrow-left"></i></button>',
     payments: '<button class="secondary-button content-page-button" type="button" data-action="reconcile-ledger"><i data-lucide="scale"></i><span>账本对账</span></button><button class="primary-button content-page-button" type="button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button>',
     redemptions: '<button class="primary-button content-page-button" type="button" data-action="create-redemption"><i data-lucide="plus"></i><span>创建兑换码</span></button>',
@@ -966,6 +1048,7 @@ function renderAdminPageActions(view) {
 
 async function switchView(view, { historyMode = "push" } = {}) {
   if (!Object.prototype.hasOwnProperty.call(titles, view)) view = "overview";
+  if (view === "accounts") state.accountAccessTab = accountAccessTabFromUrl();
   state.view = view;
   updateAdminHistory(view, historyMode);
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
@@ -1002,27 +1085,100 @@ function accountDialog() {
     <form id="dialog-form">
       <div class="dialog-body">
         <div class="field"><label for="account-name">账户名称</label><input id="account-name" name="name" required maxlength="120" placeholder="例如：研发团队或 API 应用"></div>
-        <div class="field"><label for="external-user-id">外部用户 ID（可选）</label><input id="external-user-id" name="external_user_id" maxlength="120" placeholder="例如：customer-user-001"><small class="field-hint">用于绑定客户已有的登录系统；独立 API 账户可留空，系统会自动生成内部标识。</small></div>
+        <div class="account-mode-options" role="radiogroup" aria-label="账户类型">
+          <label><input type="radio" name="access_mode" value="api" checked><i data-lucide="braces"></i><span><strong>API 服务账户</strong><small>供应用或团队通过 API Key 调用</small></span></label>
+          <label><input type="radio" name="access_mode" value="portal"><i data-lucide="user-round"></i><span><strong>用户中心账户</strong><small>邀请用户登录并自行管理访问</small></span></label>
+        </div>
+        <div class="account-mode-fields" id="api-account-fields">
+          <div class="field"><label for="external-user-id">外部用户 ID（可选）</label><input id="external-user-id" name="external_user_id" maxlength="120" placeholder="例如：service-001"><small class="field-hint">可留空，系统会自动生成内部标识。</small></div>
+          <label class="form-toggle-row" for="provision-api-key"><input id="provision-api-key" name="create_api_key" type="checkbox"><span><strong>同时创建 API Key</strong><small>为该账户配置受限的模型访问凭证</small></span></label>
+          <div class="provision-access-config" id="provision-access-config" hidden>
+            <div class="field"><label for="provision-key-name">Key 名称</label><input id="provision-key-name" name="api_key_name" maxlength="120" placeholder="例如：production" disabled></div>
+            <div class="field-row"><div class="field"><label for="provision-key-expires">有效期（天）</label><input id="provision-key-expires" name="api_key_expires_in_days" type="number" min="1" max="3650" value="30" disabled><small class="field-hint">建议使用有限有效期。</small></div><div class="field"><label for="provision-key-limit">消费额度（元）</label><input id="provision-key-limit" name="api_key_spending_limit" type="number" min="0.01" step="0.01" placeholder="不限" disabled></div></div>
+            <div class="field-row"><div class="field"><label for="provision-key-rate">限流次数</label><input id="provision-key-rate" name="api_key_rate_limit_requests" type="number" min="1" max="100000" placeholder="使用平台默认" disabled></div><div class="field"><label for="provision-key-rate-window">限流窗口（秒）</label><input id="provision-key-rate-window" name="api_key_rate_limit_window_seconds" type="number" min="1" max="86400" placeholder="使用平台默认" disabled></div></div>
+          </div>
+        </div>
+        <div class="account-mode-fields" id="portal-account-fields" hidden>
+          <div class="field-row"><div class="field"><label for="account-login-id">登录账号</label><input id="account-login-id" name="login_id" minlength="3" maxlength="160" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,159}" autocomplete="off" placeholder="例如：zhangsan" disabled></div><div class="field"><label for="account-security-contact">安全联系方式</label><input id="account-security-contact" name="security_contact" minlength="3" maxlength="160" placeholder="邮箱或手机号" disabled></div></div>
+          <div class="invitation-note"><i data-lucide="shield-check"></i><span><strong>由用户设置密码</strong><small>系统发送一次性邀请，管理员不会接触用户密码。</small></span></div>
+        </div>
       </div>
       <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">创建账户</button></div>
     </form>`);
-  document.getElementById("dialog-form").addEventListener("submit", async (event) => {
+  const form = document.getElementById("dialog-form");
+  const createKey = document.getElementById("provision-api-key");
+  const accessConfig = document.getElementById("provision-access-config");
+  const accessInputs = [...accessConfig.querySelectorAll("input")];
+  const apiFields = document.getElementById("api-account-fields");
+  const portalFields = document.getElementById("portal-account-fields");
+  const portalInputs = [...portalFields.querySelectorAll("input")];
+  const syncAccountMode = () => {
+    const portalMode = form.elements.access_mode.value === "portal";
+    apiFields.hidden = portalMode;
+    portalFields.hidden = !portalMode;
+    document.getElementById("external-user-id").disabled = portalMode;
+    createKey.disabled = portalMode;
+    accessConfig.hidden = portalMode || !createKey.checked;
+    accessInputs.forEach((input) => { input.disabled = portalMode || !createKey.checked; });
+    document.getElementById("provision-key-name").required = !portalMode && createKey.checked;
+    portalInputs.forEach((input) => { input.disabled = !portalMode; input.required = portalMode; });
+  };
+  form.querySelectorAll('input[name="access_mode"]').forEach((input) => input.addEventListener("change", syncAccountMode));
+  createKey.addEventListener("change", syncAccountMode);
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const rawData = Object.fromEntries(new FormData(event.currentTarget));
-    const data = { name: rawData.name.trim(), external_user_id: rawData.external_user_id.trim() };
+    const data = { name: rawData.name.trim(), access_mode: rawData.access_mode };
     if (!data.name) { toast("请填写账户名称", true); return; }
-    try { await api("/admin/accounts", { method: "POST", body: JSON.stringify(data) }); closeDialog(); toast("账户已创建"); await loadAccounts(); } catch (error) { toast(error.message, true); }
+    if (data.access_mode === "portal") {
+      data.login_id = rawData.login_id.trim();
+      data.security_contact = rawData.security_contact.trim();
+    } else {
+      data.external_user_id = rawData.external_user_id.trim() || null;
+    }
+    if (data.access_mode === "api" && createKey.checked) {
+      data.api_key = { name: rawData.api_key_name.trim() };
+      if (rawData.api_key_expires_in_days) data.api_key.expires_in_days = Number(rawData.api_key_expires_in_days);
+      if (rawData.api_key_spending_limit) data.api_key.spending_limit_micros = Math.round(Number(rawData.api_key_spending_limit) * 1_000_000);
+      if (rawData.api_key_rate_limit_requests) data.api_key.rate_limit_requests = Number(rawData.api_key_rate_limit_requests);
+      if (rawData.api_key_rate_limit_window_seconds) data.api_key.rate_limit_window_seconds = Number(rawData.api_key_rate_limit_window_seconds);
+    }
+    try {
+      const result = await api("/admin/accounts/provision", { method: "POST", body: JSON.stringify(data) });
+      closeDialog();
+      if (result.invitation) {
+        await loadAccounts();
+        if (result.invitation.setup_url) {
+          const setupUrl = result.invitation.setup_url;
+          openDialog("用户中心邀请已创建", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="clock-3"></i><span>邀请将在 ${escapeHtml(formatDate(result.invitation.expires_at))} 失效，且只能使用一次。</span></div><div class="secret-box mono">${escapeHtml(setupUrl)}</div><div class="secret-actions"><button class="secondary-button" id="copy-invitation"><i data-lucide="copy"></i><span>复制邀请链接</span></button><a class="primary-button" href="${escapeHtml(setupUrl)}" target="_blank" rel="noopener"><i data-lucide="external-link"></i><span>打开邀请</span></a></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+          document.getElementById("copy-invitation").addEventListener("click", async () => { await navigator.clipboard.writeText(setupUrl); toast("邀请链接已复制"); });
+        } else {
+          toast("用户中心账户已创建，邀请已发送");
+        }
+      } else if (result.api_key) {
+        state.accountAccessTab = "keys";
+        renderAccountAccessTab();
+        updateAdminHistory("accounts", "replace");
+        renderAdminPageActions("accounts");
+        await loadKeys();
+        openDialog("账户与 API Key 已创建", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>请立即保存该 Key。关闭后无法再次查看明文。</span></div><div class="secret-box mono">${escapeHtml(result.api_key.key)}</div><div class="secret-actions"><button class="secondary-button" id="copy-key"><i data-lucide="copy"></i><span>复制</span></button></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+        document.getElementById("copy-key").addEventListener("click", async () => { await navigator.clipboard.writeText(result.api_key.key); toast("密钥已复制"); });
+      } else {
+        toast("API 服务账户已创建，可随时生成 Key");
+        await loadAccounts();
+      }
+    } catch (error) { toast(error.message, true); }
   });
 }
 
-async function keyDialog() {
+async function keyDialog(accountId = null) {
   if (!state.accounts.length) state.accounts = (await api("/admin/accounts")).data;
   if (!state.accounts.length) { toast("请先创建账户", true); return; }
   openDialog("生成 API Key", `
     <form id="dialog-form">
       <div class="dialog-body">
         <div class="field"><label for="key-name">Key 名称</label><input id="key-name" name="name" required maxlength="120"></div>
-        <div class="field"><label for="key-account">所属账户</label><select id="key-account" name="account_id" required>${state.accounts.filter((item) => item.active).map((item) => `<option value="${item.id}">${escapeHtml(item.name)} · ${escapeHtml(item.external_user_id)}</option>`).join("")}</select></div>
+        <div class="field"><label for="key-account">所属账户</label><select id="key-account" name="account_id" required>${state.accounts.filter((item) => item.active).map((item) => `<option value="${item.id}"${String(item.id) === String(accountId) ? " selected" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.external_user_id)}</option>`).join("")}</select></div>
         <div class="field-row"><div class="field"><label for="key-expires">有效期（天）</label><input id="key-expires" name="expires_in_days" type="number" min="1" max="3650" placeholder="长期有效"></div><div class="field"><label for="key-limit">消费额度（元）</label><input id="key-limit" name="spending_limit" type="number" min="0.01" step="0.01" placeholder="不限"></div></div>
         <div class="field-row"><div class="field"><label for="key-rate">限流次数</label><input id="key-rate" name="rate_limit_requests" type="number" min="1" max="100000" placeholder="使用平台默认"></div><div class="field"><label for="key-rate-window">限流窗口（秒）</label><input id="key-rate-window" name="rate_limit_window_seconds" type="number" min="1" max="86400" placeholder="使用平台默认"></div></div>
       </div>
@@ -1563,20 +1719,44 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const result = await fetch("/admin/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
       const data = await result.json();
-      if (!result.ok) throw new Error(data.detail || "管理员登录失败");
-      state.token = data.access_token;
-      setAdminIdentity(data.admin);
-      sessionStorage.setItem("token_admin_token", state.token);
+      if (!result.ok) throw new Error(apiErrorMessage(data.detail, "管理员登录失败"));
+      completeAdminAuth(data);
       showApp();
       const view = adminViewFromUrl();
       primeAdminHistory(view);
       await switchView(view, { historyMode: "none" });
     } catch (error) { showAuth(error.message); }
   });
-  document.getElementById("toggle-token").addEventListener("click", () => {
-    const input = document.getElementById("admin-password");
-    input.type = input.type === "password" ? "text" : "password";
+  document.getElementById("bootstrap-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    if (form.get("password") !== form.get("password_confirm")) {
+      showAuth("两次输入的密码不一致");
+      return;
+    }
+    try {
+      const result = await fetch("/admin/auth/bootstrap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Token": form.get("bootstrap_token") },
+        body: JSON.stringify({ login_id: form.get("login_id"), password: form.get("password") }),
+      });
+      const data = await result.json();
+      if (!result.ok) {
+        if (result.status === 409) await loadAdminAuthMode();
+        throw new Error(apiErrorMessage(data.detail, "管理员初始化失败"));
+      }
+      event.currentTarget.reset();
+      completeAdminAuth(data);
+      showApp();
+      const view = adminViewFromUrl();
+      primeAdminHistory(view);
+      await switchView(view, { historyMode: "none" });
+    } catch (error) { showAuth(error.message); }
   });
+  document.querySelectorAll("[data-password-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const input = document.getElementById(button.dataset.passwordToggle);
+    input.type = input.type === "password" ? "text" : "password";
+  }));
   document.getElementById("admin-account-trigger").addEventListener("click", (event) => {
     event.stopPropagation();
     const menu = document.getElementById("admin-account-menu");
@@ -1589,6 +1769,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     sessionStorage.removeItem("token_admin_token"); sessionStorage.removeItem("token_admin_role"); state.token = ""; state.role = ""; state.identity = null; closeAdminAccountMenu(); document.getElementById("admin-password").value = ""; showAuth();
   });
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
+  document.querySelectorAll("[data-account-access-tab]").forEach((button) => button.addEventListener("click", () => setAccountAccessTab(button.dataset.accountAccessTab)));
   document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; state.modelProviderDetail = ""; renderModels(); });
   document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
   document.getElementById("model-state-filter").addEventListener("change", (event) => { state.modelFilters.publicationState = event.target.value; renderModels(); });
@@ -1614,7 +1795,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.modelProviderBack !== undefined) { state.modelProviderDetail = ""; state.modelFilters.provider = ""; document.getElementById("model-provider-filter").value = ""; renderModels(); }
     if (target.dataset.action === "create-account") accountDialog();
     if (target.dataset.action === "account-detail") accountDetailDialog(target.dataset.id);
-    if (target.dataset.action === "create-key") keyDialog().catch((error) => toast(error.message, true));
+    if (target.dataset.action === "create-key") keyDialog(target.dataset.accountId || null).catch((error) => toast(error.message, true));
     if (target.dataset.action === "create-model") modelDialog();
     if (target.dataset.action === "create-provider-model") modelDialog(target.dataset.providerId);
     if (target.dataset.action === "model-detail-admin") modelAdminDetailDialog(target.dataset.id);
@@ -1649,6 +1830,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "delete-model") deleteModel(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "delete-account") deleteAccount(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
+    if (target.dataset.action === "resend-invitation") {
+      api(`/admin/accounts/${target.dataset.id}/invitation`, { method: "POST", body: "{}" }).then(async (result) => {
+        closeDialog();
+        await loadAccounts();
+        const setupUrl = result.invitation?.setup_url;
+        if (setupUrl) {
+          openDialog("用户中心邀请已重新发送", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="send"></i><span>旧邀请已失效，请将这条新链接发送给用户。</span></div><div class="secret-box mono">${escapeHtml(setupUrl)}</div><div class="secret-actions"><button class="secondary-button" id="copy-invitation"><i data-lucide="copy"></i><span>复制邀请链接</span></button></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
+          document.getElementById("copy-invitation").addEventListener("click", async () => { await navigator.clipboard.writeText(setupUrl); toast("邀请链接已复制"); });
+        } else toast("邀请已重新发送");
+      }).catch((error) => toast(error.message, true));
+    }
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.rotateAdminKey) {
       if (!window.confirm("轮换后旧 Key 将立即失效。是否继续？")) return;
@@ -1675,8 +1867,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
   if (state.token) {
-    try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); const view = adminViewFromUrl(); primeAdminHistory(view); await switchView(view, { historyMode: "none" }); } catch (_) { showAuth("管理员会话已失效，请重新登录"); }
+    try { const identity = await api("/admin/auth/me"); setAdminIdentity(identity.admin); showApp(); const view = adminViewFromUrl(); primeAdminHistory(view); await switchView(view, { historyMode: "none" }); } catch (_) { showAuth("管理员会话已失效，请重新登录"); await loadAdminAuthMode(); }
   } else {
     showAuth();
+    try { await loadAdminAuthMode(); } catch (error) { showAuth(error.message); }
   }
 });

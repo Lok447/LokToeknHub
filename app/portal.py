@@ -70,6 +70,36 @@ def deliver_password_reset(account: BillingAccount, raw_token: str, expires_at: 
         raise HTTPException(status_code=503, detail="password reset delivery failed") from exc
 
 
+def deliver_account_invitation(account: BillingAccount, raw_token: str, expires_at: datetime) -> str:
+    """Deliver a first-password link without treating an unverified contact as trusted yet."""
+    settings = get_settings()
+    # Keep the one-time credential out of HTTP access logs and Referer headers.
+    setup_url = f"{settings.public_base_url.rstrip('/')}/portal#invite_token={quote(raw_token)}"
+    if settings.security_delivery_mode == "development":
+        return setup_url
+    if settings.security_delivery_mode != "webhook" or not settings.security_delivery_webhook_url or not account.security_contact:
+        raise HTTPException(status_code=503, detail="account invitation delivery is not configured")
+    payload = json.dumps({
+        "event": "account_invitation",
+        "contact": account.security_contact,
+        "login_id": account.login_id,
+        "setup_url": setup_url,
+        "expires_at": expires_at.isoformat(),
+    }, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = hmac.new(settings.security_delivery_webhook_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    try:
+        response = httpx.post(
+            settings.security_delivery_webhook_url,
+            content=payload,
+            headers={"Content-Type": "application/json", "X-LokToken-Signature": signature},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=503, detail="account invitation delivery failed") from exc
+    return setup_url
+
+
 def create_security_contact_challenge(db: Session, account: BillingAccount, contact: str) -> tuple[SecurityContactChallenge, str]:
     settings = get_settings()
     raw_token = create_password_reset_token().replace("rst_", "vfy_", 1)
@@ -290,6 +320,7 @@ def _loksystem_account(db: Session, claims: dict[str, object]) -> BillingAccount
             password_hash=None,
             name=str(claims.get("username") or claims.get("email") or subject)[:120],
             account_source="loksystem",
+            access_mode="portal",
         )
         db.add(account)
         db.flush()
@@ -389,6 +420,7 @@ def _oidc_account(db: Session, issuer: str, subject: str, claims: dict[str, obje
             external_user_id=stable_id[:120],
             name=str(claims.get("name") or claims.get("preferred_username") or email or subject)[:120],
             account_source="oidc",
+            access_mode="portal",
             login_id=None,
             password_hash=None,
             security_contact=email if email and claims.get("email_verified") is True else None,
@@ -465,6 +497,7 @@ def register(payload: PortalRegister, request: Request, db: Session = Depends(ge
         password_hash=hash_password(payload.password),
         name=payload.name,
         account_source="self_registered",
+        access_mode="portal",
         security_contact=payload.security_contact.strip() if payload.security_contact else None,
     )
     try:
@@ -514,6 +547,7 @@ def request_password_reset(payload: PasswordResetRequest, request: Request, db: 
     challenge = PasswordResetChallenge(
         account_id=account.id,
         token_hash=hash_key(raw_token),
+        purpose="password_reset",
         expires_at=utcnow() + timedelta(seconds=settings.password_reset_ttl_seconds),
     )
     deliver_password_reset(account, raw_token, challenge.expires_at)
@@ -545,8 +579,13 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
     account.password_hash = hash_password(payload.password)
     account.session_version += 1
     challenge.consumed_at = now
-    record_audit_event(db, actor_type="public", actor_id=account.external_user_id, action="account.password_reset_completed", target_type="account", target_id=account.id, details={})
-    record_security_notification(db, account, "password_reset_completed")
+    invitation = challenge.purpose == "invitation"
+    if invitation:
+        account.security_contact_verified_at = now
+    action = "account.invitation_accepted" if invitation else "account.password_reset_completed"
+    event_type = "account_invitation_accepted" if invitation else "password_reset_completed"
+    record_audit_event(db, actor_type="public", actor_id=account.external_user_id, action=action, target_type="account", target_id=account.id, details={})
+    record_security_notification(db, account, event_type)
     db.commit()
     return auth_response(account)
 

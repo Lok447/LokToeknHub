@@ -17,22 +17,39 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+money_columns = (
+    ("billing_accounts", "balance_micros"),
+    ("api_keys", "spending_limit_micros"),
+    ("api_keys", "spent_micros"),
+    ("model_configs", "input_price_micros_per_1k"),
+    ("model_configs", "output_price_micros_per_1k"),
+    ("account_balance_transactions", "amount_micros"),
+    ("payment_orders", "amount_micros"),
+    ("redemption_codes", "amount_micros"),
+    ("redemption_claims", "amount_micros"),
+    ("usage_records", "amount_micros"),
+)
+
+
+def alter_money_columns(source_type: sa.types.TypeEngine, target_type: sa.types.TypeEngine) -> None:
+    """Use table recreation for SQLite, which cannot alter column types in place."""
+    for table, column in money_columns:
+        kwargs = {
+            "existing_type": source_type,
+            "type_": target_type,
+            "existing_nullable": column == "spending_limit_micros",
+        }
+        if op.get_bind().dialect.name == "sqlite":
+            with op.batch_alter_table(table, recreate="always") as batch_op:
+                batch_op.alter_column(column, **kwargs)
+        else:
+            op.alter_column(table, column, **kwargs)
+
+
 def upgrade() -> None:
     # One yuan is one million micros. INTEGER would cap a balance at about
     # 2,147 yuan in PostgreSQL, which is not sufficient for team accounts.
-    for table, column in (
-        ("billing_accounts", "balance_micros"),
-        ("api_keys", "spending_limit_micros"),
-        ("api_keys", "spent_micros"),
-        ("model_configs", "input_price_micros_per_1k"),
-        ("model_configs", "output_price_micros_per_1k"),
-        ("account_balance_transactions", "amount_micros"),
-        ("payment_orders", "amount_micros"),
-        ("redemption_codes", "amount_micros"),
-        ("redemption_claims", "amount_micros"),
-        ("usage_records", "amount_micros"),
-    ):
-        op.alter_column(table, column, existing_type=sa.Integer(), type_=sa.BigInteger(), existing_nullable=column == "spending_limit_micros")
+    alter_money_columns(sa.Integer(), sa.BigInteger())
 
     op.add_column("model_channels", sa.Column("provider_input_cost_micros_per_1k", sa.BigInteger(), nullable=True))
     op.add_column("model_channels", sa.Column("provider_output_cost_micros_per_1k", sa.BigInteger(), nullable=True))
@@ -60,16 +77,4 @@ def downgrade() -> None:
         op.drop_column("usage_records", column)
     op.drop_column("model_channels", "provider_output_cost_micros_per_1k")
     op.drop_column("model_channels", "provider_input_cost_micros_per_1k")
-    for table, column in (
-        ("billing_accounts", "balance_micros"),
-        ("api_keys", "spending_limit_micros"),
-        ("api_keys", "spent_micros"),
-        ("model_configs", "input_price_micros_per_1k"),
-        ("model_configs", "output_price_micros_per_1k"),
-        ("account_balance_transactions", "amount_micros"),
-        ("payment_orders", "amount_micros"),
-        ("redemption_codes", "amount_micros"),
-        ("redemption_claims", "amount_micros"),
-        ("usage_records", "amount_micros"),
-    ):
-        op.alter_column(table, column, existing_type=sa.BigInteger(), type_=sa.Integer(), existing_nullable=column == "spending_limit_micros")
+    alter_money_columns(sa.BigInteger(), sa.Integer())

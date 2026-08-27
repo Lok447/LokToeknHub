@@ -69,6 +69,36 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .auth-panel label { color: #3d4650; font-size: 12px; font-weight: 700; }
 .auth-panel .primary-button { min-height: 42px; }
 .auth-error { min-height: 20px; margin: 14px 0 0; color: var(--danger); font-size: 12px; }
+.account-access-tabs { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 14px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.account-access-tabs button { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; cursor: pointer; }
+.account-access-tabs button:hover { color: var(--ink); background: var(--surface); }
+.account-access-tabs button.active { color: #2856d8; background: var(--surface); box-shadow: 0 1px 3px rgba(17, 24, 32, 0.1); }
+.account-access-tabs svg { width: 15px; height: 15px; stroke-width: 1.9; }
+.form-toggle-row { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); cursor: pointer; }
+.form-toggle-row input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--signal); }
+.form-toggle-row span { display: grid; gap: 2px; }
+.form-toggle-row strong { color: var(--ink); font-size: 12px; }
+.form-toggle-row small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.provision-access-config { display: grid; gap: 12px; padding: 14px; border: 1px solid rgba(63, 111, 245, 0.22); border-radius: 5px; background: var(--signal-soft); }
+.account-mode-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.account-mode-options label { display: grid; grid-template-columns: auto 18px minmax(0, 1fr); align-items: start; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); cursor: pointer; }
+.account-mode-options label:has(input:checked) { border-color: rgba(63, 111, 245, 0.45); background: var(--signal-soft); }
+.account-mode-options input { margin: 2px 0 0; accent-color: var(--signal); }
+.account-mode-options svg { width: 17px; height: 17px; color: var(--signal); }
+.account-mode-options span, .invitation-note span { display: grid; gap: 2px; }
+.account-mode-options strong, .invitation-note strong { color: var(--ink); font-size: 12px; }
+.account-mode-options small, .invitation-note small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.account-mode-fields { display: grid; gap: 12px; }
+.invitation-note { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid rgba(30, 118, 83, 0.2); border-radius: 5px; background: var(--success-soft); }
+.invitation-note > svg { width: 17px; height: 17px; flex: 0 0 17px; color: var(--success); }
+.account-readiness { display: grid; gap: 10px; margin: 16px 0; padding: 13px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
+.account-readiness > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.account-readiness > div:first-child > span:first-child { color: var(--muted); font-size: 11px; font-weight: 700; }
+.readiness-list { display: flex; flex-wrap: wrap; gap: 7px 12px; }
+.readiness-item { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+.readiness-item.ready { color: var(--success); }
+.readiness-item.pending { color: var(--warning); }
+.readiness-item svg { width: 14px; height: 14px; }
 
 .brand { height: 76px; display: flex; align-items: center; gap: 11px; padding: 0 18px; color: var(--ink); }
 .brand-mark { width: 34px; height: 34px; flex: 0 0 34px; border: 1px solid var(--line); border-radius: 6px; object-fit: cover; box-shadow: 0 2px 8px rgba(17, 24, 32, 0.06); }
@@ -577,6 +607,7 @@ dialog::backdrop { background: rgba(17, 24, 32, 0.5); }
   .auth-panel { padding: 28px 22px; }
   .metric-grid, .metric-grid.compact { grid-template-columns: 1fr; }
   .field-row { grid-template-columns: 1fr; }
+  .account-mode-options { grid-template-columns: 1fr; }
   .model-import-options { grid-template-columns: 1fr; }
   .channel-overview-heading, .channel-create-panel summary, .channel-form-body { padding-right: 14px; padding-left: 14px; }
   .channel-record-list { padding-right: 14px; padding-left: 14px; }

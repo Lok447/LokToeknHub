@@ -39,22 +39,40 @@ def upgrade() -> None:
     op.create_index("ix_provider_connections_preset_id", "provider_connections", ["preset_id"], unique=True)
     op.create_index("ix_provider_connections_active", "provider_connections", ["active"])
     op.create_index("ix_provider_connections_status", "provider_connections", ["status"])
-    op.add_column("model_channels", sa.Column("provider_connection_id", sa.Integer(), nullable=True))
-    op.create_index("ix_model_channels_provider_connection_id", "model_channels", ["provider_connection_id"])
-    op.create_foreign_key(
-        "fk_model_channels_provider_connection_id",
-        "model_channels",
-        "provider_connections",
-        ["provider_connection_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("model_channels", recreate="always") as batch_op:
+            batch_op.add_column(sa.Column("provider_connection_id", sa.Integer(), nullable=True))
+            batch_op.create_index("ix_model_channels_provider_connection_id", ["provider_connection_id"])
+            batch_op.create_foreign_key(
+                "fk_model_channels_provider_connection_id",
+                "provider_connections",
+                ["provider_connection_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+    else:
+        op.add_column("model_channels", sa.Column("provider_connection_id", sa.Integer(), nullable=True))
+        op.create_index("ix_model_channels_provider_connection_id", "model_channels", ["provider_connection_id"])
+        op.create_foreign_key(
+            "fk_model_channels_provider_connection_id",
+            "model_channels",
+            "provider_connections",
+            ["provider_connection_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("fk_model_channels_provider_connection_id", "model_channels", type_="foreignkey")
-    op.drop_index("ix_model_channels_provider_connection_id", table_name="model_channels")
-    op.drop_column("model_channels", "provider_connection_id")
+    if op.get_bind().dialect.name == "sqlite":
+        with op.batch_alter_table("model_channels", recreate="always") as batch_op:
+            batch_op.drop_constraint("fk_model_channels_provider_connection_id", type_="foreignkey")
+            batch_op.drop_index("ix_model_channels_provider_connection_id")
+            batch_op.drop_column("provider_connection_id")
+    else:
+        op.drop_constraint("fk_model_channels_provider_connection_id", "model_channels", type_="foreignkey")
+        op.drop_index("ix_model_channels_provider_connection_id", table_name="model_channels")
+        op.drop_column("model_channels", "provider_connection_id")
     op.drop_index("ix_provider_connections_status", table_name="provider_connections")
     op.drop_index("ix_provider_connections_active", table_name="provider_connections")
     op.drop_index("ix_provider_connections_preset_id", table_name="provider_connections")

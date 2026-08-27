@@ -30,11 +30,11 @@ from .metrics import observe_request, render_prometheus
 from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
-from .portal import router as portal_router
+from .portal import deliver_account_invitation, router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
-from .security import AdminContext, create_admin_session, create_key, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
+from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
+from .security import AdminContext, create_admin_session, create_key, create_password_reset_token, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
@@ -245,6 +245,11 @@ def admin_auth_response(user: AdminUser, db: Session) -> dict[str, object]:
         "expires_at": session.expires_at.isoformat(),
         "admin": admin_user_data(user),
     }
+
+
+@app.get("/admin/auth/bootstrap-status")
+def admin_bootstrap_status(db: Session = Depends(get_db)) -> dict[str, bool]:
+    return {"bootstrap_available": db.scalar(select(AdminUser.id).limit(1)) is None}
 
 
 @app.post("/admin/auth/bootstrap")
@@ -989,29 +994,87 @@ async def payment_webhook(
 def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
     accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
     source_labels = {"admin": "管理员创建", "self_registered": "用户注册", "loksystem": "外部身份接入", "oidc": "统一身份接入"}
-    account_types = {"admin": "客户账户", "self_registered": "个人账户", "loksystem": "外部身份账户", "oidc": "外部身份账户"}
+    callable_model_count = sum(
+        1 for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True))).all()
+        if model_is_callable(db, model)
+    )
     recent_cutoff = utcnow() - timedelta(days=30)
     data = []
     for account in accounts:
         last_usage_at = db.scalar(select(func.max(UsageRecord.created_at)).where(UsageRecord.account_id == account.id))
         last_transaction_at = db.scalar(select(func.max(AccountBalanceTransaction.created_at)).where(AccountBalanceTransaction.account_id == account.id))
         last_activity_at = max((value for value in (last_usage_at, last_transaction_at) if value), default=None)
+        access_mode = account.access_mode or ("portal" if account.login_id else "api")
+        api_key_count = db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id)) or 0
+        active_api_key_count = db.scalar(select(func.count(ApiKey.id)).where(
+            ApiKey.account_id == account.id,
+            ApiKey.active.is_(True),
+            ApiKey.revoked_at.is_(None),
+        )) or 0
+        project_count = db.scalar(
+            select(func.count(Project.id))
+            .join(Workspace, Workspace.id == Project.workspace_id)
+            .where(Workspace.owner_account_id == account.id)
+        ) or 0
+        latest_invitation = db.scalar(select(PasswordResetChallenge).where(
+            PasswordResetChallenge.account_id == account.id,
+            PasswordResetChallenge.purpose == "invitation",
+        ).order_by(PasswordResetChallenge.id.desc())) if access_mode == "portal" and not account.password_hash else None
+        invitation_expiry = latest_invitation.expires_at if latest_invitation else None
+        if invitation_expiry and invitation_expiry.tzinfo is None:
+            invitation_expiry = invitation_expiry.replace(tzinfo=timezone.utc)
+        invitation_pending = bool(latest_invitation and not latest_invitation.consumed_at and invitation_expiry and invitation_expiry > utcnow())
+        portal_login_ready = bool(account.password_hash or account.account_source in {"loksystem", "oidc"})
+        readiness_checks = {
+            "account_active": account.active,
+            "project_ready": project_count > 0,
+            "api_key_ready": active_api_key_count > 0,
+            "balance_ready": account.balance_micros > 0,
+            "model_ready": callable_model_count > 0,
+            "portal_login_ready": portal_login_ready,
+        }
+        if not account.active:
+            access_status, access_status_label = "inactive", "账户已停用"
+        elif access_mode == "portal":
+            if portal_login_ready:
+                access_status, access_status_label = "portal_ready", "已可登录"
+            elif invitation_pending:
+                access_status, access_status_label = "invitation_pending", "待接受邀请"
+            elif latest_invitation:
+                access_status, access_status_label = "invitation_expired", "邀请已过期"
+            else:
+                access_status, access_status_label = "invitation_missing", "待发送邀请"
+        elif not project_count:
+            access_status, access_status_label = "project_missing", "待创建项目"
+        elif not active_api_key_count:
+            access_status, access_status_label = "api_key_missing", "待创建 Key"
+        elif account.balance_micros <= 0:
+            access_status, access_status_label = "balance_missing", "待充值"
+        elif not callable_model_count:
+            access_status, access_status_label = "model_missing", "模型未就绪"
+        else:
+            access_status, access_status_label = "api_ready", "可调用"
         data.append({
             "id": account.id,
             "external_user_id": account.external_user_id,
             "login_id": account.login_id,
+            "security_contact": account.security_contact,
             "account_source": account.account_source or "admin",
             "account_source_label": source_labels.get(account.account_source, "管理员创建"),
-            "account_type": account_types.get(account.account_source, "客户账户"),
+            "access_mode": access_mode,
+            "account_type": {"admin": "客户账户", "self_registered": "个人账户", "loksystem": "外部身份账户", "oidc": "外部身份账户"}.get(account.account_source, "客户账户"),
+            "access_mode_label": "用户中心账户" if access_mode == "portal" else "API 服务账户",
+            "access_status": access_status,
+            "access_status_label": access_status_label,
+            "readiness_checks": readiness_checks,
+            "invitation_expires_at": invitation_expiry.isoformat() if invitation_expiry else None,
             "name": account.name,
             "balance_micros": account.balance_micros,
             "active": account.active,
-            "api_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id)) or 0,
-            "project_count": db.scalar(
-                select(func.count(Project.id))
-                .join(Workspace, Workspace.id == Project.workspace_id)
-                .where(Workspace.owner_account_id == account.id)
-            ) or 0,
+            "api_key_count": api_key_count,
+            "active_api_key_count": active_api_key_count,
+            "callable_model_count": callable_model_count,
+            "project_count": project_count,
             "recent_spend_micros": db.scalar(
                 select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(
                     UsageRecord.account_id == account.id,
@@ -1134,7 +1197,7 @@ def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(requir
     if payload.account_id and (not account or not account.active):
         raise HTTPException(status_code=404, detail="active account not found")
     if account is None:
-        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name, account_source="admin")
+        account = BillingAccount(external_user_id=f"standalone-{uuid.uuid4().hex}", name=payload.name, account_source="admin", access_mode="api")
         db.add(account)
         db.flush()
     project = ensure_default_project(db, ensure_personal_workspace(db, account))
@@ -1194,7 +1257,7 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dic
     external_user_id = payload.external_user_id or f"admin-{uuid.uuid4().hex[:20]}"
     if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == external_user_id)):
         raise HTTPException(status_code=409, detail="external user already has an account")
-    account = BillingAccount(external_user_id=external_user_id, name=payload.name, account_source="admin")
+    account = BillingAccount(external_user_id=external_user_id, name=payload.name, account_source="admin", access_mode="api")
     db.add(account)
     db.flush()
     ensure_personal_workspace(db, account)
@@ -1202,6 +1265,133 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)) -> dic
     db.commit()
     db.refresh(account)
     return {"id": account.id, "external_user_id": account.external_user_id, "name": account.name, "balance_micros": account.balance_micros}
+
+
+@app.post("/admin/accounts/provision", dependencies=[Depends(require_operator)])
+def provision_account(
+    payload: AccountProvisionCreate,
+    context: AdminContext = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    external_user_id = payload.external_user_id or f"admin-{uuid.uuid4().hex[:20]}"
+    if db.scalar(select(BillingAccount).where(BillingAccount.external_user_id == external_user_id)):
+        raise HTTPException(status_code=409, detail="external user already has an account")
+    if payload.login_id and db.scalar(select(BillingAccount).where(BillingAccount.login_id == payload.login_id)):
+        raise HTTPException(status_code=409, detail="login id already exists")
+    account = BillingAccount(
+        external_user_id=external_user_id,
+        name=payload.name,
+        account_source="admin",
+        access_mode=payload.access_mode,
+        login_id=payload.login_id,
+        security_contact=payload.security_contact,
+    )
+    db.add(account)
+    db.flush()
+    project = ensure_default_project(db, ensure_personal_workspace(db, account))
+    record_audit_event(
+        db,
+        actor_type="admin",
+        actor_id=context.actor_id,
+        action="account.created",
+        target_type="account",
+        target_id=account.id,
+        details={"external_user_id": account.external_user_id, "access_mode": payload.access_mode, "api_key_provisioned": payload.api_key is not None},
+    )
+
+    api_key_data: dict[str, object] | None = None
+    if payload.api_key:
+        if payload.api_key.idempotency_key and db.scalar(select(ApiKey.id).where(ApiKey.idempotency_key == payload.api_key.idempotency_key)):
+            raise HTTPException(status_code=409, detail="idempotency key already used")
+        raw_key = create_key()
+        record = ApiKey(
+            account_id=account.id,
+            project_id=project.id,
+            name=payload.api_key.name,
+            key_prefix=raw_key[:12],
+            key_hash=hash_key(raw_key),
+            expires_at=utcnow() + timedelta(days=payload.api_key.expires_in_days) if payload.api_key.expires_in_days else None,
+            spending_limit_micros=payload.api_key.spending_limit_micros,
+            idempotency_key=payload.api_key.idempotency_key,
+            rate_limit_requests=payload.api_key.rate_limit_requests,
+            rate_limit_window_seconds=payload.api_key.rate_limit_window_seconds,
+        )
+        db.add(record)
+        db.flush()
+        record_audit_event(
+            db,
+            actor_type="admin",
+            actor_id=context.actor_id,
+            action="api_key.created",
+            target_type="api_key",
+            target_id=record.id,
+            details={"account_id": account.id, "name": record.name, "provisioned_with_account": True},
+        )
+        api_key_data = {"id": record.id, "name": record.name, "key": raw_key, "key_prefix": record.key_prefix}
+
+    invitation_data = _issue_account_invitation(db, account, context) if payload.access_mode == "portal" else None
+
+    db.commit()
+    db.refresh(account)
+    return {
+        "account": {"id": account.id, "external_user_id": account.external_user_id, "name": account.name, "access_mode": account.access_mode, "balance_micros": account.balance_micros},
+        "api_key": api_key_data,
+        "invitation": invitation_data,
+    }
+
+
+def _issue_account_invitation(db: Session, account: BillingAccount, context: AdminContext) -> dict[str, object]:
+    if account.access_mode != "portal" or not account.login_id or not account.security_contact:
+        raise HTTPException(status_code=409, detail="account is not configured for portal invitation")
+    if account.password_hash:
+        raise HTTPException(status_code=409, detail="account invitation has already been accepted")
+    now = utcnow()
+    raw_token = create_password_reset_token().replace("rst_", "inv_", 1)
+    challenge = PasswordResetChallenge(
+        account_id=account.id,
+        token_hash=hash_key(raw_token),
+        purpose="invitation",
+        expires_at=now + timedelta(seconds=get_settings().password_reset_ttl_seconds),
+    )
+    setup_url = deliver_account_invitation(account, raw_token, challenge.expires_at)
+    for existing in db.scalars(select(PasswordResetChallenge).where(
+        PasswordResetChallenge.account_id == account.id,
+        PasswordResetChallenge.purpose == "invitation",
+        PasswordResetChallenge.consumed_at.is_(None),
+    )).all():
+        existing.consumed_at = now
+    db.add(challenge)
+    db.add(SecurityNotification(account_id=account.id, event_type="account_invitation_sent"))
+    record_audit_event(
+        db,
+        actor_type="admin",
+        actor_id=context.actor_id,
+        action="account.invitation_sent",
+        target_type="account",
+        target_id=account.id,
+        details={"login_id": account.login_id, "expires_at": challenge.expires_at.isoformat()},
+    )
+    result: dict[str, object] = {
+        "delivery": get_settings().security_delivery_mode,
+        "expires_at": challenge.expires_at.isoformat(),
+    }
+    if get_settings().security_delivery_mode == "development":
+        result["setup_url"] = setup_url
+    return result
+
+
+@app.post("/admin/accounts/{account_id}/invitation", dependencies=[Depends(require_operator)])
+def resend_account_invitation(
+    account_id: int,
+    context: AdminContext = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    account = db.get(BillingAccount, account_id)
+    if not account or not account.active:
+        raise HTTPException(status_code=404, detail="active account not found")
+    invitation = _issue_account_invitation(db, account, context)
+    db.commit()
+    return {"account_id": account.id, "invitation": invitation}
 
 
 @app.post("/admin/accounts/{account_id}/balance", dependencies=[Depends(require_finance_operator)])

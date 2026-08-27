@@ -264,21 +264,27 @@ function prioritizeFederatedLogin(button, subtitle) {
   if (subtitleElement) subtitleElement.textContent = subtitle;
 }
 
+function passwordSetupDialog(resetToken = "", invitation = false) {
+  const title = invitation ? "接受账户邀请" : "设置新密码";
+  const copy = invitation ? "设置你的登录密码后即可进入用户中心。此邀请只能使用一次。" : "输入一次性凭证并设置新密码。";
+  openPortalDialog(title, `<form id="portal-password-reset-confirm"><div class="dialog-body"><p class="dialog-copy">${copy}</p><div class="field"><label for="reset-token">${invitation ? "邀请凭证" : "重置凭证"}</label><input id="reset-token" name="reset_token" value="${escapeHtml(resetToken)}" autocomplete="one-time-code" required></div><div class="field"><label for="reset-password">新密码</label><input id="reset-password" name="password" type="password" autocomplete="new-password" minlength="8" required></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后处理</button><button class="primary-button" type="submit">${invitation ? "接受邀请" : "更新密码"}</button></div></div></form>`);
+  document.getElementById("portal-password-reset-confirm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await establishPortalSession(await portalApi("/auth/password-reset/confirm", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) }));
+      closePortalDialog();
+      portalToast(invitation ? "账户已启用，欢迎进入用户中心" : "密码已更新，其他登录会话已失效");
+    } catch (error) { portalToast(error.message, true); }
+  });
+}
+
 function passwordResetDialog() {
   openPortalDialog("重置密码", `<form id="portal-password-reset-form"><div class="dialog-body"><p class="dialog-copy">输入注册账号后，我们会向已验证的安全联系方式发送一次性重置凭证。为保护账号，不论账号是否存在都会返回相同提示。</p><div class="field"><label for="reset-login-id">账号</label><input id="reset-login-id" name="login_id" autocomplete="username" required minlength="3"></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">发送重置凭证</button></div></div></form>`);
   document.getElementById("portal-password-reset-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
       const result = await portalApi("/auth/password-reset/request", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
-      openPortalDialog("设置新密码", `<form id="portal-password-reset-confirm"><div class="dialog-body"><p class="dialog-copy">${result.development_reset_token ? "开发/预发布环境已填入测试凭证；生产环境会发送到安全联系方式。" : "如果账号存在，重置凭证已发送到安全联系方式。"}</p><div class="field"><label for="reset-token">重置凭证</label><input id="reset-token" name="reset_token" value="${escapeHtml(result.development_reset_token || "")}" autocomplete="one-time-code" required></div><div class="field"><label for="reset-password">新密码</label><input id="reset-password" name="password" type="password" autocomplete="new-password" minlength="8" required></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后处理</button><button class="primary-button" type="submit">更新密码</button></div></div></form>`);
-      document.getElementById("portal-password-reset-confirm").addEventListener("submit", async (confirmEvent) => {
-        confirmEvent.preventDefault();
-        try {
-          await establishPortalSession(await portalApi("/auth/password-reset/confirm", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(confirmEvent.currentTarget))) }));
-          closePortalDialog();
-          portalToast("密码已更新，其他登录会话已失效");
-        } catch (error) { portalToast(error.message, true); }
-      });
+      passwordSetupDialog(result.development_reset_token || "");
     } catch (error) { portalToast(error.message, true); }
   });
 }
@@ -1432,6 +1438,7 @@ async function portalSecurityDialog() {
 document.addEventListener("DOMContentLoaded", async () => {
   portalIcons();
   const fragmentParams = new URLSearchParams(window.location.hash.slice(1));
+  const invitationToken = fragmentParams.get("invite_token") || new URLSearchParams(window.location.search).get("invite_token") || "";
   const fragmentToken = fragmentParams.get("access_token");
   const loksystemSsoError = fragmentParams.get("sso_error");
   if (fragmentToken) {
@@ -1452,6 +1459,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.querySelectorAll(".auth-mode-tabs button").forEach((button) => button.addEventListener("click", () => setAuthMode(button.dataset.authMode)));
   setAuthMode("login");
+  if (invitationToken) {
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("invite_token");
+    cleanUrl.hash = "";
+    window.history.replaceState(window.history.state, "", `${cleanUrl.pathname}${cleanUrl.search}`);
+    passwordSetupDialog(invitationToken, true);
+  }
   const loksystemLoginButton = document.getElementById("loksystem-login-button");
   try {
     const loksystemStatus = await fetch("/auth/loksystem/status").then((response) => response.json());

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ApiKeyCreate(BaseModel):
@@ -89,10 +89,48 @@ class AccountCreate(BaseModel):
     external_user_id: str | None = Field(default=None, min_length=1, max_length=120)
     name: str = Field(min_length=1, max_length=120)
 
-    @field_validator("external_user_id", "name", mode="before")
+    @field_validator("external_user_id", mode="before")
     @classmethod
-    def strip_text_fields(cls, value: object) -> object:
+    def normalize_external_user_id(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        return value.strip() or None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+
+class AccountProvisionCreate(AccountCreate):
+    access_mode: Literal["api", "portal"] = "api"
+    login_id: str | None = Field(default=None, min_length=3, max_length=160, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,159}$")
+    security_contact: str | None = Field(default=None, min_length=3, max_length=160)
+    api_key: ApiKeyCreate | None = None
+
+    @field_validator("login_id", "security_contact", mode="before")
+    @classmethod
+    def normalize_optional_identity(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("login_id")
+    @classmethod
+    def normalize_login_id(cls, value: str | None) -> str | None:
+        return value.lower() if value else None
+
+    @model_validator(mode="after")
+    def validate_access_mode(self) -> "AccountProvisionCreate":
+        if self.access_mode == "portal":
+            if not self.login_id or not self.security_contact:
+                raise ValueError("portal accounts require login_id and security_contact")
+            if self.api_key is not None:
+                raise ValueError("portal accounts cannot provision an api key before invitation acceptance")
+        elif self.login_id or self.security_contact:
+            raise ValueError("api accounts cannot define portal login fields")
+        return self
 
 
 class OrganizationCreate(BaseModel):

@@ -26,6 +26,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     inspector = inspect(engine)
     account_columns = {column["name"] for column in inspector.get_columns("billing_accounts")}
+    reset_challenge_columns = {column["name"] for column in inspector.get_columns("password_reset_challenges")}
     api_key_columns = {column["name"] for column in inspector.get_columns("api_keys")}
     payment_order_columns = {column["name"] for column in inspector.get_columns("payment_orders")}
     usage_columns = {column["name"] for column in inspector.get_columns("usage_records")}
@@ -46,12 +47,19 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0"))
         if "account_source" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN account_source VARCHAR(24) NOT NULL DEFAULT 'admin'"))
+        if "access_mode" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN access_mode VARCHAR(24) NOT NULL DEFAULT 'api'"))
         # Recover the source of legacy accounts from stable identifiers where it is unambiguous.
         connection.execute(text("UPDATE billing_accounts SET account_source = 'loksystem' WHERE external_user_id LIKE 'loksystem-%' AND account_source = 'admin'"))
         connection.execute(text("UPDATE billing_accounts SET account_source = 'oidc' WHERE external_user_id LIKE 'oidc-%' AND account_source = 'admin'"))
         connection.execute(text("UPDATE billing_accounts SET account_source = 'self_registered' WHERE login_id IS NOT NULL AND login_id <> '' AND account_source = 'admin'"))
+        connection.execute(text("UPDATE billing_accounts SET access_mode = 'portal' WHERE login_id IS NOT NULL AND login_id <> ''"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_billing_accounts_account_source ON billing_accounts (account_source)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_billing_accounts_access_mode ON billing_accounts (access_mode)"))
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_billing_accounts_login_id ON billing_accounts (login_id)"))
+        if "purpose" not in reset_challenge_columns:
+            connection.execute(text("ALTER TABLE password_reset_challenges ADD COLUMN purpose VARCHAR(24) NOT NULL DEFAULT 'password_reset'"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_password_reset_challenges_purpose ON password_reset_challenges (purpose)"))
         if "account_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN account_id INTEGER"))
         if "expires_at" not in api_key_columns:
@@ -278,9 +286,9 @@ def init_db() -> None:
         connection.execute(text(
             "INSERT INTO model_channels "
             "(model_config_id, name, provider_base_url, upstream_model, provider_api_key_env, priority, weight, "
-            "active, status, health_source, consecutive_failures, last_latency_ms, created_at) "
+            "active, status, health_source, credential_source, consecutive_failures, last_latency_ms, created_at) "
             "SELECT model_configs.id, 'Primary', model_configs.provider_base_url, model_configs.upstream_model, "
-            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 'unknown', 0, 0, :created_at "
+            "model_configs.provider_api_key_env, 100, 100, model_configs.active, 'unknown', 'unknown', 'environment', 0, 0, :created_at "
             "FROM model_configs WHERE NOT EXISTS ("
             "SELECT 1 FROM model_channels WHERE model_channels.model_config_id = model_configs.id)"
         ), {"created_at": now})

@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=console-20260824-3">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260827-5">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=console-20260826-17" defer></script>
+  <script src="/static/app.js?v=console-20260827-21" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -18,7 +18,7 @@
         <div class="auth-product-points"><div><i data-lucide="boxes"></i><span>多模型统一接入</span></div><div><i data-lucide="shield-check"></i><span>账户与凭证治理</span></div><div><i data-lucide="activity"></i><span>调用链路可追溯</span></div></div>
       </section>
       <div class="auth-panel auth-panel-form">
-        <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / ADMIN</p><h2>管理控制台</h2><span>使用管理员账号进入服务运营与配置界面。</span></div>
+        <div class="auth-panel-heading"><p class="auth-kicker" id="auth-kicker">LOKTOKEN / ADMIN</p><h2 id="auth-title">管理控制台</h2><span id="auth-description">使用管理员账号进入服务运营与配置界面。</span></div>
         <form id="auth-form">
           <label for="admin-login-id">管理员账号</label>
           <input id="admin-login-id" name="login_id" autocomplete="username" placeholder="输入管理员账号" required autofocus>
@@ -28,6 +28,26 @@
             <button class="icon-button" id="toggle-token" type="button" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入管理控制台</span></button>
+        </form>
+        <form id="bootstrap-form" hidden>
+          <label for="bootstrap-token">初始化令牌</label>
+          <div class="password-row">
+            <input id="bootstrap-token" name="bootstrap_token" type="password" autocomplete="off" placeholder="输入 TOKEN_ADMIN_TOKEN" required minlength="1">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-token" title="显示初始化令牌" aria-label="显示初始化令牌"><i data-lucide="eye"></i></button>
+          </div>
+          <label for="bootstrap-login-id">管理员账号</label>
+          <input id="bootstrap-login-id" name="login_id" autocomplete="username" placeholder="输入管理员账号" required minlength="3" maxlength="160">
+          <label for="bootstrap-password">管理员密码</label>
+          <div class="password-row">
+            <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8" maxlength="128">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
+          </div>
+          <label for="bootstrap-password-confirm">确认密码</label>
+          <div class="password-row">
+            <input id="bootstrap-password-confirm" name="password_confirm" type="password" autocomplete="new-password" placeholder="再次输入管理员密码" required minlength="8" maxlength="128">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-password-confirm" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
+          </div>
+          <button class="primary-button full-button" type="submit"><i data-lucide="shield-check"></i><span>创建超级管理员</span></button>
         </form>
         <p class="auth-error" id="auth-error" role="alert"></p>
       </div>
@@ -43,9 +63,8 @@
       <p class="nav-label">服务管理</p>
       <nav aria-label="主导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>管理概览</span></button>
-        <button class="nav-item" data-view="accounts"><i data-lucide="building-2"></i><span>账户管理</span></button>
+        <button class="nav-item" data-view="accounts"><i data-lucide="users-round"></i><span>账户与访问</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>密钥管理</span></button>
         <button class="nav-item" data-view="payments"><i data-lucide="credit-card"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redemptions"><i data-lucide="gift"></i><span>福利管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量管理</span></button>
@@ -88,13 +107,13 @@
         </section>
 
         <section class="view" id="view-accounts">
-          <div class="section-header page-section-header"><div><h2>账户管理</h2><p>客户账户与共享余额</p></div><div class="content-page-actions" id="admin-page-actions-accounts"></div></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>项目数</th><th>Key 数量</th><th>余额</th><th>近 30 天消费</th><th>最近活动</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></section>
-        </section>
-
-        <section class="view" id="view-keys">
-          <div class="section-header page-section-header"><div><h2>密钥管理</h2><p>账户访问凭证</p></div><div class="content-page-actions" id="admin-page-actions-keys"></div></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>有效期</th><th>额度</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
+          <div class="section-header page-section-header"><div><h2>账户与访问</h2><p>账户主体、共享余额与 API 访问凭证</p></div><div class="content-page-actions" id="admin-page-actions-accounts"></div></div>
+          <div class="account-access-tabs" role="tablist" aria-label="账户与访问视图">
+            <button class="active" type="button" role="tab" aria-selected="true" aria-controls="account-access-accounts" data-account-access-tab="accounts"><i data-lucide="building-2"></i><span>账户</span></button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="account-access-keys" data-account-access-tab="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
+          </div>
+          <section class="panel" id="account-access-accounts" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>访问就绪</th><th>余额</th><th>近 30 天消费</th><th>最近活动</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></section>
+          <section class="panel" id="account-access-keys" role="tabpanel" hidden><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>有效期</th><th>额度</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-models">

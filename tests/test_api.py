@@ -380,6 +380,8 @@ def test_provider_catalogue_enriches_existing_model_without_overwriting_routing(
         assert model.active is True
         assert json.loads(model.catalog_metadata_json or "{}")["provider"] == "DeepSeek"
         assert json.loads(model.official_pricing_json or "{}")["currency"] == "CNY"
+        channel = db.query(ModelChannel).filter(ModelChannel.model_config_id == model.id).one()
+        assert channel.credential_source == "environment"
 
 
 def test_real_mode_removes_legacy_mock_models(monkeypatch) -> None:
@@ -864,11 +866,10 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         portal_script = (await client.get("/static/portal.js")).text
 
         assert "查看管理文档" not in admin_page
-        assert "首次初始化管理员" not in admin_page
-        assert 'id="show-bootstrap"' not in admin_page
-        assert 'id="bootstrap-form"' not in admin_page
-        assert "show-bootstrap" not in admin_script
-        assert "bootstrap-form" not in admin_script
+        assert 'id="bootstrap-form"' in admin_page
+        assert 'id="auth-title"' in admin_page
+        assert "bootstrap-status" in admin_script
+        assert "bootstrap-form" in admin_script
         admin_sidebar = admin_page.split('<aside class="sidebar">', 1)[1].split("</aside>", 1)[0]
         portal_sidebar = portal_page.split('<aside class="sidebar">', 1)[1].split("</aside>", 1)[0]
         assert "管理文档" not in admin_sidebar and "用户文档" not in portal_sidebar
@@ -891,14 +892,14 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
         assert 'class="content-page-actions"' in admin_page
         assert 'data-action="portal-refresh"' in portal_script
 
-        admin_nav = ["管理概览", "账户管理", "模型管理", "密钥管理", "订单管理", "福利管理", "用量管理", "安全审计"]
+        admin_nav = ["管理概览", "账户与访问", "模型管理", "订单管理", "福利管理", "用量管理", "安全审计"]
         portal_nav = ["用户概览", "模型广场", "额度管理", "密钥管理", "请求记录", "订单管理", "兑换福利"]
         admin_nav_markup = admin_page.split('<nav aria-label="主导航">', 1)[1].split("</nav>", 1)[0]
         portal_nav_markup = portal_page.split('<nav aria-label="用户导航">', 1)[1].split("</nav>", 1)[0]
         assert [admin_nav_markup.index(label) for label in admin_nav] == sorted(admin_nav_markup.index(label) for label in admin_nav)
         assert [portal_nav_markup.index(label) for label in portal_nav] == sorted(portal_nav_markup.index(label) for label in portal_nav)
         assert all(f'{key}: "{label}"' in admin_script for key, label in {
-            "overview": "管理概览", "models": "模型管理", "accounts": "账户管理", "keys": "密钥管理",
+            "overview": "管理概览", "models": "模型管理", "accounts": "账户与访问",
             "payments": "订单管理", "redemptions": "福利管理", "usage": "用量管理", "audit": "安全审计",
         }.items())
         assert all(f'{key}: "{label}"' in portal_script for key, label in {
@@ -906,6 +907,9 @@ async def test_sidebar_navigation_contract_and_backing_endpoints() -> None:
             "usage": "请求记录", "orders": "订单管理", "redeem": "兑换福利",
         }.items())
         assert 'id="admin-provider-grid"' in admin_page
+        assert 'data-account-access-tab="accounts"' in admin_page
+        assert 'data-account-access-tab="keys"' in admin_page
+        assert 'data-view="keys"' not in admin_page
         assert 'id="admin-model-page-back"' in admin_script
         assert 'id="admin-model-create-inline"' not in admin_page
         assert 'id="model-marketplace-provider-back"' in portal_script
@@ -1790,12 +1794,16 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
 async def test_admin_accounts_roles_and_revocable_sessions() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        initial_status = await client.get("/admin/auth/bootstrap-status")
+        assert initial_status.status_code == 200
+        assert initial_status.json() == {"bootstrap_available": True}
         bootstrap = await client.post(
             "/admin/auth/bootstrap",
             headers={"X-Admin-Token": "test-admin"},
             json={"login_id": "root-admin", "password": "correct-horse", "role": "operator"},
         )
         assert bootstrap.status_code == 200
+        assert (await client.get("/admin/auth/bootstrap-status")).json() == {"bootstrap_available": False}
         admin_headers = {"Authorization": f"Bearer {bootstrap.json()['access_token']}"}
         assert (await client.get("/admin/overview", headers={"X-Admin-Token": "test-admin"})).status_code == 401
         created = await client.post(
@@ -1809,6 +1817,87 @@ async def test_admin_accounts_roles_and_revocable_sessions() -> None:
         assert (await client.post("/admin/accounts", headers=auditor_headers, json={"external_user_id": "blocked", "name": "Blocked"})).status_code == 403
         assert (await client.post("/admin/auth/logout", headers=admin_headers)).status_code == 200
         assert (await client.get("/admin/overview", headers=admin_headers)).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_account_provision_can_create_a_limited_api_key() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        bootstrap = await client.post(
+            "/admin/auth/bootstrap",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"login_id": "provision-admin", "password": "correct-horse"},
+        )
+        admin_headers = {"Authorization": f"Bearer {bootstrap.json()['access_token']}"}
+        provisioned = await client.post(
+            "/admin/accounts/provision",
+            headers=admin_headers,
+            json={
+                "name": "Provisioned Team",
+                "external_user_id": "provisioned-team",
+                "api_key": {
+                    "name": "production",
+                    "expires_in_days": 30,
+                    "spending_limit_micros": 500_000,
+                    "rate_limit_requests": 20,
+                    "rate_limit_window_seconds": 60,
+                },
+            },
+        )
+        assert provisioned.status_code == 200
+        data = provisioned.json()
+        assert data["account"]["name"] == "Provisioned Team"
+        assert data["api_key"]["name"] == "production"
+        assert data["api_key"]["key"]
+        account_only = await client.post(
+            "/admin/accounts/provision",
+            headers=admin_headers,
+            json={"name": "No Access Team", "external_user_id": ""},
+        )
+        assert account_only.status_code == 200
+        assert account_only.json()["api_key"] is None
+        assert account_only.json()["account"]["external_user_id"].startswith("admin-")
+        keys = await client.get("/admin/api-keys", headers=admin_headers)
+
+    key = next(item for item in keys.json()["data"] if item["id"] == data["api_key"]["id"])
+    assert key["account_id"] == data["account"]["id"]
+    assert key["spending_limit_micros"] == 500_000
+    assert (key["rate_limit_requests"], key["rate_limit_window_seconds"]) == (20, 60)
+
+
+@pytest.mark.asyncio
+async def test_account_provision_portal_invitation_can_be_accepted_once() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        bootstrap = await client.post(
+            "/admin/auth/bootstrap",
+            headers={"X-Admin-Token": "test-admin"},
+            json={"login_id": "portal-provision-admin", "password": "correct-horse"},
+        )
+        admin_headers = {"Authorization": f"Bearer {bootstrap.json()['access_token']}"}
+        provisioned = await client.post(
+            "/admin/accounts/provision",
+            headers=admin_headers,
+            json={
+                "name": "Invited Team",
+                "external_user_id": "invited-team",
+                "access_mode": "portal",
+                "login_id": "invited-user",
+                "security_contact": "invited@example.com",
+            },
+        )
+        assert provisioned.status_code == 200
+        invitation = provisioned.json()["invitation"]
+        assert invitation["setup_url"].startswith("http://testserver/portal#invite_token=inv_")
+        token = invitation["setup_url"].split("invite_token=", 1)[1]
+        accepted = await client.post("/auth/password-reset/confirm", json={"reset_token": token, "password": "correct-horse"})
+        assert accepted.status_code == 200
+        assert accepted.json()["access_token"].startswith("usr_")
+        assert (await client.post("/auth/password-reset/confirm", json={"reset_token": token, "password": "correct-horse"})).status_code == 400
+        listed = await client.get("/admin/accounts", headers=admin_headers)
+        item = next(row for row in listed.json()["data"] if row["login_id"] == "invited-user")
+        assert item["access_mode"] == "portal"
+        assert item["access_status"] == "portal_ready"
 
 
 @pytest.mark.asyncio
