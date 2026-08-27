@@ -77,10 +77,12 @@ class Project(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
+    __table_args__ = (UniqueConstraint("rotated_from_key_id", name="uq_api_keys_rotated_from_key_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120))
     account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    billing_account_id: Mapped[int | None] = mapped_column(ForeignKey("billing_accounts.id"), nullable=True, index=True)
     project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
     key_prefix: Mapped[str] = mapped_column(String(24), index=True)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)

@@ -14,7 +14,7 @@ import uuid
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse, Response
-from sqlalchemy import Date, cast, func, select
+from sqlalchemy import Date, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,7 @@ from .config import get_settings
 from .db import get_db
 from .guardrails import rate_limiter
 from .model_release import model_is_callable
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, OidcLoginChallenge, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
 from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
 from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, require_portal_session_context, verify_password
@@ -158,6 +158,18 @@ def portal_key_query(context: PortalContext):
     query = select(ApiKey).where(ApiKey.account_id == context.account.id)
     if context.token_type == "trial":
         query = query.where(ApiKey.trial_token_hash == context.trial_token_hash)
+    else:
+        organization_project_ids = (
+            select(Project.id)
+            .join(Workspace, Workspace.id == Project.workspace_id)
+            .join(Organization, Organization.id == Workspace.organization_id)
+            .join(OrganizationMember, OrganizationMember.organization_id == Organization.id)
+            .where(OrganizationMember.account_id == context.account.id)
+        )
+        query = select(ApiKey).where(or_(
+            ApiKey.account_id == context.account.id,
+            ApiKey.project_id.in_(organization_project_ids),
+        ))
     return query
 
 
@@ -176,7 +188,7 @@ def order_data(order: PaymentOrder) -> dict[str, object]:
 
 
 def scoped_usage_query(
-    account_id: int,
+    account_id: int | None,
     model: str | None = None,
     api_key_id: int | None = None,
     from_at: datetime | None = None,
@@ -185,7 +197,9 @@ def scoped_usage_query(
     request_id: str | None = None,
     trial_token_hash: str | None = None,
 ):
-    query = select(UsageRecord).where(UsageRecord.account_id == account_id)
+    query = select(UsageRecord)
+    if account_id is not None:
+        query = query.where(UsageRecord.account_id == account_id)
     if model:
         query = query.where(UsageRecord.model == model)
     if api_key_id:
@@ -203,6 +217,28 @@ def scoped_usage_query(
             select(ApiKey.id).where(ApiKey.trial_token_hash == trial_token_hash)
         ))
     return query
+
+
+def portal_usage_query(context: PortalContext, **filters):
+    if context.token_type == "trial":
+        return scoped_usage_query(context.account.id, trial_token_hash=context.trial_token_hash, **filters)
+    query = scoped_usage_query(None, **filters)
+    return query.where(or_(
+        UsageRecord.account_id == context.account.id,
+        UsageRecord.api_key_id.in_(portal_key_query(context).with_only_columns(ApiKey.id)),
+    ))
+
+
+def key_billing_account(db: Session, account: BillingAccount, project: Project | None) -> BillingAccount:
+    if project and project.workspace_id:
+        workspace = db.get(Workspace, project.workspace_id)
+        if workspace and workspace.organization_id:
+            organization = db.get(Organization, workspace.organization_id)
+            if organization:
+                owner = db.get(BillingAccount, organization.owner_account_id)
+                if owner and owner.active:
+                    return owner
+    return account
 
 
 def usage_record_data(record: UsageRecord, key_name: str) -> dict[str, object]:
@@ -618,16 +654,17 @@ def profile(context: PortalContext = Depends(portal_context), db: Session = Depe
     account = context.account
     personal_workspace = ensure_personal_workspace(db, account)
     db.commit()
-    key_count_query = select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id, ApiKey.active.is_(True))
-    if context.trial_token_hash:
-        key_count_query = key_count_query.where(ApiKey.trial_token_hash == context.trial_token_hash)
+    key_count_query = portal_key_query(context).where(ApiKey.active.is_(True)).with_only_columns(func.count(ApiKey.id))
+    usage_count = db.scalar(select(func.count(UsageRecord.id)).where(
+        UsageRecord.id.in_(portal_usage_query(context).with_only_columns(UsageRecord.id))
+    )) or 0
     return {
         "id": account.id,
         "external_user_id": account.external_user_id,
         "name": account.name,
         "balance_micros": account.balance_micros,
         "api_key_count": db.scalar(key_count_query) or 0,
-        "request_count": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.account_id == account.id)) or 0,
+        "request_count": usage_count,
         "security_contact": account.security_contact,
         "security_contact_verified_at": account.security_contact_verified_at.isoformat() if account.security_contact_verified_at else None,
         "personal_workspace_id": personal_workspace.id,
@@ -704,6 +741,7 @@ def list_api_keys(context: PortalContext = Depends(portal_context), db: Session 
     keys = db.scalars(portal_key_query(context).order_by(ApiKey.id.desc())).all()
     return {"data": [{
         "id": item.id,
+        "billing_account_id": item.billing_account_id or item.account_id,
         "project_id": item.project_id,
         "name": item.name,
         "key_prefix": item.key_prefix,
@@ -724,7 +762,7 @@ def list_api_keys(context: PortalContext = Depends(portal_context), db: Session 
 @router.post("/portal/api-keys/{api_key_id}/rotate")
 def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
     account = context.account
-    api_key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id))
+    api_key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id).with_for_update())
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
     if not api_key.active or api_key.revoked_at:
@@ -735,6 +773,7 @@ def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_cont
     raw_key = create_key()
     replacement = ApiKey(
         account_id=account.id,
+        billing_account_id=api_key.billing_account_id,
         project_id=api_key.project_id,
         name=f"{api_key.name} (rotated)",
         key_prefix=raw_key[:12],
@@ -750,7 +789,11 @@ def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_cont
     )
     api_key.active = False
     db.add(replacement)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="api key has already been rotated") from exc
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.rotated", target_type="api_key", target_id=replacement.id, details={"replaced_api_key_id": api_key.id})
     record_security_notification(db, account, "api_key_rotated", {"replaced_api_key_id": api_key.id, "replacement_api_key_id": replacement.id})
     db.commit()
@@ -763,7 +806,8 @@ def api_key_transactions(api_key_id: int, context: PortalContext = Depends(porta
     key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id))
     if not key:
         raise HTTPException(status_code=404, detail="api key not found")
-    rows = db.scalars(select(AccountBalanceTransaction).where(AccountBalanceTransaction.account_id == account.id, AccountBalanceTransaction.api_key_id == api_key_id).order_by(AccountBalanceTransaction.id.desc()).limit(100)).all()
+    billing_account_id = key.billing_account_id or key.account_id
+    rows = db.scalars(select(AccountBalanceTransaction).where(AccountBalanceTransaction.account_id == billing_account_id, AccountBalanceTransaction.api_key_id == api_key_id).order_by(AccountBalanceTransaction.id.desc()).limit(100)).all()
     return {"data": [{"id": row.id, "amount_micros": row.amount_micros, "type": row.transaction_type, "reference_id": row.reference_id, "description": row.description, "created_at": row.created_at.isoformat()} for row in rows]}
 
 
@@ -835,7 +879,7 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
     settings = get_settings()
     rate_limiter.check("portal-key-create", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
     if payload.idempotency_key:
-        existing = db.scalar(select(ApiKey).where(ApiKey.idempotency_key == payload.idempotency_key, ApiKey.account_id == account.id))
+        existing = db.scalar(select(ApiKey).where(ApiKey.idempotency_key == payload.idempotency_key))
         if existing:
             raise HTTPException(status_code=409, detail="idempotency key already used")
     exact_expiry = payload.expires_at
@@ -856,8 +900,10 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
         require_workspace_manager(role)
     else:
         project = ensure_default_project(db, ensure_personal_workspace(db, account))
+    billing_account = key_billing_account(db, account, project)
     record = ApiKey(
         account_id=account.id,
+        billing_account_id=billing_account.id if billing_account.id != account.id else None,
         project_id=project.id,
         name=payload.name,
         key_prefix=raw_key[:12],
@@ -873,7 +919,7 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
     db.add(record)
     db.flush()
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.created", target_type="api_key", target_id=record.id, details={"name": record.name})
-    record_security_notification(db, account, "api_key_created", {"api_key_id": record.id, "name": record.name})
+    record_security_notification(db, account, "api_key_created", {"api_key_id": record.id, "name": record.name, "billing_account_id": billing_account.id})
     db.commit()
     db.refresh(record)
     return {"id": record.id, "project_id": record.project_id, "name": record.name, "key": raw_key, "key_prefix": record.key_prefix}
@@ -917,6 +963,9 @@ async def test_model(
     api_key = db.scalar(portal_key_query(context).where(ApiKey.id == payload.api_key_id))
     if not api_key or not api_key.active or api_key.revoked_at:
         raise HTTPException(status_code=422, detail="请选择有效的 API Key")
+    billing_account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
+    if not billing_account or not billing_account.active:
+        raise HTTPException(status_code=403, detail="billing account is inactive")
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
     if not model:
         raise HTTPException(status_code=404, detail="model not found")
@@ -935,10 +984,10 @@ async def test_model(
         quantity = payload.n if api_type == "images_generations" else 1
         reservation = model.task_price_micros * quantity
         try:
-            reserve_balance(db, account, api_key, reservation, request_id)
+            reserve_balance(db, billing_account, api_key, reservation, request_id)
         except ValueError as exc:
             raise HTTPException(status_code=402, detail=str(exc)) from exc
-        task = GenerationTask(task_id="task_" + uuid.uuid4().hex, account_id=account.id, api_key_id=api_key.id, model_config_id=model.id, request_id=request_id, trace_id=trace_id, task_type=api_type, status="processing", quantity=quantity, reserved_micros=reservation)
+        task = GenerationTask(task_id="task_" + uuid.uuid4().hex, account_id=billing_account.id, api_key_id=api_key.id, model_config_id=model.id, request_id=request_id, trace_id=trace_id, task_type=api_type, status="processing", quantity=quantity, reserved_micros=reservation)
         db.add(task)
         db.commit()
         try:
@@ -961,7 +1010,7 @@ async def test_model(
             task.updated_at = utcnow()
             if detail.status in {"completed", "failed"}:
                 task.error_message = None if detail.status == "completed" else "provider task failed"
-                settle_balance(db, account, api_key, reservation, reservation if detail.status == "completed" else 0, request_id)
+                settle_balance(db, billing_account, api_key, reservation, reservation if detail.status == "completed" else 0, request_id)
                 save_usage(db, api_key, model, request_id, trace_id, 0, 0, "success" if detail.status == "completed" else "error", 0, task.error_message, provider_cost_micros=detail.provider_cost_micros, provider_channel_id=detail.channel_id, provider_request_id=detail.provider_task_id, raw_usage={"task_id": task.task_id, "task_type": api_type, "quantity": quantity, "result": detail.result}, amount_micros=reservation if detail.status == "completed" else 0)
                 task.settled_at = utcnow()
             db.commit()
@@ -970,7 +1019,7 @@ async def test_model(
             task.status = "failed"
             task.error_message = str(exc)
             db.commit()
-            settle_balance(db, account, api_key, reservation, 0, request_id)
+            settle_balance(db, billing_account, api_key, reservation, 0, request_id)
             raise HTTPException(status_code=502, detail="模型测试调用失败，请稍后重试") from exc
     request = ChatCompletionRequest(
         model=model.public_name,
@@ -988,7 +1037,7 @@ async def test_model(
     estimated_input = estimate_tokens(request.messages)
     reservation = calculate_amount(model, estimated_input, payload.max_tokens)
     try:
-        reserve_balance(db, account, api_key, reservation, request_id)
+        reserve_balance(db, billing_account, api_key, reservation, request_id)
     except ValueError as exc:
         save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "rejected", 0, str(exc), amount_micros=0)
         raise HTTPException(status_code=402, detail=str(exc)) from exc
@@ -996,7 +1045,7 @@ async def test_model(
     try:
         provider_result = await call_provider_details(db, model, request)
         actual_amount = calculate_amount(model, provider_result.input_tokens, provider_result.output_tokens)
-        settle_balance(db, account, api_key, reservation, actual_amount, request_id)
+        settle_balance(db, billing_account, api_key, reservation, actual_amount, request_id)
         save_usage(
             db, api_key, model, request_id, trace_id,
             provider_result.input_tokens, provider_result.output_tokens, "success",
@@ -1018,11 +1067,11 @@ async def test_model(
             "amount_micros": actual_amount,
         }
     except HTTPException as exc:
-        settle_balance(db, account, api_key, reservation, 0, request_id)
+        settle_balance(db, billing_account, api_key, reservation, 0, request_id)
         save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "error", int((time.perf_counter() - started) * 1000), str(exc.detail), amount_micros=0)
         raise
     except Exception as exc:
-        settle_balance(db, account, api_key, reservation, 0, request_id)
+        settle_balance(db, billing_account, api_key, reservation, 0, request_id)
         save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "error", int((time.perf_counter() - started) * 1000), str(exc), amount_micros=0)
         raise HTTPException(status_code=502, detail="模型测试调用失败，请稍后重试") from exc
 
@@ -1078,8 +1127,8 @@ def usage_summary(
     request_id: str | None = None,
 ) -> dict[str, object]:
     account = context.account
-    record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
+    record_ids = portal_usage_query(
+        context, model=model, api_key_id=api_key_id, from_at=from_at, to_at=to_at, status=status, request_id=request_id,
     ).with_only_columns(UsageRecord.id)
     count, inputs, outputs, total, amount, average_latency, success_count = db.execute(select(
         func.count(UsageRecord.id),
@@ -1118,8 +1167,8 @@ def usage_analytics(
     granularity: Annotated[str, Query(pattern="^(hour|day)$")] = "day",
 ) -> dict[str, object]:
     account = context.account
-    record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
+    record_ids = portal_usage_query(
+        context, model=model, api_key_id=api_key_id, from_at=from_at, to_at=to_at, status=status, request_id=request_id,
     ).with_only_columns(UsageRecord.id)
     if db.get_bind().dialect.name == "postgresql":
         bucket = (
@@ -1207,9 +1256,7 @@ def dashboard(
     today = utcnow().date()
     period_start = today - timedelta(days=days - 1)
 
-    base_filters = [UsageRecord.account_id == account.id]
-    if context.trial_token_hash:
-        base_filters.append(UsageRecord.api_key_id.in_(select(ApiKey.id).where(ApiKey.trial_token_hash == context.trial_token_hash)))
+    base_filters = [UsageRecord.id.in_(portal_usage_query(context).with_only_columns(UsageRecord.id))]
     if model:
         base_filters.append(UsageRecord.model == model)
     if api_key_id:
@@ -1326,8 +1373,8 @@ def usage_records(
     page_size: Annotated[int, Query(ge=10, le=100)] = 20,
 ) -> dict[str, object]:
     account = context.account
-    record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
+    record_ids = portal_usage_query(
+        context, model=model, api_key_id=api_key_id, from_at=from_at, to_at=to_at, status=status, request_id=request_id,
     ).with_only_columns(UsageRecord.id)
     total = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.id.in_(record_ids))) or 0
     query = select(UsageRecord, ApiKey.name).join(ApiKey, ApiKey.id == UsageRecord.api_key_id).where(UsageRecord.id.in_(record_ids))
@@ -1373,8 +1420,8 @@ def export_usage(
     request_id: str | None = None,
 ) -> Response:
     account = context.account
-    record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
+    record_ids = portal_usage_query(
+        context, model=model, api_key_id=api_key_id, from_at=from_at, to_at=to_at, status=status, request_id=request_id,
     ).with_only_columns(UsageRecord.id)
     rows = db.execute(
         select(UsageRecord, ApiKey.name)

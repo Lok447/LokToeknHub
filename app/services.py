@@ -150,7 +150,8 @@ def reserve_balance(
         raise ValueError("api key has expired")
     if locked_key.spending_limit_micros is not None and locked_key.spent_micros + amount_micros > locked_key.spending_limit_micros:
         raise ValueError("api key spending limit exceeded")
-    locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == account.id).with_for_update())
+    billing_account_id = api_key.billing_account_id or account.id
+    locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == billing_account_id).with_for_update())
     if not locked_account or not locked_account.active or locked_account.balance_micros < amount_micros:
         raise ValueError("insufficient balance")
     locked_account.balance_micros -= amount_micros
@@ -167,7 +168,8 @@ def reserve_balance(
         description="model request reservation",
     ))
     db.commit()
-    account.balance_micros = locked_account.balance_micros
+    if account.id == locked_account.id:
+        account.balance_micros = locked_account.balance_micros
 
 
 def settle_balance(
@@ -182,7 +184,8 @@ def settle_balance(
     if delta == 0:
         return
     locked_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key.id).with_for_update())
-    locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == account.id).with_for_update())
+    billing_account_id = api_key.billing_account_id or account.id
+    locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == billing_account_id).with_for_update())
     if not locked_account or not locked_key:
         return
     locked_account.balance_micros += delta
@@ -199,7 +202,8 @@ def settle_balance(
         description="model request settlement",
     ))
     db.commit()
-    account.balance_micros = locked_account.balance_micros
+    if account.id == locked_account.id:
+        account.balance_micros = locked_account.balance_micros
 
 
 def credit_balance(
@@ -788,7 +792,7 @@ def save_usage(
     record = UsageRecord(
         request_id=request_id,
         trace_id=trace_id,
-        account_id=api_key.account_id,
+        account_id=api_key.billing_account_id or api_key.account_id,
         workspace_id=db.get(Project, api_key.project_id).workspace_id if api_key.project_id and db.get(Project, api_key.project_id) else None,
         project_id=api_key.project_id,
         api_key_id=api_key.id,

@@ -1148,6 +1148,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
         {
             "id": api_key.id,
             "account_id": api_key.account_id,
+            "billing_account_id": api_key.billing_account_id or api_key.account_id,
             "account_name": account_name,
             "name": api_key.name,
             "key_prefix": api_key.key_prefix,
@@ -1169,7 +1170,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
 
 @app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_operator)])
 def update_api_key(api_key_id: int, payload: ActiveUpdate, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
-    api_key = db.get(ApiKey, api_key_id)
+    api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id).with_for_update())
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
     if api_key.revoked_at and payload.active:
@@ -1224,7 +1225,7 @@ def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(requir
 
 @app.post("/admin/api-keys/{api_key_id}/rotate", dependencies=[Depends(require_operator)])
 def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
-    api_key = db.get(ApiKey, api_key_id)
+    api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id).with_for_update())
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
     if not api_key.active or api_key.revoked_at:
@@ -1232,6 +1233,7 @@ def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(requir
     raw_key = create_key()
     replacement = ApiKey(
         account_id=api_key.account_id,
+        billing_account_id=api_key.billing_account_id,
         project_id=api_key.project_id,
         name=f"{api_key.name} (rotated)",
         key_prefix=raw_key[:12],
@@ -1246,7 +1248,11 @@ def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(requir
     )
     api_key.active = False
     db.add(replacement)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="api key has already been rotated") from exc
     record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="api_key.rotated", target_type="api_key", target_id=replacement.id, details={"replaced_api_key_id": api_key.id})
     db.commit()
     return {"id": replacement.id, "name": replacement.name, "key": raw_key, "key_prefix": replacement.key_prefix, "replaced_api_key_id": api_key.id}
@@ -1415,7 +1421,7 @@ def adjust_balance(api_key_id: int, payload: BalanceAdjust, db: Session = Depend
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
-    account = db.get(BillingAccount, api_key.account_id)
+    account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="account not found")
     reference_id = payload.idempotency_key or f"topup_{uuid.uuid4().hex}"
@@ -1436,7 +1442,7 @@ def list_balance_transactions(api_key_id: int, db: Session = Depends(get_db)) ->
         raise HTTPException(status_code=404, detail="api key not found")
     transactions = db.scalars(
         select(AccountBalanceTransaction)
-        .where(AccountBalanceTransaction.account_id == api_key.account_id)
+        .where(AccountBalanceTransaction.account_id == (api_key.billing_account_id or api_key.account_id))
         .order_by(AccountBalanceTransaction.id.desc())
         .limit(100)
     ).all()
@@ -2500,7 +2506,7 @@ def retrieve_model(model_id: str, authorization: str | None = Header(default=Non
 @app.get("/v1/account", response_model=AccountBalance)
 def account_balance(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> AccountBalance:
     api_key = require_api_key(authorization, db)
-    account = db.get(BillingAccount, api_key.account_id)
+    account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
     return AccountBalance(account_id=account.id, external_user_id=account.external_user_id, api_key_id=api_key.id, balance_micros=account.balance_micros)
@@ -2515,7 +2521,7 @@ def _generation_context(
     api_key = require_api_key(authorization, db)
     settings = get_settings()
     rate_limiter.check("api", str(api_key.id), api_key.rate_limit_requests or settings.api_rate_limit_requests, api_key.rate_limit_window_seconds or settings.api_rate_limit_window_seconds)
-    account = db.get(BillingAccount, api_key.account_id)
+    account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_name, ModelConfig.active.is_(True)))
@@ -2705,7 +2711,7 @@ async def chat_completions(
     api_key = require_api_key(authorization, db)
     settings = get_settings()
     rate_limiter.check("api", str(api_key.id), api_key.rate_limit_requests or settings.api_rate_limit_requests, api_key.rate_limit_window_seconds or settings.api_rate_limit_window_seconds)
-    account = db.get(BillingAccount, api_key.account_id)
+    account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))

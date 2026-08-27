@@ -44,6 +44,8 @@ async def test_key_rotation_preserves_budget_and_revocation_is_permanent() -> No
             db.commit()
         rotated = await client.post(f"/admin/api-keys/{first_id}/rotate", headers=admin_headers)
         assert rotated.status_code == 200
+        repeated_rotation = await client.post(f"/admin/api-keys/{first_id}/rotate", headers=admin_headers)
+        assert repeated_rotation.status_code == 409
         with SessionLocal() as db:
             replacement = db.get(ApiKey, rotated.json()["id"])
             assert replacement.spending_limit_micros == 1000
@@ -2251,6 +2253,8 @@ async def test_personal_workspaces_organizations_projects_and_key_attribution() 
         assert owner.status_code == 200 and member.status_code == 200
         owner_headers = {"Authorization": f"Bearer {owner.json()['access_token']}"}
         member_headers = {"Authorization": f"Bearer {member.json()['access_token']}"}
+        owner_profile = await client.get("/portal/profile", headers=owner_headers)
+        member_profile = await client.get("/portal/profile", headers=member_headers)
 
         personal = await client.get("/portal/workspaces", headers=owner_headers)
         assert personal.status_code == 200
@@ -2278,21 +2282,41 @@ async def test_personal_workspaces_organizations_projects_and_key_attribution() 
         key = await client.post("/portal/api-keys", headers=owner_headers, json={"name": "production-key", "project_id": project_id})
         assert key.status_code == 200
         assert key.json()["project_id"] == project_id
+        with SessionLocal() as db:
+            from app.models import OrganizationMember
+            membership = db.query(OrganizationMember).filter_by(account_id=member_profile.json()["id"]).one()
+            membership.role = "admin"
+            db.commit()
+        member_key = await client.post("/portal/api-keys", headers=member_headers, json={"name": "member-production-key", "project_id": project_id})
+        assert member_key.status_code == 200
+        with SessionLocal() as db:
+            member_key_record = db.get(ApiKey, member_key.json()["id"])
+            assert member_key_record.account_id == member_profile.json()["id"]
+            assert member_key_record.billing_account_id == owner_profile.json()["id"]
 
         admin_headers = {"X-Admin-Token": "test-admin"}
-        owner_profile = await client.get("/portal/profile", headers=owner_headers)
         await client.post(
             f"/admin/accounts/{owner_profile.json()['id']}/balance", headers=admin_headers,
             json={"amount_micros": 100_000, "idempotency_key": "workspace-test-topup"},
         )
         called = await client.post(
-            "/v1/chat/completions", headers={"Authorization": f"Bearer {key.json()['key']}"},
+            "/v1/chat/completions", headers={"Authorization": f"Bearer {member_key.json()['key']}"},
             json={"model": "lok-chat", "messages": [{"role": "user", "content": "hello"}]},
         )
         assert called.status_code == 200
+        member_keys = await client.get("/portal/api-keys", headers=member_headers)
+        assert {item["id"] for item in member_keys.json()["data"]} >= {key.json()["id"], member_key.json()["id"]}
+        member_usage = await client.get("/portal/usage", headers=member_headers)
+        assert member_usage.json()["request_count"] == 1
+        updated_owner = await client.get("/portal/profile", headers=owner_headers)
+        updated_member = await client.get("/portal/profile", headers=member_headers)
+        assert updated_owner.json()["balance_micros"] < 100_000
+        assert updated_member.json()["balance_micros"] == 0
 
     with SessionLocal() as db:
         record = db.query(UsageRecord).one()
+        assert record.account_id == owner_profile.json()["id"]
+        assert record.api_key_id == member_key.json()["id"]
         assert record.project_id == project_id
         assert record.workspace_id == workspace_id
 

@@ -62,6 +62,8 @@ def init_db() -> None:
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_password_reset_challenges_purpose ON password_reset_challenges (purpose)"))
         if "account_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN account_id INTEGER"))
+        if "billing_account_id" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN billing_account_id INTEGER"))
         if "expires_at" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN expires_at DATETIME"))
         if "spending_limit_micros" not in api_key_columns:
@@ -96,9 +98,11 @@ def init_db() -> None:
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_token_hash ON api_keys (trial_token_hash)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_revoked_at ON api_keys (revoked_at)"))
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_idempotency_key ON api_keys (idempotency_key) WHERE idempotency_key IS NOT NULL"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_project_id ON api_keys (project_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_billing_account_id ON api_keys (billing_account_id)"))
         if "reviewed_by_admin_id" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_by_admin_id INTEGER"))
         if "reviewed_at" not in payment_order_columns:

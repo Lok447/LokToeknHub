@@ -250,7 +250,7 @@ curl.exe -N http://127.0.0.1:8000/v1/chat/completions `
 
 每次请求会按输入估算量和输出预算预扣余额，完成后按照真实 Token 数结算并退回差额；供应商失败会自动释放预扣。用户可以通过 `GET /v1/account` 查询当前余额。同步与 SSE 流式响应都使用同一套预扣、结算和渠道故障转移逻辑。
 
-同一账户可以创建多个 API Key，并共享账户余额。管理员可以通过 `GET /admin/accounts/{account_id}/transactions` 查询最近 100 条账户流水。旧的 `/admin/api-keys/{api_key_id}/balance` 与交易查询接口继续可用，并自动映射到该 Key 所属账户。充值接口的 `idempotency_key` 用于防止支付回调重试造成重复入账。
+同一账户可以创建多个 API Key，并共享账户余额。组织项目中的 Key 由创建者负责管理，但统一使用组织所有者作为计费主体，团队成员不会消耗个人余额；组织成员只能按其项目权限查看或管理对应 Key。管理员可以通过 `GET /admin/accounts/{account_id}/transactions` 查询最近 100 条账户流水。旧的 `/admin/api-keys/{api_key_id}/balance` 与交易查询接口继续可用，并自动映射到该 Key 的计费主体。充值接口的 `idempotency_key` 用于防止支付回调重试造成重复入账。
 
 ## 支付订单
 
