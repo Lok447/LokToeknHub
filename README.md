@@ -16,12 +16,29 @@ P1 运营治理已补充实时告警：管理概览和 `GET /admin/alerts` 会�
 
 ## 快速开始
 
+macOS / Linux（推荐使用仓库锁定的 `uv` 环境）：
+
+```bash
+uv sync --extra dev
+cp .env.example .env
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Windows PowerShell：
+
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 Copy-Item .env.example .env
 uvicorn app.main:app --reload
+```
+
+启动后访问 `http://127.0.0.1:8000/`；停止前台服务按 `Ctrl+C`。检查服务状态：
+
+```bash
+curl http://127.0.0.1:8000/healthz
+curl http://127.0.0.1:8000/readyz
 ```
 
 - LokToken管理控制台：`http://127.0.0.1:8000/`
