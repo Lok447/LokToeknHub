@@ -763,6 +763,60 @@ def list_provider_bills(db: Session = Depends(get_db)) -> dict[str, object]:
     return {"data": [provider_bill_summary_data(item) for item in records]}
 
 
+@app.get("/admin/provider-bills/report", dependencies=[Depends(require_admin)])
+def provider_margin_report(
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Summarize realized revenue, supplier cost and gross margin by model/channel."""
+    cutoff = utcnow() - timedelta(days=days)
+    rows = db.execute(select(
+        UsageRecord.model,
+        UsageRecord.provider_channel_id,
+        func.count(UsageRecord.id),
+        func.coalesce(func.sum(UsageRecord.amount_micros), 0),
+        func.coalesce(func.sum(UsageRecord.provider_cost_micros), 0),
+    ).where(UsageRecord.status == "success", UsageRecord.created_at >= cutoff).group_by(UsageRecord.model, UsageRecord.provider_channel_id)).all()
+    channel_ids = {channel_id for _, channel_id, *_ in rows if channel_id}
+    channel_names = {item.id: item.name for item in db.scalars(select(ModelChannel).where(ModelChannel.id.in_(channel_ids))).all()} if channel_ids else {}
+    items = []
+    revenue_total = cost_total = request_total = 0
+    for model, channel_id, request_count, revenue, cost in rows:
+        revenue = int(revenue or 0)
+        cost = int(cost or 0)
+        margin = revenue - cost
+        revenue_total += revenue
+        cost_total += cost
+        request_total += int(request_count or 0)
+        items.append({
+            "model": model,
+            "channel_id": channel_id,
+            "channel_name": channel_names.get(channel_id, "未记录渠道"),
+            "request_count": int(request_count or 0),
+            "revenue_micros": revenue,
+            "provider_cost_micros": cost,
+            "gross_margin_micros": margin,
+            "margin_rate": round(margin / revenue, 6) if revenue else None,
+        })
+    items.sort(key=lambda item: item["revenue_micros"], reverse=True)
+    imported = db.execute(select(
+        func.coalesce(func.sum(ProviderBillImport.billed_cost_micros), 0),
+        func.coalesce(func.sum(ProviderBillImport.recorded_cost_micros), 0),
+    ).where(ProviderBillImport.created_at >= cutoff)).one()
+    return {
+        "days": days,
+        "from": cutoff.isoformat(),
+        "request_count": request_total,
+        "revenue_micros": revenue_total,
+        "provider_cost_micros": cost_total,
+        "gross_margin_micros": revenue_total - cost_total,
+        "margin_rate": round((revenue_total - cost_total) / revenue_total, 6) if revenue_total else None,
+        "imported_billed_cost_micros": int(imported[0] or 0),
+        "imported_recorded_cost_micros": int(imported[1] or 0),
+        "data": items,
+    }
+
+
 @app.get("/admin/provider-bills/{import_id}", dependencies=[Depends(require_admin)])
 def provider_bill_detail(import_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
     record = db.get(ProviderBillImport, import_id)

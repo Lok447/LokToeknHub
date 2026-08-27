@@ -1067,9 +1067,12 @@ async function loadUsage() {
 }
 
 async function providerBillsDialog() {
-  const result = await api("/admin/provider-bills");
+  const [result, report] = await Promise.all([api("/admin/provider-bills"), api("/admin/provider-bills/report?days=30")]);
   const rows = result.data.map((item) => `<tr><td>${formatDate(item.created_at)}</td><td>${escapeHtml(item.provider)}</td><td>${escapeHtml(item.source_name)}</td><td>${item.matched_count} / ${item.mismatch_count} / ${item.unmatched_count}</td><td>${formatMoney(item.billed_cost_micros)}</td><td>${formatMoney(item.difference_micros)}</td></tr>`).join("") || emptyRow(6, "尚未导入供应商账单");
+  const marginRows = report.data.map((item) => `<tr><td>${escapeHtml(item.model)}</td><td>${escapeHtml(item.channel_name)}</td><td>${formatNumber(item.request_count)}</td><td>${formatMoney(item.revenue_micros)}</td><td>${formatMoney(item.provider_cost_micros)}</td><td>${formatMoney(item.gross_margin_micros)}${item.margin_rate == null ? "" : ` · ${(item.margin_rate * 100).toFixed(1)}%`}</td></tr>`).join("") || emptyRow(6, "最近 30 天暂无成功调用");
   openDialog("供应商成本账单核验", `<form id="provider-bill-form"><div class="dialog-body">
+    <div class="key-detail-grid"><div><span>近 30 天收入</span><strong>${formatMoney(report.revenue_micros)}</strong></div><div><span>供应商成本</span><strong>${formatMoney(report.provider_cost_micros)}</strong></div><div><span>毛利</span><strong>${formatMoney(report.gross_margin_micros)}</strong></div><div><span>毛利率</span><strong>${report.margin_rate == null ? "-" : `${(report.margin_rate * 100).toFixed(1)}%`}</strong></div></div>
+    <div class="table-wrap"><table><thead><tr><th>模型</th><th>渠道</th><th>请求</th><th>收入</th><th>供应商成本</th><th>毛利</th></tr></thead><tbody>${marginRows}</tbody></table></div>
     <p class="dialog-copy">导入归一化 JSON，按供应商请求 ID 逐笔核对 Token 与成本。重复文件不会再次入账。</p>
     <div class="field-row"><div class="field"><label for="bill-provider">供应商</label><input id="bill-provider" name="provider" required maxlength="64" placeholder="例如 DeepSeek"></div><div class="field"><label for="bill-source">账单文件名</label><input id="bill-source" name="source_name" required maxlength="255" placeholder="deepseek-2026-08.json"></div></div>
     <div class="field"><label for="bill-lines">归一化账单行 JSON</label><textarea id="bill-lines" name="lines" required rows="8" placeholder='[{"provider_request_id":"...","input_tokens":10,"output_tokens":5,"billed_cost_micros":30}]'></textarea><small class="field-hint">成本单位为微元，1 元 = 1,000,000 微元。</small></div>

@@ -2658,6 +2658,7 @@ async def test_provider_bill_import_reconciles_each_line_and_is_idempotent() -> 
         duplicate = await client.post("/admin/provider-bills/import", headers=headers, json=payload)
         listed = await client.get("/admin/provider-bills", headers=headers)
         detail = await client.get(f"/admin/provider-bills/{imported.json()['import']['id']}", headers=headers)
+        report = await client.get("/admin/provider-bills/report?days=30", headers=headers)
 
     assert imported.status_code == 200
     summary = imported.json()["import"]
@@ -2666,6 +2667,11 @@ async def test_provider_bill_import_reconciles_each_line_and_is_idempotent() -> 
     assert duplicate.status_code == 200 and duplicate.json()["duplicate"] is True
     assert len(listed.json()["data"]) == 1
     assert [item["status"] for item in detail.json()["lines"]] == ["matched", "mismatch", "unmatched"]
+    assert report.status_code == 200
+    assert report.json()["request_count"] >= 2
+    assert report.json()["revenue_micros"] >= 130
+    assert report.json()["provider_cost_micros"] >= 70
+    assert report.json()["gross_margin_micros"] >= 60
 
 @pytest.mark.asyncio
 async def test_streaming_failover_only_before_first_chunk(monkeypatch) -> None:
