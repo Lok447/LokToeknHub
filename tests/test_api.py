@@ -1308,6 +1308,43 @@ async def test_signed_payment_webhook_rejects_invalid_signature_and_is_idempoten
 
 
 @pytest.mark.asyncio
+async def test_payment_webhook_checks_provider_and_amount_for_real_orders() -> None:
+    from app.models import BillingAccount, PaymentOrder
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="real-webhook-user", name="Real Webhook User")
+        db.add(account)
+        db.flush()
+        order = PaymentOrder(
+            order_no="pay_real_webhook",
+            account_id=account.id,
+            amount_micros=3_000_000,
+            provider="wechat",
+        )
+        db.add(order)
+        db.commit()
+
+    body = json.dumps({
+        "event_id": "evt-real-001",
+        "order_no": "pay_real_webhook",
+        "provider_order_id": "wechat-order-002",
+        "provider": "wechat",
+        "amount_micros": 2_000_000,
+        "status": "paid",
+    }, separators=(",", ":")).encode()
+    signature = hmac.new(b"test-webhook", body, hashlib.sha256).hexdigest()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/payments/webhook",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Token-Signature": f"sha256={signature}"},
+        )
+    assert response.status_code == 422
+    assert "amount" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_trial_portal_and_streaming_user_flow() -> None:
     transport = httpx.ASGITransport(app=app)
     admin_headers = {"X-Admin-Token": "test-admin"}

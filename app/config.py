@@ -101,6 +101,8 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_AUTO_CREATE_SCHEMA must be false in production")
     if settings.mock_mode:
         errors.append("TOKEN_MOCK_MODE must be false in production")
+    if not settings.require_real_payment:
+        errors.append("TOKEN_REQUIRE_REAL_PAYMENT must be true in production")
     defaults = {
         "TOKEN_ADMIN_TOKEN": settings.admin_token == "change-me" or len(settings.admin_token) < 24,
         "TOKEN_PROVIDER_SECRETS_KEY": not settings.provider_secrets_key or len(settings.provider_secrets_key) < 32,

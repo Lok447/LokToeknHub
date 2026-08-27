@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from .config import Settings, get_settings
 
@@ -21,20 +22,23 @@ class PaymentProviderDescriptor:
 
 def payment_providers(settings: Settings | None = None) -> list[PaymentProviderDescriptor]:
     settings = settings or get_settings()
+    wechat_key_configured = bool(settings.wechat_private_key_path) and Path(settings.wechat_private_key_path).is_file()
+    alipay_private_key_configured = bool(settings.alipay_private_key_path) and Path(settings.alipay_private_key_path).is_file()
+    alipay_public_key_configured = bool(settings.alipay_public_key_path) and Path(settings.alipay_public_key_path).is_file()
     return [
         PaymentProviderDescriptor("manual", "人工确认", True, True, "admin"),
         PaymentProviderDescriptor(
             "wechat",
             "微信支付",
             False,
-            all((settings.wechat_merchant_id, settings.wechat_app_id, settings.wechat_certificate_serial, settings.wechat_private_key_path)),
+            all((settings.wechat_merchant_id, settings.wechat_app_id, settings.wechat_certificate_serial)) and wechat_key_configured,
             "native",
         ),
         PaymentProviderDescriptor(
             "alipay",
             "支付宝",
             False,
-            all((settings.alipay_app_id, settings.alipay_private_key_path, settings.alipay_public_key_path)),
+            bool(settings.alipay_app_id) and alipay_private_key_configured and alipay_public_key_configured,
             "page",
         ),
     ]

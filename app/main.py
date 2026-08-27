@@ -1042,6 +1042,13 @@ async def payment_webhook(
     order = db.scalar(select(PaymentOrder).where(PaymentOrder.order_no == payload.order_no))
     if not order:
         raise HTTPException(status_code=404, detail="payment order not found")
+    if order.provider != "manual":
+        if payload.provider != order.provider:
+            raise HTTPException(status_code=422, detail="payment provider does not match order")
+        if payload.amount_micros != order.amount_micros:
+            raise HTTPException(status_code=422, detail="payment amount does not match order")
+    elif payload.amount_micros is not None and payload.amount_micros != order.amount_micros:
+        raise HTTPException(status_code=422, detail="payment amount does not match order")
     try:
         order = mark_order_paid(
             db, order, payload.provider_order_id,

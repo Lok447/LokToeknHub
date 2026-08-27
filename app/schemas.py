@@ -191,6 +191,8 @@ class PaymentWebhook(BaseModel):
     event_id: str = Field(min_length=1, max_length=120)
     order_no: str = Field(min_length=1, max_length=64)
     provider_order_id: str = Field(min_length=1, max_length=120)
+    provider: str | None = Field(default=None, min_length=1, max_length=32)
+    amount_micros: int | None = Field(default=None, gt=0)
     status: Literal["paid"]
 
 
