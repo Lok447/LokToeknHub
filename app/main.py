@@ -373,6 +373,9 @@ def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
         else:
             blocked += 1
     alerts = build_operational_alerts(db)
+    payment_status = [item.to_dict() for item in payment_providers(settings)]
+    real_payment_ready = any(item["id"] != "manual" and item["available"] for item in payment_status)
+    payment_ready = real_payment_ready or not (settings.environment.lower() == "production" and settings.require_real_payment)
     gateway_ready = (published > 0 and len(published_provider_hosts) >= settings.min_real_provider_count) if not settings.mock_mode else mock_published > 0
     release_blocking_alert_count = sum(1 for alert in alerts if alert["release_blocking"])
     return {
@@ -388,7 +391,10 @@ def admin_runtime(db: Session = Depends(get_db)) -> dict[str, object]:
         "published_provider_count": len(published_provider_hosts),
         "minimum_real_provider_count": settings.min_real_provider_count,
         "gateway_ready": gateway_ready,
-        "release_ready": gateway_ready and release_blocking_alert_count == 0,
+        "payment_providers": payment_status,
+        "real_payment_ready": real_payment_ready,
+        "payment_gate_enabled": settings.require_real_payment,
+        "release_ready": gateway_ready and payment_ready and release_blocking_alert_count == 0,
         "operational_alert_count": len(alerts),
         "release_blocking_alert_count": release_blocking_alert_count,
     }

@@ -224,6 +224,8 @@ Invoke-RestMethod "http://127.0.0.1:8000/admin/accounts/$($account.id)/balance" 
 
 在现有 LokSystem 服务器上的同机部署步骤见 [docs/DEPLOY_LOKSYSTEM_HOST.md](docs/DEPLOY_LOKSYSTEM_HOST.md)，预发布执行步骤与发布门槛见 [docs/UAT_PREPROD.md](docs/UAT_PREPROD.md)。
 
+生产发布闭环（环境门禁、备份恢复、真实供应商与支付验收）见 [docs/PRODUCTION_RELEASE_RUNBOOK.md](docs/PRODUCTION_RELEASE_RUNBOOK.md)。
+
 ## LokSystem 统一账号
 
 本地桌面联调默认启用 LokSystem 一键注册 / 登录。LokToken 只会回连 `TOKEN_LOKSYSTEM_SSO_BASE_URL` 指向的本机回环地址，向已登录的 LokSystem 桌面端申请 60 秒、单次可用的票据；票据在 LokToken 服务端交换，不会出现在浏览器地址、日志、密码字段或 API Key 中。首次进入自动创建 LokToken 账户，之后按 LokSystem 用户 ID 自动识别并登录。此方式仅适合本机桌面联调；跨设备或生产环境应使用下方的 OIDC 集成。

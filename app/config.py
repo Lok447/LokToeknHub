@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     channel_failure_threshold: int = 3
     channel_circuit_cooldown_seconds: int = 60
     payment_webhook_secret: str = "change-webhook-secret"
+    require_real_payment: bool = True
     trial_signing_secret: str = "change-trial-secret"
     trial_token_ttl_seconds: int = 604800
     public_base_url: str = "http://127.0.0.1:8000"
