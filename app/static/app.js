@@ -500,11 +500,13 @@ async function loadKeys() {
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
       <td class="mono">${escapeHtml(item.key_prefix)}...</td>
       <td>${escapeHtml(item.account_name)}</td>
-      <td>${activeBadge(item.active)}</td>
+      <td>${item.revoked_at ? '<span class="badge error">已撤销</span>' : activeBadge(item.active)}</td>
+      <td>${item.expires_at ? formatDate(item.expires_at) : "长期有效"}</td>
+      <td>${item.spending_limit_micros == null ? "不限" : `${formatMoney(item.spent_micros)} / ${formatMoney(item.spending_limit_micros)}`}</td>
       <td>${formatDate(item.created_at)}</td>
-      <td class="align-right">${canOperate() ? `<button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button>` : '<span class="secondary">只读</span>'}</td>
+      <td class="align-right">${canOperate() && !item.revoked_at ? `<button class="table-button" data-rotate-admin-key="${item.id}">轮换</button><button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button><button class="table-button danger" data-revoke-admin-key="${item.id}">撤销</button>` : '<span class="secondary">只读</span>'}</td>
     </tr>
-  `).join("") : emptyRow(6);
+  `).join("") : emptyRow(8);
 }
 
 async function loadModels() {
@@ -713,7 +715,7 @@ function providerConnectionDialog(presetId) {
   const credentialPayload = (form) => {
     const source = String(form.get("credential_source") || "environment");
     const rawKey = source === "api_key" ? String(form.get("provider_api_key") || "").trim() : "";
-    return { provider_base_url: String(form.get("provider_base_url") || "").trim(), provider_api_key_env: source === "environment" ? String(form.get("provider_api_key_env") || "").trim() || null : null, provider_api_key: rawKey || null, clear_provider_api_key: source === "environment" && hasStoredCredential };
+    return { provider_base_url: String(form.get("provider_base_url") || "").trim(), credential_source: source === "api_key" ? "console" : "environment", provider_api_key_env: source === "environment" ? String(form.get("provider_api_key_env") || "").trim() || null : null, provider_api_key: rawKey || null, clear_provider_api_key: source === "environment" && hasStoredCredential };
   };
   document.getElementById("provider-connection-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1021,6 +1023,8 @@ async function keyDialog() {
       <div class="dialog-body">
         <div class="field"><label for="key-name">Key 名称</label><input id="key-name" name="name" required maxlength="120"></div>
         <div class="field"><label for="key-account">所属账户</label><select id="key-account" name="account_id" required>${state.accounts.filter((item) => item.active).map((item) => `<option value="${item.id}">${escapeHtml(item.name)} · ${escapeHtml(item.external_user_id)}</option>`).join("")}</select></div>
+        <div class="field-row"><div class="field"><label for="key-expires">有效期（天）</label><input id="key-expires" name="expires_in_days" type="number" min="1" max="3650" placeholder="长期有效"></div><div class="field"><label for="key-limit">消费额度（元）</label><input id="key-limit" name="spending_limit" type="number" min="0.01" step="0.01" placeholder="不限"></div></div>
+        <div class="field-row"><div class="field"><label for="key-rate">限流次数</label><input id="key-rate" name="rate_limit_requests" type="number" min="1" max="100000" placeholder="使用平台默认"></div><div class="field"><label for="key-rate-window">限流窗口（秒）</label><input id="key-rate-window" name="rate_limit_window_seconds" type="number" min="1" max="86400" placeholder="使用平台默认"></div></div>
       </div>
       <div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">生成 Key</button></div>
     </form>`);
@@ -1028,6 +1032,10 @@ async function keyDialog() {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
     data.account_id = Number(data.account_id);
+    if (data.expires_in_days) data.expires_in_days = Number(data.expires_in_days); else delete data.expires_in_days;
+    if (data.spending_limit) { data.spending_limit_micros = Math.round(Number(data.spending_limit) * 1000000); } delete data.spending_limit;
+    if (data.rate_limit_requests) data.rate_limit_requests = Number(data.rate_limit_requests); else delete data.rate_limit_requests;
+    if (data.rate_limit_window_seconds) data.rate_limit_window_seconds = Number(data.rate_limit_window_seconds); else delete data.rate_limit_window_seconds;
     try {
       const result = await api("/admin/api-keys", { method: "POST", body: JSON.stringify(data) });
       openDialog("API Key 已生成", `<div class="dialog-body"><div class="field"><label>密钥</label><div class="secret-box mono" id="new-key-secret">${escapeHtml(result.key)}</div></div><div class="secret-actions"><button class="secondary-button" id="copy-key"><i data-lucide="copy"></i><span>复制</span></button></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>完成</button></div>`);
@@ -1642,6 +1650,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "delete-account") deleteAccount(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "trial-link") trialLinkDialog(target.dataset.id, target.dataset.name);
     if (target.dataset.action === "topup") topupDialog(target.dataset.id, target.dataset.name);
+    if (target.dataset.rotateAdminKey) {
+      if (!window.confirm("轮换后旧 Key 将立即失效。是否继续？")) return;
+      api(`/admin/api-keys/${target.dataset.rotateAdminKey}/rotate`, { method: "POST", body: "{}" }).then(async (result) => {
+        openDialog("API Key 已轮换", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>新 Key 只展示一次，旧 Key 已失效。</span></div><div class="secret-box mono">${escapeHtml(result.key)}</div><div class="secret-actions"><button class="secondary-button" id="copy-key">复制</button></div></div><div class="dialog-actions"><button class="primary-button" data-close>完成</button></div>`);
+        document.getElementById("copy-key").addEventListener("click", () => navigator.clipboard.writeText(result.key).then(() => toast("密钥已复制")));
+        await loadKeys();
+      }).catch((error) => toast(error.message, true));
+    }
+    if (target.dataset.revokeAdminKey) {
+      const reason = window.prompt("请输入撤销原因（可选）：");
+      if (reason === null || !window.confirm("撤销后不可重新启用。是否继续？")) return;
+      api(`/admin/api-keys/${target.dataset.revokeAdminKey}`, { method: "PATCH", body: JSON.stringify({ active: false, revoke: true, revoke_reason: reason }) }).then(() => loadKeys()).then(() => toast("Key 已撤销")).catch((error) => toast(error.message, true));
+    }
     if (target.dataset.toggle) toggleEntity(target.dataset.toggle, target.dataset.id, target.dataset.active === "true");
   });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeAdminAccountMenu(); });

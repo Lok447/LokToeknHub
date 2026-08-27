@@ -144,6 +144,7 @@ function gatewayCapabilitySummary(item) {
 }
 
 function keyStatusBadge(item) {
+  if (item.revoked_at) return '<span class="badge error">已撤销</span>';
   const expiry = keyExpiry(item);
   if (expiry && expiry <= new Date()) return '<span class="badge warning">已过期</span>';
   return activeBadge(item.active);
@@ -1358,6 +1359,7 @@ function keyDialog(options = {}) {
     if (data.expires_at) data.expires_at = new Date(`${data.expires_at}T23:59:59`).toISOString(); else delete data.expires_at;
     if (data.spending_limit) data.spending_limit_micros = Math.round(Number(data.spending_limit) * 1_000_000);
     delete data.spending_limit;
+    data.idempotency_key = `portal-key-${crypto.randomUUID()}`;
     try {
       const result = await portalApi("/portal/api-keys", { method: "POST", body: JSON.stringify(data) });
       openPortalDialog("API Key 创建成功", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>完整密钥只展示这一次。关闭窗口后将无法再次查看。</span></div><div class="field"><label>完整 API Key</label><div class="secret-box mono" id="portal-key-secret">${escapeHtml(result.key)}</div></div><div class="secret-actions"><button class="secondary-button" id="portal-copy-key"><i data-lucide="copy"></i><span>复制完整 Key</span></button></div><p class="dialog-copy">复制后可直接回到 LokSystem 模型管理。系统会预选 LokToken，粘贴密钥后自动读取可用模型。</p></div><div class="dialog-actions"><button class="secondary-button" type="button" data-close>稍后配置</button><button class="primary-button" type="button" id="portal-configure-loksystem"><i data-lucide="settings-2"></i><span>复制并前往 LokSystem</span></button></div>`);

@@ -144,7 +144,7 @@ def reserve_balance(
     if amount_micros <= 0:
         return
     locked_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key.id).with_for_update())
-    if not locked_key or not locked_key.active:
+    if not locked_key or not locked_key.active or locked_key.revoked_at:
         raise ValueError("api key is inactive")
     if is_expired(locked_key.expires_at):
         raise ValueError("api key has expired")
@@ -323,12 +323,16 @@ def mark_channel_catalogue_state(db: Session, channel: ModelChannel, status: str
 
 def _provider_auth(channel: ModelChannel) -> tuple[str, dict[str, str]]:
     settings = get_settings()
-    try:
-        api_key = decrypt_provider_secret(channel.encrypted_api_key) if channel.encrypted_api_key else None
-    except ProviderSecretError:
-        api_key = None
-    if not api_key:
+    api_key = None
+    if channel.credential_source == "console" and channel.encrypted_api_key:
+        try:
+            api_key = decrypt_provider_secret(channel.encrypted_api_key)
+        except ProviderSecretError:
+            api_key = None
+    elif channel.credential_source == "environment":
         api_key = os.getenv(channel.provider_api_key_env, "") if channel.provider_api_key_env else settings.default_provider_api_key
+    else:
+        api_key = settings.default_provider_api_key
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

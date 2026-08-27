@@ -86,7 +86,7 @@ $trial.portal_url
 
 用户中心提供个人余额、接入地址、API Key、模型价格、用量、额度管理、充值订单和兑换福利。概览页支持按 7/30/90 天、模型和 API Key 查看费用、Token、请求趋势、模型排行和近一年活动热力图。所有 `/portal/*` 数据均按签名令牌绑定的账户隔离。
 
-创建 API Key 时可以设置有效天数和累计消费额度。平台会在请求预扣阶段同时检查账户余额和 Key 剩余额度，结算时按真实消费回退差额；用户中心会显示已用额度、到期时间和最近使用时间。
+创建 API Key 时可以设置有效天数、累计消费额度和单 Key 限流。平台会在请求预扣阶段同时检查账户余额和 Key 剩余额度，结算时按真实消费回退差额；用户中心会显示已用额度、到期时间和最近使用时间。Key 可停用、轮换或永久撤销：轮换会继承累计已用额度和限流策略，旧 Key 立即失效；撤销后的 Key 不能重新启用。创建操作支持 `idempotency_key`，避免网络重试重复签发凭证。
 
 个人用量支持按模型、API Key 和时间范围筛选，并可导出最多 5000 条账户隔离的 CSV 记录。导出内容包含请求 ID、Trace ID、Token、耗时、费用、状态和错误信息。
 
@@ -204,7 +204,7 @@ docker compose --env-file .env.docker run --rm token alembic upgrade head
 
 首次部署仅使用一次 `TOKEN_ADMIN_TOKEN` 创建超级管理员；创建成功后该密钥不能再访问管理接口。后续管理接口使用管理员账号登录后取得的 Bearer 会话令牌。管理员角色包括：`superadmin`（全量）、`operator`（运营）和 `auditor`（只读）。
 
-模型供应商密钥可以通过管理控制台录入，服务端使用 `TOKEN_PROVIDER_SECRETS_KEY` 加密保存，只返回配置状态，不会回显明文；也可以继续使用部署环境变量 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY` 和 `ARK_API_KEY`。生产环境必须设置独立且至少 32 位的 `TOKEN_PROVIDER_SECRETS_KEY`，不要把它提交到 Git。预置候选仍需启用渠道、执行真实健康检测、确认平台价格并通过预检，才能正式上架。
+模型供应商密钥可以通过管理控制台录入，服务端使用 `TOKEN_PROVIDER_SECRETS_KEY` 加密保存，只返回配置状态，不会回显明文；也可以继续使用部署环境变量 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`ZHIPU_API_KEY`、`MOONSHOT_API_KEY`、`MINIMAX_API_KEY` 和 `ARK_API_KEY`。连接会显式记录使用的是控制台托管密钥还是环境变量，切换到环境变量时不会继续使用旧的托管密钥。生产环境只接受 HTTPS 上游地址，并拒绝本机和私网 IP。生产环境必须设置独立且至少 32 位的 `TOKEN_PROVIDER_SECRETS_KEY`，不要把它提交到 Git。预置候选仍需启用渠道、执行真实健康检测、确认平台价格并通过预检，才能正式上架。
 
 ```powershell
 $bootstrap = Invoke-RestMethod http://127.0.0.1:8000/admin/auth/bootstrap -Method Post -Headers @{ "X-Admin-Token" = "change-me" } -ContentType "application/json" -Body '{"login_id":"admin","password":"replace-with-a-strong-password"}'

@@ -30,6 +30,40 @@ def setup_function() -> None:
     rate_limiter.reset()
 
 
+@pytest.mark.asyncio
+async def test_key_rotation_preserves_budget_and_revocation_is_permanent() -> None:
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=admin_headers, json={"external_user_id": "key-governance", "name": "Key Governance"})
+        created = await client.post("/admin/api-keys", headers=admin_headers, json={"account_id": account.json()["id"], "name": "budgeted", "spending_limit_micros": 1000, "idempotency_key": "create-key-governance"})
+        assert created.status_code == 200
+        first_id = created.json()["id"]
+        with SessionLocal() as db:
+            db.get(ApiKey, first_id).spent_micros = 600
+            db.commit()
+        rotated = await client.post(f"/admin/api-keys/{first_id}/rotate", headers=admin_headers)
+        assert rotated.status_code == 200
+        with SessionLocal() as db:
+            replacement = db.get(ApiKey, rotated.json()["id"])
+            assert replacement.spending_limit_micros == 1000
+            assert replacement.spent_micros == 600
+        revoked = await client.patch(f"/admin/api-keys/{rotated.json()['id']}", headers=admin_headers, json={"active": False, "revoke": True, "revoke_reason": "compromised"})
+        assert revoked.status_code == 200
+        assert (await client.patch(f"/admin/api-keys/{rotated.json()['id']}", headers=admin_headers, json={"active": True})).status_code == 409
+        duplicate = await client.post("/admin/api-keys", headers=admin_headers, json={"account_id": account.json()["id"], "name": "duplicate", "idempotency_key": "create-key-governance"})
+        assert duplicate.status_code == 409
+
+
+def test_production_provider_url_rejects_insecure_and_private_targets(monkeypatch) -> None:
+    from app.main import validate_provider_url
+
+    monkeypatch.setattr("app.main.get_settings", lambda: Settings(environment="production"))
+    with pytest.raises(Exception):
+        validate_provider_url("http://127.0.0.1:8000/v1")
+    assert validate_provider_url("https://api.example.com/v1") == "https://api.example.com/v1"
+
+
 def test_mock_mode_seeds_builtin_models() -> None:
     from app.db import init_db
     from app.models import ModelConfig

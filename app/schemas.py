@@ -9,6 +9,9 @@ class ApiKeyCreate(BaseModel):
     account_id: int | None = Field(default=None, gt=0)
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
     spending_limit_micros: int | None = Field(default=None, gt=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+    rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
+    rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
 
 
 class PortalApiKeyCreate(BaseModel):
@@ -17,6 +20,9 @@ class PortalApiKeyCreate(BaseModel):
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
     expires_at: datetime | None = None
     spending_limit_micros: int | None = Field(default=None, gt=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+    rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
+    rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
 
 
 class PortalModelTestRequest(BaseModel):
@@ -105,6 +111,8 @@ class ProjectCreate(BaseModel):
 
 class ActiveUpdate(BaseModel):
     active: bool
+    revoke: bool = False
+    revoke_reason: str | None = Field(default=None, max_length=255)
 
 
 class BalanceAdjust(BaseModel):
@@ -181,6 +189,7 @@ class ProviderConnectionConfigure(BaseModel):
     provider_base_url: str | None = Field(default=None, min_length=1, max_length=500)
     provider_api_key_env: str | None = Field(default=None, max_length=120, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
     provider_api_key: str | None = Field(default=None, min_length=1, max_length=4096)
+    credential_source: Literal["environment", "console"] | None = None
     clear_provider_api_key: bool = False
     default_input_price_micros_per_1k: int = Field(default=0, ge=0)
     default_output_price_micros_per_1k: int = Field(default=0, ge=0)

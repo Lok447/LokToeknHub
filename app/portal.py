@@ -639,6 +639,10 @@ def list_api_keys(account: BillingAccount = Depends(portal_account), db: Session
         "name": item.name,
         "key_prefix": item.key_prefix,
         "active": item.active,
+        "revoked_at": item.revoked_at.isoformat() if item.revoked_at else None,
+        "revoke_reason": item.revoke_reason,
+        "rate_limit_requests": item.rate_limit_requests,
+        "rate_limit_window_seconds": item.rate_limit_window_seconds,
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
         "spending_limit_micros": item.spending_limit_micros,
         "spent_micros": item.spent_micros,
@@ -653,8 +657,11 @@ def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_acc
     api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
-    if not api_key.active:
+    if not api_key.active or api_key.revoked_at:
         raise HTTPException(status_code=409, detail="only an active api key can be rotated")
+    if api_key.project_id:
+        _, _, role = project_access(db, account, api_key.project_id)
+        require_workspace_manager(role)
     raw_key = create_key()
     replacement = ApiKey(
         account_id=account.id,
@@ -665,6 +672,9 @@ def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_acc
         expires_at=api_key.expires_at,
         trial_expires_at=api_key.trial_expires_at,
         spending_limit_micros=api_key.spending_limit_micros,
+        spent_micros=api_key.spent_micros,
+        rate_limit_requests=api_key.rate_limit_requests,
+        rate_limit_window_seconds=api_key.rate_limit_window_seconds,
         rotated_from_key_id=api_key.id,
     )
     api_key.active = False
@@ -752,6 +762,10 @@ def logout_portal_sessions(account: BillingAccount = Depends(portal_account), db
 def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depends(portal_account), context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
     settings = get_settings()
     rate_limiter.check("portal-key-create", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
+    if payload.idempotency_key:
+        existing = db.scalar(select(ApiKey).where(ApiKey.idempotency_key == payload.idempotency_key, ApiKey.account_id == account.id))
+        if existing:
+            raise HTTPException(status_code=409, detail="idempotency key already used")
     exact_expiry = payload.expires_at
     if exact_expiry and exact_expiry.tzinfo is None:
         exact_expiry = exact_expiry.replace(tzinfo=timezone.utc)
@@ -762,7 +776,8 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
     if trial_expires_at and (exact_expiry is None or exact_expiry > trial_expires_at):
         exact_expiry = trial_expires_at
     if payload.project_id:
-        project, _, _ = project_access(db, account, payload.project_id)
+        project, _, role = project_access(db, account, payload.project_id)
+        require_workspace_manager(role)
     else:
         project = ensure_default_project(db, ensure_personal_workspace(db, account))
     record = ApiKey(
@@ -774,10 +789,14 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
         expires_at=exact_expiry or (utcnow() + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None),
         trial_expires_at=trial_expires_at,
         spending_limit_micros=payload.spending_limit_micros,
+        idempotency_key=payload.idempotency_key,
+        rate_limit_requests=payload.rate_limit_requests,
+        rate_limit_window_seconds=payload.rate_limit_window_seconds,
     )
     db.add(record)
     db.flush()
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.created", target_type="api_key", target_id=record.id, details={"name": record.name})
+    record_security_notification(db, account, "api_key_created", {"api_key_id": record.id, "name": record.name})
     db.commit()
     db.refresh(record)
     return {"id": record.id, "project_id": record.project_id, "name": record.name, "key": raw_key, "key_prefix": record.key_prefix}
@@ -788,8 +807,21 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccou
     api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
-    api_key.active = payload.active
-    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="api_key.status_updated", target_type="api_key", target_id=api_key.id, details={"active": api_key.active})
+    if api_key.project_id:
+        _, _, role = project_access(db, account, api_key.project_id)
+        require_workspace_manager(role)
+    if api_key.revoked_at and payload.active:
+        raise HTTPException(status_code=409, detail="revoked api key cannot be re-enabled")
+    if payload.revoke:
+        api_key.active = False
+        api_key.revoked_at = utcnow()
+        api_key.revoke_reason = payload.revoke_reason or "用户撤销"
+        event = "api_key.revoked"
+    else:
+        api_key.active = payload.active
+        event = "api_key.status_updated"
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action=event, target_type="api_key", target_id=api_key.id, details={"active": api_key.active, "revoked": bool(api_key.revoked_at), "reason": api_key.revoke_reason})
+    record_security_notification(db, account, "api_key_revoked" if payload.revoke else "api_key_status_updated", {"api_key_id": api_key.id, "active": api_key.active})
     db.commit()
     return {"id": api_key.id, "active": api_key.active}
 
@@ -804,7 +836,7 @@ async def test_model(
     settings = get_settings()
     rate_limiter.check("portal-model-test", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
     api_key = db.scalar(select(ApiKey).where(ApiKey.id == payload.api_key_id, ApiKey.account_id == account.id))
-    if not api_key or not api_key.active:
+    if not api_key or not api_key.active or api_key.revoked_at:
         raise HTTPException(status_code=422, detail="请选择有效的 API Key")
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
     if not model:

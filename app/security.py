@@ -242,6 +242,7 @@ def require_api_key(
     record = db.scalar(select(ApiKey).where(
         ApiKey.key_hash == hash_key(raw_key),
         ApiKey.active.is_(True),
+        ApiKey.revoked_at.is_(None),
         or_(ApiKey.expires_at.is_(None), ApiKey.expires_at > utcnow()),
         or_(ApiKey.trial_expires_at.is_(None), ApiKey.trial_expires_at > utcnow()),
     ))

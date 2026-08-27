@@ -6,6 +6,8 @@ import os
 import re
 import time
 import uuid
+import ipaddress
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
 from pathlib import Path
@@ -1087,6 +1089,10 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
             "name": api_key.name,
             "key_prefix": api_key.key_prefix,
             "active": api_key.active,
+            "revoked_at": api_key.revoked_at.isoformat() if api_key.revoked_at else None,
+            "revoke_reason": api_key.revoke_reason,
+            "rate_limit_requests": api_key.rate_limit_requests,
+            "rate_limit_window_seconds": api_key.rate_limit_window_seconds,
             "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
             "trial_expires_at": api_key.trial_expires_at.isoformat() if api_key.trial_expires_at else None,
             "spending_limit_micros": api_key.spending_limit_micros,
@@ -1099,18 +1105,31 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
 
 
 @app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_operator)])
-def update_api_key(api_key_id: int, payload: ActiveUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+def update_api_key(api_key_id: int, payload: ActiveUpdate, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
     api_key = db.get(ApiKey, api_key_id)
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
-    api_key.active = payload.active
-    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="api_key.status_updated", target_type="api_key", target_id=api_key.id, details={"active": api_key.active})
+    if api_key.revoked_at and payload.active:
+        raise HTTPException(status_code=409, detail="revoked api key cannot be re-enabled")
+    if payload.revoke:
+        api_key.active = False
+        api_key.revoked_at = utcnow()
+        api_key.revoke_reason = payload.revoke_reason or "管理员撤销"
+        action = "api_key.revoked"
+    else:
+        api_key.active = payload.active
+        action = "api_key.status_updated"
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action=action, target_type="api_key", target_id=api_key.id, details={"active": api_key.active, "revoked": bool(api_key.revoked_at), "reason": api_key.revoke_reason})
     db.commit()
     return {"id": api_key.id, "active": api_key.active}
 
 
 @app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_operator)])
-def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiKeyResponse:
+def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> ApiKeyResponse:
+    if payload.idempotency_key:
+        existing = db.scalar(select(ApiKey).where(ApiKey.idempotency_key == payload.idempotency_key))
+        if existing:
+            raise HTTPException(status_code=409, detail="idempotency key already used")
     account = db.get(BillingAccount, payload.account_id) if payload.account_id else None
     if payload.account_id and (not account or not account.active):
         raise HTTPException(status_code=404, detail="active account not found")
@@ -1128,13 +1147,46 @@ def create_api_key(payload: ApiKeyCreate, db: Session = Depends(get_db)) -> ApiK
         key_hash=hash_key(raw_key),
         expires_at=utcnow() + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None,
         spending_limit_micros=payload.spending_limit_micros,
+        idempotency_key=payload.idempotency_key,
+        rate_limit_requests=payload.rate_limit_requests,
+        rate_limit_window_seconds=payload.rate_limit_window_seconds,
     )
     db.add(record)
     db.flush()
-    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="api_key.created", target_type="api_key", target_id=record.id, details={"account_id": record.account_id, "name": record.name})
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="api_key.created", target_type="api_key", target_id=record.id, details={"account_id": record.account_id, "name": record.name})
     db.commit()
     db.refresh(record)
     return ApiKeyResponse(id=record.id, account_id=record.account_id, name=record.name, key=raw_key, key_prefix=record.key_prefix)
+
+
+@app.post("/admin/api-keys/{api_key_id}/rotate", dependencies=[Depends(require_operator)])
+def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = db.get(ApiKey, api_key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    if not api_key.active or api_key.revoked_at:
+        raise HTTPException(status_code=409, detail="only an active api key can be rotated")
+    raw_key = create_key()
+    replacement = ApiKey(
+        account_id=api_key.account_id,
+        project_id=api_key.project_id,
+        name=f"{api_key.name} (rotated)",
+        key_prefix=raw_key[:12],
+        key_hash=hash_key(raw_key),
+        expires_at=api_key.expires_at,
+        trial_expires_at=api_key.trial_expires_at,
+        spending_limit_micros=api_key.spending_limit_micros,
+        spent_micros=api_key.spent_micros,
+        rate_limit_requests=api_key.rate_limit_requests,
+        rate_limit_window_seconds=api_key.rate_limit_window_seconds,
+        rotated_from_key_id=api_key.id,
+    )
+    api_key.active = False
+    db.add(replacement)
+    db.flush()
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="api_key.rotated", target_type="api_key", target_id=replacement.id, details={"replaced_api_key_id": api_key.id})
+    db.commit()
+    return {"id": replacement.id, "name": replacement.name, "key": raw_key, "key_prefix": replacement.key_prefix, "replaced_api_key_id": api_key.id}
 
 
 @app.post("/admin/accounts", dependencies=[Depends(require_operator)])
@@ -1255,7 +1307,7 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
         raise HTTPException(status_code=409, detail="model already exists")
     connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id)) if preset else None
     provider_name = str(preset.models[0].catalog_metadata.get("provider") or preset.name) if preset and preset.models else None
-    provider_base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url if preset else settings.default_provider_base_url)
+    provider_base_url = validate_provider_url(payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url if preset else settings.default_provider_base_url))
     provider_api_key_env = payload.provider_api_key_env or (connection.provider_api_key_env if connection else preset.api_key_env if preset else None)
     catalog_metadata = dict(preset_model.catalog_metadata) if preset_model else {
         "display_name": payload.public_name,
@@ -1295,8 +1347,11 @@ def create_model(payload: ModelCreate, db: Session = Depends(get_db)) -> dict[st
             channel.encrypted_api_key = encrypt_provider_secret(payload.provider_api_key)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-    elif connection and connection.encrypted_api_key:
-        channel.encrypted_api_key = connection.encrypted_api_key
+        channel.credential_source = "console"
+    elif connection:
+        channel.credential_source = connection.credential_source
+        if connection.credential_source == "console":
+            channel.encrypted_api_key = connection.encrypted_api_key
     db.add(channel)
     db.commit()
     db.refresh(record)
@@ -1333,7 +1388,7 @@ def provider_connection_data(db: Session, connection: ProviderConnection | None,
         "provider_base_url": connection.provider_base_url if connection else preset.base_url,
         "provider_api_key_env": env_name,
         "credentials_configured": stored_secret or env_configured,
-        "credential_source": "stored" if stored_secret else "environment" if env_configured else "none",
+        "credential_source": connection.credential_source if connection else ("environment" if env_configured else "none"),
         "active": connection.active if connection else False,
         "status": connection.status if connection else "unconfigured",
         "discovered_model_count": connection.discovered_model_count if connection else 0,
@@ -1355,6 +1410,23 @@ def provider_connection_data(db: Session, connection: ProviderConnection | None,
         "model_count": len(preset.models),
         "note": preset.note,
     }
+
+
+def validate_provider_url(value: str) -> str:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="供应商地址必须是完整 URL")
+    if get_settings().environment.lower() != "production":
+        return value.rstrip("/")
+    if parsed.scheme != "https":
+        raise HTTPException(status_code=422, detail="生产环境的供应商地址必须使用 HTTPS")
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+        if address.is_private or address.is_loopback or address.is_link_local:
+            raise HTTPException(status_code=422, detail="供应商地址不得指向内网或本机地址")
+    except ValueError:
+        pass
+    return value.rstrip("/")
 
 
 def mark_provider_connection_misconfigured(db: Session, connection: ProviderConnection | None, detail: str) -> None:
@@ -1387,7 +1459,7 @@ async def test_provider_connection(preset_id: str, payload: ProviderConnectionCo
     connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset_id))
     if not preset:
         raise HTTPException(status_code=404, detail="provider preset not found")
-    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    base_url = validate_provider_url(payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url))
     env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
     raw_secret = payload.provider_api_key
     if not raw_secret and connection and connection.encrypted_api_key:
@@ -1481,10 +1553,14 @@ async def configure_provider_connection(
     if invalid:
         raise HTTPException(status_code=422, detail=f"model is not included in provider preset: {invalid[0]}")
     connection = db.scalar(select(ProviderConnection).where(ProviderConnection.preset_id == preset.id))
-    base_url = payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url)
+    base_url = validate_provider_url(payload.provider_base_url or (connection.provider_base_url if connection else preset.base_url))
     env_name = payload.provider_api_key_env if "provider_api_key_env" in payload.model_fields_set else (connection.provider_api_key_env if connection else preset.api_key_env)
-    encrypted_secret = None if payload.clear_provider_api_key else (connection.encrypted_api_key if connection else None)
-    if not encrypted_secret and not payload.clear_provider_api_key:
+    credential_source = payload.credential_source or (connection.credential_source if connection else ("console" if payload.provider_api_key else "environment"))
+    if credential_source == "environment":
+        encrypted_secret = None
+    else:
+        encrypted_secret = None if payload.clear_provider_api_key else (connection.encrypted_api_key if connection else None)
+    if credential_source == "console" and not encrypted_secret and not payload.clear_provider_api_key:
         # Migrate the first existing model-scoped secret into the provider-level
         # connection so current single-model deployments upgrade seamlessly.
         legacy_channel = db.scalar(select(ModelChannel).where(
@@ -1498,13 +1574,13 @@ async def configure_provider_connection(
             encrypted_secret = encrypt_provider_secret(payload.provider_api_key)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-    raw_secret = payload.provider_api_key
-    if not raw_secret and encrypted_secret:
+    raw_secret = payload.provider_api_key if credential_source == "console" else None
+    if not raw_secret and credential_source == "console" and encrypted_secret:
         try:
             raw_secret = decrypt_provider_secret(encrypted_secret)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-    if not raw_secret and not (env_name and os.getenv(env_name, "").strip()):
+    if not raw_secret and not (credential_source == "environment" and env_name and os.getenv(env_name, "").strip()):
         raise HTTPException(status_code=422, detail="请填写供应商 API Key，或先在服务环境中配置对应密钥变量")
     try:
         discovered_ids = set(await discover_upstream_models(base_url, env_name, raw_secret))
@@ -1536,6 +1612,7 @@ async def configure_provider_connection(
     connection.name = preset.name
     connection.provider_base_url = base_url
     connection.provider_api_key_env = env_name
+    connection.credential_source = credential_source
     connection.encrypted_api_key = encrypted_secret
     if "default_input_price_micros_per_1k" in payload.model_fields_set:
         connection.default_input_price_micros_per_1k = default_input_price
@@ -1615,6 +1692,7 @@ async def configure_provider_connection(
         channel.upstream_model = preset_model.model_id
         channel.provider_api_key_env = env_name
         channel.encrypted_api_key = encrypted_secret
+        channel.credential_source = connection.credential_source
         if not channel.provider_input_cost_micros_per_1k:
             channel.provider_input_cost_micros_per_1k = preset_model.platform_input_price_micros_per_1k
         if not channel.provider_output_cost_micros_per_1k:
@@ -1726,7 +1804,7 @@ async def list_upstream_models(
     provider_api_key_env: str | None = None,
 ) -> dict[str, object]:
     try:
-        model_ids = await discover_upstream_models(provider_base_url, provider_api_key_env)
+        model_ids = await discover_upstream_models(validate_provider_url(provider_base_url), provider_api_key_env)
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"data": [{"id": model_id} for model_id in model_ids]}
@@ -1734,6 +1812,7 @@ async def list_upstream_models(
 
 @app.post("/admin/models/batch", dependencies=[Depends(require_operator)])
 def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> dict[str, object]:
+    base_url = validate_provider_url(payload.provider_base_url)
     names = [item.public_name for item in payload.models]
     if len(set(names)) != len(names):
         raise HTTPException(status_code=422, detail="public model names must be unique in one import")
@@ -1745,7 +1824,7 @@ def import_models(payload: ModelBatchImport, db: Session = Depends(get_db)) -> d
         record = ModelConfig(
             public_name=item.public_name,
             upstream_model=item.upstream_model,
-            provider_base_url=item.provider_base_url or payload.provider_base_url,
+            provider_base_url=validate_provider_url(item.provider_base_url) if item.provider_base_url else base_url,
             provider_api_key_env=item.provider_api_key_env if item.provider_api_key_env is not None else payload.provider_api_key_env,
             input_price_micros_per_1k=item.input_price_micros_per_1k,
             output_price_micros_per_1k=item.output_price_micros_per_1k,
@@ -1978,7 +2057,7 @@ def prices_from_margin(model: ModelConfig, margin_bps: int) -> tuple[int, int]:
 
 
 def channel_data(channel: ModelChannel) -> dict[str, object]:
-    credential_source = "console" if channel.encrypted_api_key else "environment" if channel.provider_api_key_env else "default"
+    credential_source = channel.credential_source or ("console" if channel.encrypted_api_key else "environment" if channel.provider_api_key_env else "default")
     return {
         "id": channel.id,
         "model_config_id": channel.model_config_id,
@@ -2034,6 +2113,9 @@ def create_model_channel(model_id: int, payload: ModelChannelCreate, db: Session
             channel.encrypted_api_key = encrypt_provider_secret(secret)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        channel.credential_source = "console"
+    elif payload.provider_api_key_env:
+        channel.credential_source = "environment"
     db.add(channel)
     db.commit()
     db.refresh(channel)
@@ -2058,11 +2140,15 @@ def update_model_channel(channel_id: int, payload: ModelChannelUpdate, db: Sessi
         setattr(channel, field, value)
     if clear_secret:
         channel.encrypted_api_key = None
+        channel.credential_source = "environment" if channel.provider_api_key_env else "default"
     elif secret:
         try:
             channel.encrypted_api_key = encrypt_provider_secret(secret)
         except ProviderSecretError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+        channel.credential_source = "console"
+    elif "provider_api_key_env" in changes:
+        channel.credential_source = "environment" if changes["provider_api_key_env"] else "default"
     db.commit()
     db.refresh(channel)
     return channel_data(channel)
@@ -2238,7 +2324,7 @@ def _generation_context(
 ) -> tuple[ApiKey, BillingAccount, ModelConfig]:
     api_key = require_api_key(authorization, db)
     settings = get_settings()
-    rate_limiter.check("api", str(api_key.id), settings.api_rate_limit_requests, settings.api_rate_limit_window_seconds)
+    rate_limiter.check("api", str(api_key.id), api_key.rate_limit_requests or settings.api_rate_limit_requests, api_key.rate_limit_window_seconds or settings.api_rate_limit_window_seconds)
     account = db.get(BillingAccount, api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
@@ -2428,7 +2514,7 @@ async def chat_completions(
 ) -> JSONResponse:
     api_key = require_api_key(authorization, db)
     settings = get_settings()
-    rate_limiter.check("api", str(api_key.id), settings.api_rate_limit_requests, settings.api_rate_limit_window_seconds)
+    rate_limiter.check("api", str(api_key.id), api_key.rate_limit_requests or settings.api_rate_limit_requests, api_key.rate_limit_window_seconds or settings.api_rate_limit_window_seconds)
     account = db.get(BillingAccount, api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")

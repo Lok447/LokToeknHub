@@ -70,11 +70,23 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_expires_at DATETIME"))
         if "rotated_from_key_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER"))
+        if "revoked_at" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN revoked_at DATETIME"))
+        if "revoke_reason" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN revoke_reason VARCHAR(255)"))
+        if "idempotency_key" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN idempotency_key VARCHAR(120)"))
+        if "rate_limit_requests" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN rate_limit_requests INTEGER"))
+        if "rate_limit_window_seconds" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN rate_limit_window_seconds INTEGER"))
         if "project_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN project_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_revoked_at ON api_keys (revoked_at)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_idempotency_key ON api_keys (idempotency_key) WHERE idempotency_key IS NOT NULL"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_project_id ON api_keys (project_id)"))
         if "reviewed_by_admin_id" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_by_admin_id INTEGER"))
@@ -107,6 +119,8 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN health_source VARCHAR(24) NOT NULL DEFAULT 'unknown'"))
         if "encrypted_api_key" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN encrypted_api_key TEXT"))
+        if "credential_source" not in channel_columns:
+            connection.execute(text("ALTER TABLE model_channels ADD COLUMN credential_source VARCHAR(24) NOT NULL DEFAULT 'environment'"))
         if "provider_connection_id" not in channel_columns:
             connection.execute(text("ALTER TABLE model_channels ADD COLUMN provider_connection_id INTEGER"))
         if "provider_input_cost_micros_per_1k" not in channel_columns:
@@ -145,9 +159,12 @@ def init_db() -> None:
             "balance_checked_at": "DATETIME",
             "balance_error": "TEXT",
             "balance_alert_threshold_micros": "BIGINT NOT NULL DEFAULT 0",
+            "credential_source": "VARCHAR(24) NOT NULL DEFAULT 'environment'",
         }.items():
             if name not in provider_connection_columns:
                 connection.execute(text(f"ALTER TABLE provider_connections ADD COLUMN {name} {definition}"))
+        connection.execute(text("UPDATE provider_connections SET credential_source = 'console' WHERE encrypted_api_key IS NOT NULL AND credential_source = 'environment'"))
+        connection.execute(text("UPDATE model_channels SET credential_source = 'console' WHERE encrypted_api_key IS NOT NULL AND credential_source = 'environment'"))
         usage_additions = {
             "provider_cost_micros": "INTEGER NOT NULL DEFAULT 0",
             "provider_channel_id": "INTEGER",
