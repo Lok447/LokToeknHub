@@ -738,11 +738,17 @@ def add_workspace_member(workspace_id: int, payload: OrganizationMemberCreate, a
 
 @router.get("/portal/api-keys")
 def list_api_keys(context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
-    keys = db.scalars(portal_key_query(context).order_by(ApiKey.id.desc())).all()
+    keys = db.execute(
+        portal_key_query(context)
+        .join(Project, Project.id == ApiKey.project_id, isouter=True)
+        .add_columns(Project.name.label("project_name"))
+        .order_by(ApiKey.id.desc())
+    ).all()
     return {"data": [{
         "id": item.id,
         "billing_account_id": item.billing_account_id or item.account_id,
         "project_id": item.project_id,
+        "project_name": project_name,
         "name": item.name,
         "key_prefix": item.key_prefix,
         "active": item.active,
@@ -756,7 +762,7 @@ def list_api_keys(context: PortalContext = Depends(portal_context), db: Session 
         "trial_expires_at": item.trial_expires_at.isoformat() if item.trial_expires_at else None,
         "last_used_at": item.last_used_at.isoformat() if item.last_used_at else None,
         "created_at": item.created_at.isoformat(),
-    } for item in keys]}
+    } for item, project_name in keys]}
 
 
 @router.post("/portal/api-keys/{api_key_id}/rotate")

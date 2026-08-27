@@ -11,7 +11,7 @@ const portalState = {
   overviewMode: "cost",
   usage: { page: 1, pageSize: 20, analyticsMode: "tokens", result: null, analytics: null },
   keyFilters: { search: "", status: "" },
-  keyColumns: { name: true, key: true, usage: true, expires: true, "last-used": true, status: true, created: true },
+  keyColumns: { name: true, key: true, project: true, usage: true, expires: true, "last-used": true, status: true, created: true },
   orders: [],
   marketplace: { query: "", modality: "all", provider: "", providerFilter: "", health: "all", sort: "default", compare: [] },
 };
@@ -582,7 +582,7 @@ function renderKeyTable() {
   const search = portalState.keyFilters.search.trim().toLowerCase();
   const status = portalState.keyFilters.status;
   const items = portalState.keys.filter((item) => {
-    const text = `${item.name} ${item.key_prefix}`.toLowerCase();
+    const text = `${item.name} ${item.key_prefix} ${item.project_name || "个人项目"}`.toLowerCase();
     return (!search || text.includes(search)) && keyMatchesStatus(item, status);
   });
   document.getElementById("key-result-count").textContent = `显示 ${items.length} 个 / 共 ${portalState.keys.length} 个 Key`;
@@ -590,6 +590,7 @@ function renderKeyTable() {
     <tr>
       <td data-key-cell="name"><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
       <td data-key-cell="key"><div class="key-prefix-cell"><code>${escapeHtml(item.key_prefix)}...</code><button class="icon-button compact-icon" data-copy-key-prefix="${escapeHtml(item.key_prefix)}" type="button" title="复制 Key 前缀" aria-label="复制 Key 前缀"><i data-lucide="copy"></i></button></div></td>
+      <td data-key-cell="project"><div class="primary-cell"><strong>${escapeHtml(item.project_name || "个人项目")}</strong><span class="secondary">项目 ID ${item.project_id || "-"}</span></div></td>
       <td data-key-cell="usage">${keyUsageMarkup(item)}</td>
       <td data-key-cell="expires">${keyExpiry(item) ? formatDate(keyExpiry(item)) : "长期有效"}</td>
       <td data-key-cell="last-used">${formatDate(item.last_used_at)}</td>
@@ -597,7 +598,7 @@ function renderKeyTable() {
       <td data-key-cell="created">${formatDate(item.created_at)}</td>
       <td class="align-right"><div class="key-row-actions"><button class="icon-button compact-icon" data-key-detail="${item.id}" type="button" title="查看 Key 详情" aria-label="查看 Key 详情"><i data-lucide="arrow-up-right"></i></button>${item.active ? `<button class="icon-button compact-icon" data-rotate-key="${item.id}" type="button" title="轮换 Key" aria-label="轮换 Key"><i data-lucide="refresh-cw"></i></button>` : ""}<button class="icon-button compact-icon ${item.active ? "danger-icon" : "success-icon"}" data-toggle-key="${item.id}" data-active="${!item.active}" type="button" title="${item.active ? "停用 Key" : "启用 Key"}" aria-label="${item.active ? "停用 Key" : "启用 Key"}"><i data-lucide="${item.active ? "ban" : "check"}"></i></button></div></td>
     </tr>
-  `).join("") : emptyRow(8);
+  `).join("") : emptyRow(9);
   applyKeyColumns();
   portalIcons();
 }
@@ -1321,6 +1322,7 @@ function keyDetailDialog(keyId) {
     <div class="key-detail-head"><div><span class="detail-label">名称</span><strong>${escapeHtml(item.name)}</strong></div>${keyStatusBadge(item)}</div>
     <div class="key-detail-grid">
       <div><span>Key 前缀</span><strong class="mono">${escapeHtml(item.key_prefix)}...</strong></div>
+      <div><span>所属项目</span><strong>${escapeHtml(item.project_name || "个人项目")}</strong></div>
       <div><span>消费额度</span><strong>${escapeHtml(formatKeyBudget(item))}</strong></div>
       <div><span>创建时间</span><strong>${formatDate(item.created_at)}</strong></div>
       <div><span>过期时间</span><strong>${keyExpiry(item) ? formatDate(keyExpiry(item)) : "长期有效"}</strong></div>
@@ -1332,7 +1334,7 @@ function keyDetailDialog(keyId) {
 
 function keyColumnsDialog() {
   const columns = [
-    ["usage", "用量"], ["expires", "有效期"], ["last-used", "最近使用"], ["created", "创建时间"],
+    ["project", "所属项目"], ["usage", "用量"], ["expires", "有效期"], ["last-used", "最近使用"], ["created", "创建时间"],
   ];
   openPortalDialog("列设置", `<form id="key-columns-form"><div class="dialog-body"><p class="dialog-copy">选择在 API Key 列表中显示的信息。</p><div class="column-options">${columns.map(([value, label]) => `<label><input type="checkbox" name="column" value="${value}" ${portalState.keyColumns[value] ? "checked" : ""}><span>${label}</span></label>`).join("")}</div></div><div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">应用设置</button></div></form>`);
   document.getElementById("key-columns-form").addEventListener("submit", (event) => {

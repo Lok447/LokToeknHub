@@ -2333,6 +2333,7 @@ async def test_personal_workspaces_organizations_projects_and_key_attribution() 
         assert called.status_code == 200
         member_keys = await client.get("/portal/api-keys", headers=member_headers)
         assert {item["id"] for item in member_keys.json()["data"]} >= {key.json()["id"], member_key.json()["id"]}
+        assert all(item["project_name"] == "生产环境" for item in member_keys.json()["data"] if item["id"] in {key.json()["id"], member_key.json()["id"]})
         member_usage = await client.get("/portal/usage", headers=member_headers)
         assert member_usage.json()["request_count"] == 1
         updated_owner = await client.get("/portal/profile", headers=owner_headers)
