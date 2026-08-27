@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - token_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -35,6 +47,9 @@ services:
       TOKEN_PORTAL_RATE_LIMIT_WINDOW_SECONDS: ${TOKEN_PORTAL_RATE_LIMIT_WINDOW_SECONDS:-60}
       TOKEN_AUTH_RATE_LIMIT_REQUESTS: ${TOKEN_AUTH_RATE_LIMIT_REQUESTS:-10}
       TOKEN_AUTH_RATE_LIMIT_WINDOW_SECONDS: ${TOKEN_AUTH_RATE_LIMIT_WINDOW_SECONDS:-60}
+      TOKEN_REDIS_URL: ${TOKEN_REDIS_URL:-redis://redis:6379/0}
+      TOKEN_RATE_LIMIT_KEY_PREFIX: ${TOKEN_RATE_LIMIT_KEY_PREFIX:-loktoken:rate-limit}
+      TOKEN_RATE_LIMIT_FAIL_OPEN: ${TOKEN_RATE_LIMIT_FAIL_OPEN:-false}
       TOKEN_PORTAL_SESSION_TTL_SECONDS: ${TOKEN_PORTAL_SESSION_TTL_SECONDS:-604800}
       TOKEN_ADMIN_SESSION_TTL_SECONDS: ${TOKEN_ADMIN_SESSION_TTL_SECONDS:-28800}
       TOKEN_PASSWORD_RESET_TTL_SECONDS: ${TOKEN_PASSWORD_RESET_TTL_SECONDS:-900}
@@ -81,6 +96,8 @@ services:
       TOKEN_ALIPAY_PRIVATE_KEY_PATH: ${TOKEN_ALIPAY_PRIVATE_KEY_PATH:-}
       TOKEN_ALIPAY_PUBLIC_KEY_PATH: ${TOKEN_ALIPAY_PUBLIC_KEY_PATH:-}
     depends_on:
+      redis:
+        condition: service_healthy
       postgres:
         condition: service_healthy
     ports:
@@ -94,3 +111,4 @@ services:
 
 volumes:
   token_postgres_data:
+  token_redis_data:

@@ -199,6 +199,8 @@ def readyz() -> dict[str, str]:
             connection.execute(select(1))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
+    if not rate_limiter.ready():
+        raise HTTPException(status_code=503, detail="rate limit service unavailable")
     return {"status": "ready"}
 
 

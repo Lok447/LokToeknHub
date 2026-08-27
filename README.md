@@ -112,6 +112,8 @@ POST  /admin/channels/{channel_id}/check
 
 主动健康检查调用渠道的 `GET /models`。生产环境建议根据供应商限流策略合理设置检查频率，并通过 `TOKEN_CHANNEL_FAILURE_THRESHOLD`、`TOKEN_CHANNEL_CIRCUIT_COOLDOWN_SECONDS`、`TOKEN_MAX_CHANNEL_ATTEMPTS` 和超时配置调整故障转移策略。
 
+生产部署使用 Redis 共享 API、门户和认证限流计数：配置 `TOKEN_REDIS_URL`（支持 `redis://` 或 `rediss://`），各 worker/实例即可共享滑动窗口。Redis 不可用时默认返回 503，避免限流失效；只有明确接受风险时才设置 `TOKEN_RATE_LIMIT_FAIL_OPEN=true`。开发环境可留空 Redis URL，自动使用进程内实现。
+
 管理员可以一次检查所有启用渠道：
 
 ```text
@@ -189,7 +191,7 @@ docker compose --env-file .env.docker ps
 - `TOKEN_ENVIRONMENT=production` 下，应用会拒绝启动：Mock 模式、自动建表、HTTP 公网地址、默认或过短的管理/签名密钥均不允许进入生产。
 - 配置 `TOKEN_SECURITY_DELIVERY_MODE=webhook` 与 HTTPS 安全投递 Webhook；密码重置仅发送给已绑定安全联系方式的账户，Webhook 接收方需验证 `X-LokToken-Signature`。
 - 在公网入口终止 TLS，并将 `TOKEN_PUBLIC_BASE_URL` 设置为实际 HTTPS 域名；浏览器跨域调用时仅将可信域写入 `TOKEN_CORS_ORIGINS`。
-- TOKEN 内置的是单服务实例的进程内滑动窗口限流。横向扩容前，应在网关/WAF 层配置共享限流或将该能力接入集中式存储。
+- TOKEN 在开发环境使用进程内滑动窗口；生产环境通过 Redis 共享 API、门户和认证限流计数，网关/WAF 仍应配置入口级限流。
 
 查看迁移状态或手动执行迁移：
 

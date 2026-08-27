@@ -1825,6 +1825,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
             security_delivery_mode="webhook",
             security_delivery_webhook_url="https://security.example.com/events",
             security_delivery_webhook_secret="d" * 32,
+            redis_url="redis://localhost:6379/0",
             loksystem_sso_enabled=True,
         ))
     validate_startup_settings(Settings(
@@ -1839,6 +1840,7 @@ def test_production_startup_configuration_rejects_unsafe_defaults() -> None:
         security_delivery_mode="webhook",
         security_delivery_webhook_url="https://security.example.com/events",
         security_delivery_webhook_secret="d" * 32,
+        redis_url="redis://localhost:6379/0",
         loksystem_sso_enabled=False,
     ))
 

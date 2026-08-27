@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     portal_rate_limit_window_seconds: int = 60
     auth_rate_limit_requests: int = 10
     auth_rate_limit_window_seconds: int = 60
+    redis_url: str = ""
+    rate_limit_key_prefix: str = "loktoken:rate-limit"
+    rate_limit_fail_open: bool = False
     alert_low_balance_micros: int = 1_000_000
     alert_lookback_minutes: int = 15
     alert_failure_rate_percent: float = 20.0
@@ -117,6 +120,10 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("Portal rate limit settings must be positive")
     if settings.auth_rate_limit_requests < 1 or settings.auth_rate_limit_window_seconds < 1:
         errors.append("Auth rate limit settings must be positive")
+    if not settings.redis_url:
+        errors.append("TOKEN_REDIS_URL must be configured for shared production rate limiting")
+    elif urlparse(settings.redis_url).scheme not in {"redis", "rediss"}:
+        errors.append("TOKEN_REDIS_URL must use redis:// or rediss://")
     if settings.alert_low_balance_micros < 0:
         errors.append("TOKEN_ALERT_LOW_BALANCE_MICROS must be non-negative")
     if settings.alert_lookback_minutes < 1 or settings.alert_min_request_count < 1:
