@@ -57,6 +57,7 @@ def create_trial_token(account: BillingAccount, expires_in_seconds: int | None =
         "aud": "token-portal",
         "sub": account.external_user_id,
         "account_id": account.id,
+        "jti": secrets.token_urlsafe(16),
         "exp": expires_at,
     }, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     signature = hmac.new(settings.trial_signing_secret.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).digest()
@@ -89,6 +90,7 @@ class PortalContext:
     account: BillingAccount
     token_type: str
     expires_at: datetime | None
+    trial_token_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,7 +151,15 @@ def require_portal_context(authorization: str | None, db: Session) -> PortalCont
         account=account,
         token_type=token_type,
         expires_at=datetime.fromtimestamp(int(claims["exp"]), timezone.utc),
+        trial_token_hash=hash_key(token) if token_type == "trial" else None,
     )
+
+
+def require_portal_session_context(authorization: str | None, db: Session) -> PortalContext:
+    context = require_portal_context(authorization, db)
+    if context.token_type != "session":
+        raise HTTPException(status_code=401, detail="formal portal session required")
+    return context
 
 
 def require_trial_account(authorization: str | None, db: Session) -> BillingAccount:

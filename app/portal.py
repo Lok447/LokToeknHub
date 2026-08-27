@@ -27,7 +27,7 @@ from .model_release import model_is_callable
 from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, OidcLoginChallenge, OrganizationMember, PasswordResetChallenge, PaymentOrder, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
 from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
-from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, verify_password
+from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, require_portal_session_context, verify_password
 from .services import call_provider_details, calculate_amount, create_provider_task, estimate_tokens, reserve_balance, save_usage, settle_balance, validate_model_request
 from .workspaces import accessible_workspaces, create_organization, create_project, ensure_default_project, ensure_personal_workspace, project_access, require_workspace_manager, workspace_access, workspace_data
 
@@ -143,6 +143,24 @@ def portal_context(
     return require_portal_context(authorization, db)
 
 
+def portal_session_context(
+    authorization: Annotated[str | None, Header()] = None,
+    db: Session = Depends(get_db),
+) -> PortalContext:
+    return require_portal_session_context(authorization, db)
+
+
+def portal_session_account(context: PortalContext = Depends(portal_session_context)) -> BillingAccount:
+    return context.account
+
+
+def portal_key_query(context: PortalContext):
+    query = select(ApiKey).where(ApiKey.account_id == context.account.id)
+    if context.token_type == "trial":
+        query = query.where(ApiKey.trial_token_hash == context.trial_token_hash)
+    return query
+
+
 def order_data(order: PaymentOrder) -> dict[str, object]:
     return {
         "id": order.id,
@@ -165,6 +183,7 @@ def scoped_usage_query(
     to_at: datetime | None = None,
     status: str | None = None,
     request_id: str | None = None,
+    trial_token_hash: str | None = None,
 ):
     query = select(UsageRecord).where(UsageRecord.account_id == account_id)
     if model:
@@ -179,6 +198,10 @@ def scoped_usage_query(
         query = query.where(UsageRecord.status == status)
     if request_id:
         query = query.where(UsageRecord.request_id.contains(request_id))
+    if trial_token_hash:
+        query = query.where(UsageRecord.api_key_id.in_(
+            select(ApiKey.id).where(ApiKey.trial_token_hash == trial_token_hash)
+        ))
     return query
 
 
@@ -591,15 +614,19 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
 
 
 @router.get("/portal/profile")
-def profile(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def profile(context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    account = context.account
     personal_workspace = ensure_personal_workspace(db, account)
     db.commit()
+    key_count_query = select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id, ApiKey.active.is_(True))
+    if context.trial_token_hash:
+        key_count_query = key_count_query.where(ApiKey.trial_token_hash == context.trial_token_hash)
     return {
         "id": account.id,
         "external_user_id": account.external_user_id,
         "name": account.name,
         "balance_micros": account.balance_micros,
-        "api_key_count": db.scalar(select(func.count(ApiKey.id)).where(ApiKey.account_id == account.id, ApiKey.active.is_(True))) or 0,
+        "api_key_count": db.scalar(key_count_query) or 0,
         "request_count": db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.account_id == account.id)) or 0,
         "security_contact": account.security_contact,
         "security_contact_verified_at": account.security_contact_verified_at.isoformat() if account.security_contact_verified_at else None,
@@ -609,14 +636,17 @@ def profile(account: BillingAccount = Depends(portal_account), db: Session = Dep
 
 
 @router.get("/portal/workspaces")
-def list_workspaces(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def list_workspaces(context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    account = context.account
     rows = accessible_workspaces(db, account)
+    if context.token_type == "trial":
+        rows = [row for row in rows if row[0].workspace_type == "personal"]
     db.commit()
     return {"data": [workspace_data(db, workspace, role) for workspace, role in rows]}
 
 
 @router.post("/portal/organizations")
-def create_portal_organization(payload: OrganizationCreate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def create_portal_organization(payload: OrganizationCreate, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     organization, workspace, project = create_organization(db, account, payload.name)
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="organization.created", target_type="organization", target_id=organization.id, details={"workspace_id": workspace.id})
     db.commit()
@@ -624,7 +654,7 @@ def create_portal_organization(payload: OrganizationCreate, account: BillingAcco
 
 
 @router.get("/portal/workspaces/{workspace_id}/projects")
-def list_workspace_projects(workspace_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def list_workspace_projects(workspace_id: int, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     workspace, role = workspace_access(db, account, workspace_id)
     from .models import Project
     projects = db.scalars(select(Project).where(Project.workspace_id == workspace.id).order_by(Project.id)).all()
@@ -632,7 +662,7 @@ def list_workspace_projects(workspace_id: int, account: BillingAccount = Depends
 
 
 @router.post("/portal/workspaces/{workspace_id}/projects")
-def create_workspace_project(workspace_id: int, payload: ProjectCreate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def create_workspace_project(workspace_id: int, payload: ProjectCreate, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     workspace, role = workspace_access(db, account, workspace_id)
     require_workspace_manager(role)
     project = create_project(db, workspace, payload.name, payload.slug)
@@ -642,7 +672,7 @@ def create_workspace_project(workspace_id: int, payload: ProjectCreate, account:
 
 
 @router.get("/portal/workspaces/{workspace_id}/members")
-def list_workspace_members(workspace_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def list_workspace_members(workspace_id: int, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     workspace, role = workspace_access(db, account, workspace_id)
     if not workspace.organization_id:
         return {"data": [{"account_id": account.id, "name": account.name, "login_id": account.login_id, "role": "owner"}]}
@@ -651,7 +681,7 @@ def list_workspace_members(workspace_id: int, account: BillingAccount = Depends(
 
 
 @router.post("/portal/workspaces/{workspace_id}/members")
-def add_workspace_member(workspace_id: int, payload: OrganizationMemberCreate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def add_workspace_member(workspace_id: int, payload: OrganizationMemberCreate, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     workspace, role = workspace_access(db, account, workspace_id)
     require_workspace_manager(role)
     if not workspace.organization_id:
@@ -670,8 +700,8 @@ def add_workspace_member(workspace_id: int, payload: OrganizationMemberCreate, a
 
 
 @router.get("/portal/api-keys")
-def list_api_keys(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
-    keys = db.scalars(select(ApiKey).where(ApiKey.account_id == account.id).order_by(ApiKey.id.desc())).all()
+def list_api_keys(context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    keys = db.scalars(portal_key_query(context).order_by(ApiKey.id.desc())).all()
     return {"data": [{
         "id": item.id,
         "project_id": item.project_id,
@@ -692,13 +722,14 @@ def list_api_keys(account: BillingAccount = Depends(portal_account), db: Session
 
 
 @router.post("/portal/api-keys/{api_key_id}/rotate")
-def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
-    api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
+def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    account = context.account
+    api_key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id))
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
     if not api_key.active or api_key.revoked_at:
         raise HTTPException(status_code=409, detail="only an active api key can be rotated")
-    if api_key.project_id:
+    if api_key.project_id and context.token_type == "session":
         _, _, role = project_access(db, account, api_key.project_id)
         require_workspace_manager(role)
     raw_key = create_key()
@@ -710,6 +741,7 @@ def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_acc
         key_hash=hash_key(raw_key),
         expires_at=api_key.expires_at,
         trial_expires_at=api_key.trial_expires_at,
+        trial_token_hash=api_key.trial_token_hash,
         spending_limit_micros=api_key.spending_limit_micros,
         spent_micros=api_key.spent_micros,
         rate_limit_requests=api_key.rate_limit_requests,
@@ -726,8 +758,9 @@ def rotate_api_key(api_key_id: int, account: BillingAccount = Depends(portal_acc
 
 
 @router.get("/portal/api-keys/{api_key_id}/transactions")
-def api_key_transactions(api_key_id: int, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
-    key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
+def api_key_transactions(api_key_id: int, context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    account = context.account
+    key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id))
     if not key:
         raise HTTPException(status_code=404, detail="api key not found")
     rows = db.scalars(select(AccountBalanceTransaction).where(AccountBalanceTransaction.account_id == account.id, AccountBalanceTransaction.api_key_id == api_key_id).order_by(AccountBalanceTransaction.id.desc()).limit(100)).all()
@@ -735,7 +768,7 @@ def api_key_transactions(api_key_id: int, account: BillingAccount = Depends(port
 
 
 @router.put("/portal/security/contact")
-def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     if not account.password_hash or not verify_password(payload.password, account.password_hash):
         raise HTTPException(status_code=401, detail="invalid account password")
     account.security_contact = payload.contact.strip()
@@ -751,7 +784,7 @@ def bind_security_contact(payload: SecurityContactUpdate, account: BillingAccoun
 
 
 @router.post("/portal/security/contact/confirm")
-def confirm_security_contact(payload: SecurityContactConfirm, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def confirm_security_contact(payload: SecurityContactConfirm, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     challenge = db.scalar(select(SecurityContactChallenge).where(
         SecurityContactChallenge.account_id == account.id,
         SecurityContactChallenge.token_hash == hash_key(payload.verification_token),
@@ -772,7 +805,7 @@ def confirm_security_contact(payload: SecurityContactConfirm, account: BillingAc
 
 
 @router.get("/portal/security-notifications")
-def security_notifications(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def security_notifications(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     notifications = db.scalars(
         select(SecurityNotification)
         .where(SecurityNotification.account_id == account.id)
@@ -789,7 +822,7 @@ def security_notifications(account: BillingAccount = Depends(portal_account), db
 
 
 @router.post("/portal/security/logout-all")
-def logout_portal_sessions(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, bool]:
+def logout_portal_sessions(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, bool]:
     account.session_version += 1
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="account.sessions_revoked", target_type="account", target_id=account.id, details={})
     record_security_notification(db, account, "portal_sessions_revoked")
@@ -808,12 +841,16 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
     exact_expiry = payload.expires_at
     if exact_expiry and exact_expiry.tzinfo is None:
         exact_expiry = exact_expiry.replace(tzinfo=timezone.utc)
+    if exact_expiry is None and payload.expires_in_days:
+        exact_expiry = utcnow() + timedelta(days=payload.expires_in_days)
     if exact_expiry and exact_expiry <= utcnow():
         raise HTTPException(status_code=422, detail="expires_at must be in the future")
     raw_key = create_key()
     trial_expires_at = context.expires_at if context.token_type == "trial" else None
     if trial_expires_at and (exact_expiry is None or exact_expiry > trial_expires_at):
         exact_expiry = trial_expires_at
+    if context.token_type == "trial" and payload.project_id:
+        raise HTTPException(status_code=403, detail="trial access can only create keys in the personal workspace")
     if payload.project_id:
         project, _, role = project_access(db, account, payload.project_id)
         require_workspace_manager(role)
@@ -825,8 +862,9 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
         name=payload.name,
         key_prefix=raw_key[:12],
         key_hash=hash_key(raw_key),
-        expires_at=exact_expiry or (utcnow() + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None),
+        expires_at=exact_expiry,
         trial_expires_at=trial_expires_at,
+        trial_token_hash=context.trial_token_hash,
         spending_limit_micros=payload.spending_limit_micros,
         idempotency_key=payload.idempotency_key,
         rate_limit_requests=payload.rate_limit_requests,
@@ -842,11 +880,12 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
 
 
 @router.patch("/portal/api-keys/{api_key_id}")
-def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
-    api_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key_id, ApiKey.account_id == account.id))
+def update_api_key(api_key_id: int, payload: ActiveUpdate, context: PortalContext = Depends(portal_context), db: Session = Depends(get_db)) -> dict[str, object]:
+    account = context.account
+    api_key = db.scalar(portal_key_query(context).where(ApiKey.id == api_key_id))
     if not api_key:
         raise HTTPException(status_code=404, detail="api key not found")
-    if api_key.project_id:
+    if api_key.project_id and context.token_type == "session":
         _, _, role = project_access(db, account, api_key.project_id)
         require_workspace_manager(role)
     if api_key.revoked_at and payload.active:
@@ -868,13 +907,14 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, account: BillingAccou
 @router.post("/portal/model-tests")
 async def test_model(
     payload: PortalModelTestRequest,
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     """Run one bounded, billable chat request from the model marketplace."""
+    account = context.account
     settings = get_settings()
     rate_limiter.check("portal-model-test", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
-    api_key = db.scalar(select(ApiKey).where(ApiKey.id == payload.api_key_id, ApiKey.account_id == account.id))
+    api_key = db.scalar(portal_key_query(context).where(ApiKey.id == payload.api_key_id))
     if not api_key or not api_key.active or api_key.revoked_at:
         raise HTTPException(status_code=422, detail="请选择有效的 API Key")
     model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
@@ -1028,7 +1068,7 @@ def list_models(account: BillingAccount = Depends(portal_account), db: Session =
 
 @router.get("/portal/usage")
 def usage_summary(
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
     model: str | None = None,
     api_key_id: int | None = None,
@@ -1037,8 +1077,9 @@ def usage_summary(
     status: str | None = None,
     request_id: str | None = None,
 ) -> dict[str, object]:
+    account = context.account
     record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id
+        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
     ).with_only_columns(UsageRecord.id)
     count, inputs, outputs, total, amount, average_latency, success_count = db.execute(select(
         func.count(UsageRecord.id),
@@ -1066,7 +1107,7 @@ def usage_summary(
 
 @router.get("/portal/usage/analytics")
 def usage_analytics(
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
     model: str | None = None,
     api_key_id: int | None = None,
@@ -1076,8 +1117,9 @@ def usage_analytics(
     request_id: str | None = None,
     granularity: Annotated[str, Query(pattern="^(hour|day)$")] = "day",
 ) -> dict[str, object]:
+    account = context.account
     record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id
+        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
     ).with_only_columns(UsageRecord.id)
     if db.get_bind().dialect.name == "postgresql":
         bucket = (
@@ -1153,18 +1195,21 @@ def usage_analytics(
 
 @router.get("/portal/dashboard")
 def dashboard(
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
     days: Annotated[int, Query(ge=7, le=90)] = 7,
     model: str | None = None,
     api_key_id: int | None = None,
 ) -> dict[str, object]:
+    account = context.account
     if days not in {7, 30, 90}:
         raise HTTPException(status_code=422, detail="days must be one of 7, 30 or 90")
     today = utcnow().date()
     period_start = today - timedelta(days=days - 1)
 
     base_filters = [UsageRecord.account_id == account.id]
+    if context.trial_token_hash:
+        base_filters.append(UsageRecord.api_key_id.in_(select(ApiKey.id).where(ApiKey.trial_token_hash == context.trial_token_hash)))
     if model:
         base_filters.append(UsageRecord.model == model)
     if api_key_id:
@@ -1269,7 +1314,7 @@ def dashboard(
 
 @router.get("/portal/usage/records")
 def usage_records(
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
     model: str | None = None,
     api_key_id: int | None = None,
@@ -1280,8 +1325,9 @@ def usage_records(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=10, le=100)] = 20,
 ) -> dict[str, object]:
+    account = context.account
     record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id
+        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
     ).with_only_columns(UsageRecord.id)
     total = db.scalar(select(func.count(UsageRecord.id)).where(UsageRecord.id.in_(record_ids))) or 0
     query = select(UsageRecord, ApiKey.name).join(ApiKey, ApiKey.id == UsageRecord.api_key_id).where(UsageRecord.id.in_(record_ids))
@@ -1300,13 +1346,15 @@ def usage_records(
 @router.get("/portal/usage/records/{request_id}")
 def usage_record_detail(
     request_id: str,
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    account = context.account
+    key_filter = ApiKey.trial_token_hash == context.trial_token_hash if context.trial_token_hash else True
     row = db.execute(
         select(UsageRecord, ApiKey.name)
         .join(ApiKey, ApiKey.id == UsageRecord.api_key_id)
-        .where(UsageRecord.account_id == account.id, UsageRecord.request_id == request_id)
+        .where(UsageRecord.account_id == account.id, UsageRecord.request_id == request_id, key_filter)
     ).one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="request record not found")
@@ -1315,7 +1363,7 @@ def usage_record_detail(
 
 @router.get("/portal/usage/export")
 def export_usage(
-    account: BillingAccount = Depends(portal_account),
+    context: PortalContext = Depends(portal_context),
     db: Session = Depends(get_db),
     model: str | None = None,
     api_key_id: int | None = None,
@@ -1324,8 +1372,9 @@ def export_usage(
     status: str | None = None,
     request_id: str | None = None,
 ) -> Response:
+    account = context.account
     record_ids = scoped_usage_query(
-        account.id, model, api_key_id, from_at, to_at, status, request_id
+        account.id, model, api_key_id, from_at, to_at, status, request_id, context.trial_token_hash
     ).with_only_columns(UsageRecord.id)
     rows = db.execute(
         select(UsageRecord, ApiKey.name)
@@ -1352,7 +1401,7 @@ def export_usage(
 
 
 @router.get("/portal/transactions")
-def transactions(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def transactions(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     items = db.scalars(select(AccountBalanceTransaction).where(
         AccountBalanceTransaction.account_id == account.id
     ).order_by(AccountBalanceTransaction.id.desc()).limit(100)).all()
@@ -1367,7 +1416,7 @@ def transactions(account: BillingAccount = Depends(portal_account), db: Session 
 
 
 @router.get("/portal/balance-summary")
-def balance_summary(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def balance_summary(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     total_credit = db.scalar(select(func.coalesce(func.sum(AccountBalanceTransaction.amount_micros), 0)).where(
         AccountBalanceTransaction.account_id == account.id,
         AccountBalanceTransaction.transaction_type.in_(("topup", "payment", "redemption")),
@@ -1388,19 +1437,19 @@ def balance_summary(account: BillingAccount = Depends(portal_account), db: Sessi
 
 
 @router.get("/portal/payment-providers")
-def list_payment_providers(account: BillingAccount = Depends(portal_account)) -> dict[str, object]:
+def list_payment_providers(account: BillingAccount = Depends(portal_session_account)) -> dict[str, object]:
     del account
     return {"data": [provider.to_dict() for provider in payment_providers()]}
 
 
 @router.get("/portal/payment-orders")
-def list_payment_orders(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def list_payment_orders(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     orders = db.scalars(select(PaymentOrder).where(PaymentOrder.account_id == account.id).order_by(PaymentOrder.id.desc()).limit(100)).all()
     return {"data": [order_data(item) for item in orders]}
 
 
 @router.post("/portal/payment-orders")
-def create_payment_order(payload: PaymentOrderCreate, account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def create_payment_order(payload: PaymentOrderCreate, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     settings = get_settings()
     rate_limiter.check("portal-payment-create", str(account.id), settings.portal_rate_limit_requests, settings.portal_rate_limit_window_seconds)
     if payload.account_id != account.id:
@@ -1442,7 +1491,7 @@ def redemption_code_is_expired(code: RedemptionCode) -> bool:
 @router.post("/portal/redemption-codes/redeem")
 def redeem_code(
     payload: RedemptionCodeRedeem,
-    account: BillingAccount = Depends(portal_account),
+    account: BillingAccount = Depends(portal_session_account),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     settings = get_settings()
@@ -1497,7 +1546,7 @@ def redeem_code(
 
 
 @router.get("/portal/redemptions")
-def list_redemptions(account: BillingAccount = Depends(portal_account), db: Session = Depends(get_db)) -> dict[str, object]:
+def list_redemptions(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
     rows = db.execute(
         select(RedemptionClaim, RedemptionCode.label)
         .join(RedemptionCode, RedemptionCode.id == RedemptionClaim.redemption_code_id)

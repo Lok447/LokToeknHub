@@ -1497,12 +1497,70 @@ async def test_trial_portal_and_streaming_user_flow() -> None:
             headers=portal_headers,
             json={"account_id": account_id, "amount_micros": 1_000_000, "provider": "manual"},
         )
-        assert order.status_code == 200
-        assert order.json()["status"] == "pending"
-        assert len((await client.get("/portal/payment-orders", headers=portal_headers)).json()["data"]) == 1
+        assert order.status_code == 401
+        assert (await client.get("/portal/payment-orders", headers=portal_headers)).status_code == 401
 
         tampered = trial_link.json()["access_token"][:-1] + ("A" if trial_link.json()["access_token"][-1] != "A" else "B")
         assert (await client.get("/portal/profile", headers={"Authorization": f"Bearer {tampered}"})).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_trial_access_isolated_from_formal_session_and_other_trial_links() -> None:
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "trial-isolation-user", "name": "Trial Isolation", "password": "correct-horse"},
+        )
+        assert registered.status_code == 200
+        account = await client.get(
+            "/portal/profile", headers={"Authorization": f"Bearer {registered.json()['access_token']}"}
+        )
+        account_id = account.json()["id"]
+        formal_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+        formal_key = await client.post("/portal/api-keys", headers=formal_headers, json={"name": "formal-key"})
+        assert formal_key.status_code == 200
+        formal_org = await client.post("/portal/organizations", headers=formal_headers, json={"name": "Formal Org"})
+        assert formal_org.status_code == 200
+
+        first_trial = await client.post(
+            "/admin/trial-links", headers=admin_headers,
+            json={"account_id": account_id, "expires_in_seconds": 3600},
+        )
+        second_trial = await client.post(
+            "/admin/trial-links", headers=admin_headers,
+            json={"account_id": account_id, "expires_in_seconds": 3600},
+        )
+        first_headers = {"Authorization": f"Bearer {first_trial.json()['access_token']}"}
+        second_headers = {"Authorization": f"Bearer {second_trial.json()['access_token']}"}
+        first_key = await client.post("/portal/api-keys", headers=first_headers, json={"name": "first-trial-key"})
+        second_key = await client.post("/portal/api-keys", headers=second_headers, json={"name": "second-trial-key"})
+        assert first_key.status_code == 200 and second_key.status_code == 200
+        first_profile = await client.get("/portal/profile", headers=first_headers)
+        assert first_profile.json()["api_key_count"] == 1
+        first_workspaces = await client.get("/portal/workspaces", headers=first_headers)
+        assert first_workspaces.status_code == 200
+        assert all(item["type"] == "personal" for item in first_workspaces.json()["data"])
+
+        first_list = await client.get("/portal/api-keys", headers=first_headers)
+        assert {item["name"] for item in first_list.json()["data"]} == {"first-trial-key"}
+        assert (await client.post(f"/portal/api-keys/{formal_key.json()['id']}/rotate", headers=first_headers)).status_code == 404
+        assert (await client.patch(f"/portal/api-keys/{second_key.json()['id']}", headers=first_headers, json={"active": False})).status_code == 404
+        assert (await client.get(f"/portal/api-keys/{second_key.json()['id']}/transactions", headers=first_headers)).status_code == 404
+
+        for path, method, payload in (
+            ("/portal/organizations", "post", {"name": "Blocked Trial Org"}),
+            ("/portal/security/logout-all", "post", None),
+            ("/portal/payment-orders", "get", None),
+            ("/portal/redemptions", "get", None),
+        ):
+            response = await getattr(client, method)(path, headers=first_headers, json=payload) if payload else await getattr(client, method)(path, headers=first_headers)
+            assert response.status_code == 401, (path, response.text)
+
+        formal_list = await client.get("/portal/api-keys", headers=formal_headers)
+        assert {item["name"] for item in formal_list.json()["data"]} >= {"formal-key", "first-trial-key", "second-trial-key"}
+        assert (await client.post(f"/portal/api-keys/{formal_key.json()['id']}/rotate", headers=formal_headers)).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -1546,33 +1604,26 @@ async def test_portal_redemption_code_balance_and_history() -> None:
         assert (await client.patch(f"/admin/redemption-codes/{code_id}", headers=admin_headers, json={"active": True})).json()["active"] is True
 
         before = await client.get("/portal/balance-summary", headers=portal_headers)
-        assert before.json()["balance_micros"] == 0
+        assert before.status_code == 401
         redeemed = await client.post(
             "/portal/redemption-codes/redeem", headers=portal_headers,
             json={"code": "WELCOME-TOKEN-2026"},
         )
-        assert redeemed.status_code == 200
-        assert redeemed.json()["amount_micros"] == 2_500_000
-        assert redeemed.json()["balance_micros"] == 2_500_000
+        assert redeemed.status_code == 401
         assert (await client.post(
             "/portal/redemption-codes/redeem", headers=portal_headers,
             json={"code": "WELCOME-TOKEN-2026"},
-        )).status_code == 409
+        )).status_code == 401
         assert (await client.post(
             "/portal/redemption-codes/redeem", headers=other_portal_headers,
             json={"code": "WELCOME-TOKEN-2026"},
-        )).status_code == 422
-
-        summary = await client.get("/portal/balance-summary", headers=portal_headers)
-        assert summary.json()["total_credit_micros"] == 2_500_000
-        assert summary.json()["transaction_count"] == 1
-        history = await client.get("/portal/redemptions", headers=portal_headers)
-        assert history.json()["data"][0]["label"] == "试用福利"
-        transactions = await client.get("/portal/transactions", headers=portal_headers)
-        assert transactions.json()["data"][0]["type"] == "redemption"
+        )).status_code == 401
+        assert (await client.get("/portal/redemptions", headers=portal_headers)).status_code == 401
+        assert (await client.get("/portal/transactions", headers=portal_headers)).status_code == 401
         audits = await client.get("/admin/audit-events", headers=admin_headers)
         audit_actions = {item["action"] for item in audits.json()["data"]}
-        assert {"redemption_code.created", "redemption_code.status_updated", "redemption_code.claimed"} <= audit_actions
+        assert {"redemption_code.created", "redemption_code.status_updated"} <= audit_actions
+        assert "redemption_code.claimed" not in audit_actions
 
 
 @pytest.mark.asyncio

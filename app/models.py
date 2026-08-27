@@ -87,6 +87,7 @@ class ApiKey(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     trial_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    trial_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     rotated_from_key_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     revoke_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)

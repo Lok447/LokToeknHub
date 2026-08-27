@@ -76,6 +76,8 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN last_used_at DATETIME"))
         if "trial_expires_at" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_expires_at DATETIME"))
+        if "trial_token_hash" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN trial_token_hash VARCHAR(64)"))
         if "rotated_from_key_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN rotated_from_key_id INTEGER"))
         if "revoked_at" not in api_key_columns:
@@ -92,6 +94,7 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN project_id INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_token_hash ON api_keys (trial_token_hash)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_rotated_from_key_id ON api_keys (rotated_from_key_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_revoked_at ON api_keys (revoked_at)"))
         connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_keys_idempotency_key ON api_keys (idempotency_key) WHERE idempotency_key IS NOT NULL"))
