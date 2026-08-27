@@ -16,7 +16,8 @@ mkdir -p "$backup_dir"
 umask 077
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_file="$backup_dir/loktoken-$timestamp.dump"
-pg_dump --format=custom --no-owner --file="$backup_file" "$TOKEN_DATABASE_URL"
+database_url="$(printf '%s' "$TOKEN_DATABASE_URL" | sed 's#^postgresql+psycopg://#postgresql://#')"
+pg_dump --format=custom --no-owner --file="$backup_file" "$database_url"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$backup_file" > "$backup_file.sha256"
 elif command -v shasum >/dev/null 2>&1; then

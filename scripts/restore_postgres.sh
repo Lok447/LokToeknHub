@@ -26,5 +26,6 @@ if [[ -f "$backup_file.sha256" ]]; then
     exit 2
   fi
 fi
-pg_restore --clean --if-exists --no-owner --dbname="$TOKEN_DATABASE_URL" "$backup_file"
+database_url="$(printf '%s' "$TOKEN_DATABASE_URL" | sed 's#^postgresql+psycopg://#postgresql://#')"
+pg_restore --clean --if-exists --no-owner --dbname="$database_url" "$backup_file"
 echo "restored $backup_file"
