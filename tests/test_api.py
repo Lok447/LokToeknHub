@@ -57,6 +57,31 @@ async def test_key_rotation_preserves_budget_and_revocation_is_permanent() -> No
         assert duplicate.status_code == 409
 
 
+@pytest.mark.asyncio
+async def test_admin_account_and_key_lists_support_pagination_and_filters() -> None:
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await client.post("/admin/accounts", headers=headers, json={"external_user_id": "page-account-a", "name": "Page Alpha"})
+        second = await client.post("/admin/accounts", headers=headers, json={"external_user_id": "page-account-b", "name": "Page Beta"})
+        assert first.status_code == 200 and second.status_code == 200
+        created_key = await client.post("/admin/api-keys", headers=headers, json={"account_id": first.json()["id"], "name": "page-key"})
+        assert created_key.status_code == 200
+
+        accounts = await client.get("/admin/accounts?page=1&page_size=10&search=page-account-a", headers=headers)
+        assert accounts.status_code == 200
+        assert accounts.json()["total"] == 1
+        assert accounts.json()["total_pages"] == 1
+        assert accounts.json()["data"][0]["external_user_id"] == "page-account-a"
+        keys = await client.get("/admin/api-keys?page=1&page_size=10&search=page-key&active=true", headers=headers)
+        assert keys.status_code == 200
+        assert keys.json()["total"] == 1
+        assert keys.json()["data"][0]["name"] == "page-key"
+        assert keys.json()["data"][0]["billing_account_id"] == first.json()["id"]
+        empty_page = await client.get("/admin/accounts?page=2&page_size=10&search=page-account-a", headers=headers)
+        assert empty_page.status_code == 200 and empty_page.json()["data"] == []
+
+
 def test_production_provider_url_rejects_insecure_and_private_targets(monkeypatch) -> None:
     from app.main import validate_provider_url
 

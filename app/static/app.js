@@ -9,6 +9,10 @@ const state = {
   channels: [],
   identity: null,
   accountAccessTab: "accounts",
+  accountList: { search: "", active: "", accessMode: "", page: 1, pageSize: 25, total: 0, totalPages: 1 },
+  keyList: { search: "", active: "", page: 1, pageSize: 25, total: 0, totalPages: 1 },
+  accountSearchTimer: null,
+  keySearchTimer: null,
   modelFilters: { query: "", provider: "", type: "", publicationState: "" },
   modelProviderDetail: "",
 };
@@ -490,8 +494,26 @@ async function loadOverview() {
 }
 
 async function loadAccounts() {
-  const result = await api("/admin/accounts");
+  const filters = state.accountList;
+  const params = new URLSearchParams({ page: String(filters.page), page_size: String(filters.pageSize) });
+  if (filters.search.trim()) params.set("search", filters.search.trim());
+  if (filters.active !== "") params.set("active", filters.active);
+  if (filters.accessMode) params.set("access_mode", filters.accessMode);
+  const result = await api(`/admin/accounts?${params.toString()}`);
   state.accounts = result.data;
+  Object.assign(filters, { total: result.total || 0, totalPages: result.total_pages || 1 });
+  if (filters.page > filters.totalPages) {
+    filters.page = filters.totalPages;
+    return loadAccounts();
+  }
+  const search = document.getElementById("account-search");
+  if (search && search.value !== filters.search) search.value = filters.search;
+  const active = document.getElementById("account-active-filter");
+  if (active) active.value = filters.active;
+  const accessMode = document.getElementById("account-access-filter");
+  if (accessMode) accessMode.value = filters.accessMode;
+  const pageSize = document.getElementById("account-page-size");
+  if (pageSize) pageSize.value = String(filters.pageSize);
   document.getElementById("accounts-table").innerHTML = result.data.length ? result.data.map((item) => `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
@@ -504,6 +526,7 @@ async function loadAccounts() {
       <td class="align-right"><button class="table-button" data-action="account-detail" data-id="${item.id}"><i data-lucide="arrow-up-right"></i><span>详情</span></button></td>
     </tr>
   `).join("") : emptyRow(8);
+  renderAccountPager("accounts", filters);
   icons();
 }
 
@@ -551,7 +574,22 @@ function accountDetailDialog(accountId) {
 }
 
 async function loadKeys() {
-  const result = await api("/admin/api-keys");
+  const filters = state.keyList;
+  const params = new URLSearchParams({ page: String(filters.page), page_size: String(filters.pageSize) });
+  if (filters.search.trim()) params.set("search", filters.search.trim());
+  if (filters.active !== "") params.set("active", filters.active);
+  const result = await api(`/admin/api-keys?${params.toString()}`);
+  Object.assign(filters, { total: result.total || 0, totalPages: result.total_pages || 1 });
+  if (filters.page > filters.totalPages) {
+    filters.page = filters.totalPages;
+    return loadKeys();
+  }
+  const search = document.getElementById("key-search");
+  if (search && search.value !== filters.search) search.value = filters.search;
+  const active = document.getElementById("key-active-filter");
+  if (active) active.value = filters.active;
+  const pageSize = document.getElementById("key-page-size");
+  if (pageSize) pageSize.value = String(filters.pageSize);
   document.getElementById("keys-table").innerHTML = result.data.length ? result.data.map((item) => `
     <tr>
       <td><div class="primary-cell"><strong>${escapeHtml(item.name)}</strong><span class="secondary">ID ${item.id}</span></div></td>
@@ -564,6 +602,30 @@ async function loadKeys() {
       <td class="align-right">${canOperate() && !item.revoked_at ? `<button class="table-button" data-rotate-admin-key="${item.id}">轮换</button><button class="table-button" data-toggle="api-keys" data-id="${item.id}" data-active="${!item.active}">${item.active ? "停用" : "启用"}</button><button class="table-button danger" data-revoke-admin-key="${item.id}">撤销</button>` : '<span class="secondary">只读</span>'}</td>
     </tr>
   `).join("") : emptyRow(8);
+  renderAccountPager("keys", filters);
+  icons();
+}
+
+function renderAccountPager(kind, filters) {
+  const prefix = kind === "accounts" ? "accounts" : "keys";
+  const count = document.getElementById(`${prefix}-result-count`);
+  if (count) count.textContent = `共 ${formatNumber(filters.total)} 条`;
+  const current = document.getElementById(`${prefix}-page-current`);
+  if (current) current.textContent = `${filters.page} / ${filters.totalPages}`;
+  const previous = document.querySelector(`[data-page-prev="${kind}"]`);
+  const next = document.querySelector(`[data-page-next="${kind}"]`);
+  if (previous) previous.disabled = filters.page <= 1;
+  if (next) next.disabled = filters.page >= filters.totalPages;
+}
+
+function scheduleAccountListReload(kind) {
+  const filters = kind === "accounts" ? state.accountList : state.keyList;
+  const timerKey = kind === "accounts" ? "accountSearchTimer" : "keySearchTimer";
+  window.clearTimeout(state[timerKey]);
+  state[timerKey] = window.setTimeout(() => {
+    filters.page = 1;
+    (kind === "accounts" ? loadAccounts() : loadKeys()).catch((error) => toast(error.message, true));
+  }, 220);
 }
 
 function renderAccountAccessTab() {
@@ -1172,7 +1234,7 @@ function accountDialog() {
 }
 
 async function keyDialog(accountId = null) {
-  if (!state.accounts.length) state.accounts = (await api("/admin/accounts")).data;
+  state.accounts = (await api("/admin/accounts?page=1&page_size=100&active=true")).data;
   if (!state.accounts.length) { toast("请先创建账户", true); return; }
   openDialog("生成 API Key", `
     <form id="dialog-form">
@@ -1580,7 +1642,7 @@ async function toggleChannel(channelId, active, modelId, modelName) {
 }
 
 async function paymentDialog() {
-  const [accountResult, providerResult] = await Promise.all([api("/admin/accounts"), api("/admin/payment-providers")]);
+  const [accountResult, providerResult] = await Promise.all([api("/admin/accounts?page=1&page_size=100&active=true"), api("/admin/payment-providers")]);
   state.accounts = accountResult.data;
   const activeAccounts = state.accounts.filter((item) => item.active);
   const providers = providerResult.data;
@@ -1770,6 +1832,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("model-search").addEventListener("input", (event) => { state.modelFilters.query = event.target.value; renderModels(); });
   document.querySelectorAll("[data-account-access-tab]").forEach((button) => button.addEventListener("click", () => setAccountAccessTab(button.dataset.accountAccessTab)));
+  document.getElementById("account-search").addEventListener("input", (event) => { state.accountList.search = event.target.value; scheduleAccountListReload("accounts"); });
+  document.getElementById("account-active-filter").addEventListener("change", (event) => { state.accountList.active = event.target.value; state.accountList.page = 1; loadAccounts().catch((error) => toast(error.message, true)); });
+  document.getElementById("account-access-filter").addEventListener("change", (event) => { state.accountList.accessMode = event.target.value; state.accountList.page = 1; loadAccounts().catch((error) => toast(error.message, true)); });
+  document.getElementById("account-page-size").addEventListener("change", (event) => { state.accountList.pageSize = Number(event.target.value); state.accountList.page = 1; loadAccounts().catch((error) => toast(error.message, true)); });
+  document.getElementById("key-search").addEventListener("input", (event) => { state.keyList.search = event.target.value; scheduleAccountListReload("keys"); });
+  document.getElementById("key-active-filter").addEventListener("change", (event) => { state.keyList.active = event.target.value; state.keyList.page = 1; loadKeys().catch((error) => toast(error.message, true)); });
+  document.getElementById("key-page-size").addEventListener("change", (event) => { state.keyList.pageSize = Number(event.target.value); state.keyList.page = 1; loadKeys().catch((error) => toast(error.message, true)); });
+  document.querySelectorAll("[data-page-prev], [data-page-next]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.pagePrev || button.dataset.pageNext;
+    const filters = kind === "accounts" ? state.accountList : state.keyList;
+    const delta = button.dataset.pagePrev !== undefined ? -1 : 1;
+    const nextPage = Math.min(filters.totalPages, Math.max(1, filters.page + delta));
+    if (nextPage === filters.page) return;
+    filters.page = nextPage;
+    (kind === "accounts" ? loadAccounts() : loadKeys()).catch((error) => toast(error.message, true));
+  }));
   document.getElementById("model-provider-filter").addEventListener("change", (event) => { state.modelFilters.provider = event.target.value; state.modelProviderDetail = ""; renderModels(); });
   document.querySelectorAll("[data-model-type]").forEach((button) => button.addEventListener("click", () => { state.modelFilters.type = button.dataset.modelType; renderModels(); }));
   document.getElementById("model-state-filter").addEventListener("change", (event) => { state.modelFilters.publicationState = event.target.value; renderModels(); });

@@ -12,12 +12,12 @@ from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import httpx
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -993,8 +993,24 @@ async def payment_webhook(
 
 
 @app.get("/admin/accounts", dependencies=[Depends(require_admin)])
-def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
-    accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id.desc())).all()
+def list_accounts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=100),
+    search: str | None = Query(None, min_length=1, max_length=160),
+    active: bool | None = Query(None),
+    access_mode: str | None = Query(None, pattern="^(api|portal)$"),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    query = select(BillingAccount)
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(or_(BillingAccount.name.ilike(term), BillingAccount.external_user_id.ilike(term), BillingAccount.login_id.ilike(term)))
+    if active is not None:
+        query = query.where(BillingAccount.active.is_(active))
+    if access_mode:
+        query = query.where(BillingAccount.access_mode == access_mode)
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    accounts = db.scalars(query.order_by(BillingAccount.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     source_labels = {"admin": "管理员创建", "self_registered": "用户注册", "loksystem": "外部身份接入", "oidc": "统一身份接入"}
     callable_model_count = sum(
         1 for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True))).all()
@@ -1087,7 +1103,7 @@ def list_accounts(db: Session = Depends(get_db)) -> dict[str, object]:
             "last_activity_at": last_activity_at.isoformat() if last_activity_at else None,
             "created_at": account.created_at.isoformat(),
         })
-    return {"data": data}
+    return {"data": data, "page": page, "page_size": page_size, "total": total, "total_pages": max(1, (total + page_size - 1) // page_size)}
 
 
 @app.patch("/admin/accounts/{account_id}", dependencies=[Depends(require_operator)])
@@ -1140,12 +1156,25 @@ def delete_account(account_id: int, db: Session = Depends(get_db)) -> dict[str, 
 
 
 @app.get("/admin/api-keys", dependencies=[Depends(require_admin)])
-def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
-    rows = db.execute(
-        select(ApiKey, BillingAccount.name)
-        .join(BillingAccount, BillingAccount.id == ApiKey.account_id)
-        .order_by(ApiKey.id.desc())
-    ).all()
+def list_api_keys(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=10, le=100),
+    search: str | None = Query(None, min_length=1, max_length=160),
+    active: bool | None = Query(None),
+    account_id: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    query = select(ApiKey, BillingAccount.name).join(BillingAccount, BillingAccount.id == ApiKey.account_id)
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.where(or_(ApiKey.name.ilike(term), ApiKey.key_prefix.ilike(term), BillingAccount.name.ilike(term), BillingAccount.external_user_id.ilike(term)))
+    if active is not None:
+        query = query.where(ApiKey.active.is_(active))
+    if account_id:
+        query = query.where(ApiKey.account_id == account_id)
+    count_query = query.with_only_columns(func.count(ApiKey.id)).order_by(None)
+    total = db.scalar(count_query) or 0
+    rows = db.execute(query.order_by(ApiKey.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
     return {"data": [
         {
             "id": api_key.id,
@@ -1167,7 +1196,7 @@ def list_api_keys(db: Session = Depends(get_db)) -> dict[str, object]:
             "created_at": api_key.created_at.isoformat(),
         }
         for api_key, account_name in rows
-    ]}
+    ], "page": page, "page_size": page_size, "total": total, "total_pages": max(1, (total + page_size - 1) // page_size)}
 
 
 @app.patch("/admin/api-keys/{api_key_id}", dependencies=[Depends(require_operator)])
