@@ -43,6 +43,33 @@ def record_security_notification(db: Session, account: BillingAccount, event_typ
     ))
 
 
+def ensure_operational_notifications(db: Session, account: BillingAccount) -> None:
+    """Materialize user-facing operational reminders with a short dedupe window."""
+    now = utcnow()
+    recent = db.scalars(
+        select(SecurityNotification)
+        .where(SecurityNotification.account_id == account.id, SecurityNotification.created_at >= now - timedelta(hours=24))
+        .order_by(SecurityNotification.id.desc())
+        .limit(200)
+    ).all()
+    seen = {(item.event_type, (json.loads(item.details_json) if item.details_json else {}).get("api_key_id")) for item in recent}
+    settings = get_settings()
+    if account.active and account.balance_micros <= settings.alert_low_balance_micros and ("low_balance_warning", None) not in seen:
+        record_security_notification(db, account, "low_balance_warning", {"balance_micros": account.balance_micros, "threshold_micros": settings.alert_low_balance_micros})
+    keys = db.scalars(portal_key_query(PortalContext(account=account, token_type="session", expires_at=None))).all()
+    for key in keys:
+        expiry = key.expires_at
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if not expiry or not key.active:
+            continue
+        event_type = "api_key_expired" if expiry <= now else "api_key_expiring" if expiry <= now + timedelta(days=7) else None
+        if event_type and (event_type, key.id) not in seen:
+            record_security_notification(db, account, event_type, {"api_key_id": key.id, "name": key.name, "expires_at": expiry.isoformat()})
+    if db.new:
+        db.commit()
+
+
 def deliver_password_reset(account: BillingAccount, raw_token: str, expires_at: datetime) -> None:
     """Deliver a reset challenge through the deployment's configured security channel."""
     settings = get_settings()
@@ -856,19 +883,38 @@ def confirm_security_contact(payload: SecurityContactConfirm, account: BillingAc
 
 @router.get("/portal/security-notifications")
 def security_notifications(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    ensure_operational_notifications(db, account)
     notifications = db.scalars(
         select(SecurityNotification)
         .where(SecurityNotification.account_id == account.id)
         .order_by(SecurityNotification.id.desc())
         .limit(100)
     ).all()
-    return {"data": [{
+    data = [{
         "id": item.id,
         "event_type": item.event_type,
         "details": json.loads(item.details_json) if item.details_json else {},
         "read_at": item.read_at.isoformat() if item.read_at else None,
         "created_at": item.created_at.isoformat(),
-    } for item in notifications]}
+    } for item in notifications]
+    return {"data": data, "unread_count": sum(1 for item in data if item["read_at"] is None)}
+
+
+@router.post("/portal/security-notifications/{notification_id}/read")
+def mark_security_notification_read(notification_id: int, account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, object]:
+    notification = db.scalar(select(SecurityNotification).where(SecurityNotification.id == notification_id, SecurityNotification.account_id == account.id))
+    if not notification:
+        raise HTTPException(status_code=404, detail="security notification not found")
+    notification.read_at = notification.read_at or utcnow()
+    db.commit()
+    return {"id": notification.id, "read_at": notification.read_at.isoformat()}
+
+
+@router.post("/portal/security-notifications/read-all")
+def mark_all_security_notifications_read(account: BillingAccount = Depends(portal_session_account), db: Session = Depends(get_db)) -> dict[str, int]:
+    updated = db.query(SecurityNotification).filter(SecurityNotification.account_id == account.id, SecurityNotification.read_at.is_(None)).update({SecurityNotification.read_at: utcnow()}, synchronize_session=False)
+    db.commit()
+    return {"updated": int(updated or 0)}
 
 
 @router.post("/portal/security/logout-all")

@@ -2020,6 +2020,13 @@ async def test_password_reset_key_rotation_and_security_sessions() -> None:
         assert rebound.status_code == 200
         notices = await client.get("/portal/security-notifications", headers=portal_headers)
         assert {item["event_type"] for item in notices.json()["data"]} >= {"api_key_rotated", "security_contact_verified"}
+        assert notices.json()["unread_count"] >= 1
+        first_notice_id = notices.json()["data"][0]["id"]
+        marked = await client.post(f"/portal/security-notifications/{first_notice_id}/read", headers=portal_headers)
+        assert marked.status_code == 200
+        read_all = await client.post("/portal/security-notifications/read-all", headers=portal_headers)
+        assert read_all.status_code == 200
+        assert (await client.get("/portal/security-notifications", headers=portal_headers)).json()["unread_count"] == 0
         assert (await client.post("/portal/security/logout-all", headers=portal_headers)).status_code == 200
         assert (await client.get("/portal/profile", headers=portal_headers)).status_code == 401
 

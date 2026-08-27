@@ -328,7 +328,39 @@ async function loadProfile() {
   document.getElementById("portal-user-name").textContent = portalState.profile.name;
   document.getElementById("portal-user-id").textContent = portalState.profile.external_user_id;
   document.getElementById("portal-user-avatar").textContent = (portalState.profile.name || portalState.profile.external_user_id || "用").slice(0, 1).toUpperCase();
+  loadPortalNotificationSummary().catch(() => {});
   return portalState.profile;
+}
+
+const notificationLabels = {
+  low_balance_warning: "账户余额预警", api_key_expiring: "API Key 即将过期", api_key_expired: "API Key 已过期",
+  api_key_created: "API Key 已创建", api_key_rotated: "API Key 已轮换", api_key_revoked: "API Key 已撤销",
+  api_key_status_updated: "API Key 状态已更新", account_logged_in: "账户登录", account_registered: "账户已注册",
+  password_reset_requested: "密码重置请求", portal_sessions_revoked: "登录会话已退出",
+};
+
+async function loadPortalNotificationSummary() {
+  const result = await portalApi("/portal/security-notifications");
+  const badge = document.getElementById("portal-notification-count");
+  const unread = Number(result.unread_count || 0);
+  badge.textContent = unread > 99 ? "99+" : String(unread);
+  badge.hidden = unread === 0;
+  return result;
+}
+
+async function portalNotificationDialog() {
+  const result = await portalApi("/portal/security-notifications");
+  const rows = result.data.map((item) => {
+    const details = item.details || {};
+    const description = item.event_type === "low_balance_warning"
+      ? `当前余额 ${formatMoney(details.balance_micros)}，低于预警阈值。`
+      : item.event_type.startsWith("api_key_") && details.name ? `${escapeHtml(details.name)}${details.expires_at ? ` · ${formatDate(details.expires_at)}` : ""}` : "账户安全事件已记录。";
+    return `<div class="notification-row ${item.read_at ? "read" : "unread"}"><span class="notification-icon"><i data-lucide="${item.read_at ? "bell" : "bell-ring"}"></i></span><div><strong>${escapeHtml(notificationLabels[item.event_type] || item.event_type)}</strong><p>${description}</p><small>${formatDate(item.created_at)}</small></div>${item.read_at ? "" : `<button class="icon-button compact-icon" data-read-notification="${item.id}" title="标记已读" aria-label="标记已读"><i data-lucide="check"></i></button>`}</div>`;
+  }).join("") || '<p class="dialog-copy">暂无通知。</p>';
+  openPortalDialog("通知中心", `<div class="dialog-body notification-dialog-body"><div class="notification-list">${rows}</div></div><div class="dialog-actions"><button class="secondary-button" type="button" id="portal-read-all">全部标记已读</button><button class="primary-button" type="button" data-close>完成</button></div>`);
+  document.getElementById("portal-read-all").addEventListener("click", async () => {
+    try { await portalApi("/portal/security-notifications/read-all", { method: "POST", body: "{}" }); await portalNotificationDialog(); await loadPortalNotificationSummary(); } catch (error) { portalToast(error.message, true); }
+  });
 }
 
 function activeProjectId() {
@@ -1516,6 +1548,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     sessionStorage.removeItem("token_portal_access"); portalState.token = ""; closePortalAccountMenu(); document.getElementById("portal-token").value = ""; showPortalAuth();
   });
   document.getElementById("portal-security").addEventListener("click", () => { closePortalAccountMenu(); portalSecurityDialog(); });
+  document.getElementById("portal-notifications").addEventListener("click", () => { closePortalAccountMenu(); portalNotificationDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-workspace-manager").addEventListener("click", () => { closePortalAccountMenu(); workspaceManagerDialog().catch((error) => portalToast(error.message, true)); });
   document.getElementById("portal-dialog-close").addEventListener("click", closePortalDialog);
   document.getElementById("key-search").addEventListener("input", (event) => { portalState.keyFilters.search = event.target.value; renderKeyTable(); });
@@ -1554,6 +1587,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.go) switchPortalView(target.dataset.go);
     if (target.dataset.action === "portal-back") navigatePortalBack();
     if (target.dataset.action === "portal-refresh") switchPortalView(portalState.view, { historyMode: "none" });
+    if (target.dataset.readNotification) {
+      try { await portalApi(`/portal/security-notifications/${target.dataset.readNotification}/read`, { method: "POST", body: "{}" }); await portalNotificationDialog(); await loadPortalNotificationSummary(); } catch (error) { portalToast(error.message, true); }
+    }
     if (target.dataset.action === "create-key") keyDialog();
     if (target.dataset.action === "model-create-key") { closePortalDialog(); await switchPortalView("keys"); keyDialog(); }
     if (target.dataset.action === "model-onboarding-create-key") {

@@ -8,6 +8,8 @@ P0 生产网关基础已经补充 64 位微元账本、供应商请求与路由�
 
 P1 运营治理已补充实时告警：管理概览和 `GET /admin/alerts` 会检查低余额、渠道熔断/异常、近期请求失败率、供应商成本倒挂和待处理订单，并标记是否阻断发布。告警按当前数据库数据计算，不依赖常驻调度器；生产环境可先接入 Prometheus，再将这些告警码映射到企业通知渠道。
 
+用户中心提供“通知中心”，会展示账户登录、安全事件、余额预警和 API Key 到期提醒，支持单条或全部标记已读。通知读取时按账户隔离，运营提醒使用 24 小时去重窗口，不会因重复刷新页面持续生成相同通知。
+
 告警评估会以稳定指纹写入 `alert_incidents`，应用默认每 60 秒执行一次；同一告警持续存在时只更新状态，不重复通知，首次触发、重新触发和恢复时通过安全通知 Webhook 投递。可通过 `POST /admin/alerts/evaluate` 手动执行并查看投递结果。Webhook 使用 `X-LokToken-Signature` HMAC-SHA256 签名和 `X-LokToken-Event` 事件类型头，失败投递保持待处理并在后续周期重试。
 
 管理控制台“用量管理 → 供应商账单”支持导入归一化 JSON 账单。`POST /admin/provider-bills/import` 按 `provider_request_id`（缺失时可用平台 `request_id` 作为 `line_key`）逐笔核对 Token 和供应商成本，输出 `matched`、`mismatch`、`unmatched` 三种状态；相同供应商和相同内容哈希的账单不会重复导入。成本以微元传入，允许差异阈值由 `TOKEN_PROVIDER_BILL_COST_TOLERANCE_MICROS` 配置。`GET /admin/provider-bills/report?days=30` 汇总指定周期的收入、供应商成本、毛利和毛利率，并按模型/渠道拆分。
