@@ -2,13 +2,17 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
-os.environ["TOKEN_DATABASE_URL"] = "sqlite:///./test-token.db"
+_TEST_DB_PATH = Path(tempfile.gettempdir()) / f"loktoken-tests-{os.getpid()}-{uuid.uuid4().hex}.db"
+os.environ["TOKEN_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
 os.environ["TOKEN_ADMIN_TOKEN"] = "test-admin"
 os.environ["TOKEN_MOCK_MODE"] = "true"
 os.environ["TOKEN_SEED_BUILTIN_MODELS"] = "true"
@@ -28,6 +32,12 @@ def setup_function() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     rate_limiter.reset()
+
+
+def teardown_module() -> None:
+    engine.dispose()
+    for suffix in ("", "-journal", "-shm", "-wal"):
+        (_TEST_DB_PATH.parent / f"{_TEST_DB_PATH.name}{suffix}").unlink(missing_ok=True)
 
 
 @pytest.mark.asyncio
@@ -144,6 +154,21 @@ def test_provider_catalogue_is_seeded_once_with_disabled_channels() -> None:
             "deepseek-v4-pro": "DeepSeek-V4-Pro-0813",
             "deepseek-v4-flash-vision-exp": "DeepSeek-V4-Flash-Vision-Exp",
         }
+
+
+def test_manual_payment_qr_is_exposed_only_as_non_automatic_checkout(monkeypatch) -> None:
+    from app.payment_providers import payment_providers
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "manual_payment_qr_url", "https://pay.example/qr.png")
+    monkeypatch.setattr(settings, "manual_payment_instructions", "备注订单号")
+    manual = next(item for item in payment_providers(settings) if item.id == "manual")
+    assert manual.automatic_confirmation is False
+    assert manual.qr_url == "https://pay.example/qr.png"
+    assert manual.instructions == "备注订单号"
+
+    monkeypatch.setattr(settings, "manual_payment_qr_url", "javascript:alert(1)")
+    assert next(item for item in payment_providers(settings) if item.id == "manual").qr_url is None
 
 
 def test_qwen_preset_includes_sota_and_task_model_candidates() -> None:
@@ -812,6 +837,59 @@ async def test_registered_user_can_complete_first_call_journey() -> None:
     assert requests.status_code == 200 and requests.json()["total"] == 1
     assert orders.status_code == 200 and orders.json()["data"][0]["status"] == "pending"
     assert user_guide.status_code == 200 and admin_guide.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_manual_payment_proof_and_rejection_flow() -> None:
+    from app.db import init_db
+
+    init_db()
+    transport = httpx.ASGITransport(app=app)
+    admin_headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        registered = await client.post(
+            "/auth/register",
+            json={"login_id": "payment-proof-user", "name": "Payment Proof User", "password": "correct-horse"},
+        )
+        portal_headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+        account_id = registered.json()["account"]["id"]
+        created = await client.post(
+            "/portal/payment-orders",
+            headers=portal_headers,
+            json={"account_id": account_id, "amount_micros": 25_000, "provider": "manual"},
+        )
+        order_id = created.json()["id"]
+        proof = await client.patch(
+            f"/portal/payment-orders/{order_id}/proof",
+            headers=portal_headers,
+            json={"payer_reference": "wx-flow-001", "payer_note": "已付款，请核对"},
+        )
+        rejected = await client.post(
+            f"/admin/payment-orders/{order_id}/reject",
+            headers=admin_headers,
+            json={"review_note": "未查到对应到账记录"},
+        )
+        repeated = await client.post(
+            f"/admin/payment-orders/{order_id}/reject",
+            headers=admin_headers,
+            json={"review_note": "重复处理"},
+        )
+        confirm_after_reject = await client.post(
+            f"/admin/payment-orders/{order_id}/confirm",
+            headers=admin_headers,
+            json={},
+        )
+        orders = await client.get("/portal/payment-orders", headers=portal_headers)
+        balance = await client.get("/portal/balance-summary", headers=portal_headers)
+
+    assert registered.status_code == 200
+    assert created.status_code == 200 and created.json()["status"] == "pending"
+    assert proof.status_code == 200 and proof.json()["payer_reference"] == "wx-flow-001"
+    assert rejected.status_code == 200 and rejected.json()["status"] == "rejected"
+    assert repeated.status_code == 200 and repeated.json()["status"] == "rejected"
+    assert confirm_after_reject.status_code == 409
+    assert orders.status_code == 200 and orders.json()["data"][0]["status"] == "rejected"
+    assert balance.status_code == 200 and balance.json()["balance_micros"] == 0
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ from .guardrails import rate_limiter
 from .model_release import model_is_callable
 from .models import AccountBalanceTransaction, ApiKey, BillingAccount, ExternalIdentity, GenerationTask, ModelChannel, ModelConfig, OidcLoginChallenge, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payment_providers import payment_providers, require_available_provider
-from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
+from .schemas import ActiveUpdate, ChatCompletionRequest, OrganizationCreate, OrganizationMemberCreate, PasswordResetConfirm, PasswordResetRequest, PaymentOrderCreate, PaymentProofUpdate, PortalApiKeyCreate, PortalLogin, PortalModelTestRequest, PortalRegister, ProjectCreate, RedemptionCodeRedeem, SecurityContactConfirm, SecurityContactUpdate, TrialLinkCreate
 from .security import PortalContext, create_key, create_password_reset_token, create_portal_session_token, create_trial_token, hash_key, hash_password, require_operator, require_portal_context, require_portal_session_context, verify_password
 from .services import call_provider_details, calculate_amount, create_provider_task, estimate_tokens, reserve_balance, save_usage, settle_balance, validate_model_request
 from .workspaces import accessible_workspaces, create_organization, create_project, ensure_default_project, ensure_personal_workspace, project_access, require_workspace_manager, workspace_access, workspace_data
@@ -201,6 +201,7 @@ def portal_key_query(context: PortalContext):
 
 
 def order_data(order: PaymentOrder) -> dict[str, object]:
+    provider = next((item for item in payment_providers() if item.id == order.provider), None)
     return {
         "id": order.id,
         "order_no": order.order_no,
@@ -211,6 +212,16 @@ def order_data(order: PaymentOrder) -> dict[str, object]:
         "created_at": order.created_at.isoformat(),
         "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         "refunded_at": order.refunded_at.isoformat() if order.refunded_at else None,
+        "reviewed_at": order.reviewed_at.isoformat() if order.reviewed_at else None,
+        "review_note": order.review_note,
+        "payer_reference": order.payer_reference,
+        "payer_note": order.payer_note,
+        "proof_submitted_at": order.proof_submitted_at.isoformat() if order.proof_submitted_at else None,
+        "payment_details": {
+            "automatic_confirmation": provider.automatic_confirmation if provider else False,
+            "qr_url": provider.qr_url if provider else None,
+            "instructions": provider.instructions if provider else None,
+        },
     }
 
 
@@ -1573,6 +1584,30 @@ def create_payment_order(payload: PaymentOrderCreate, account: BillingAccount = 
     db.add(order)
     db.flush()
     record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="payment_order.created", target_type="payment_order", target_id=order.id, details={"order_no": order.order_no, "amount_micros": order.amount_micros, "provider": order.provider})
+    db.commit()
+    db.refresh(order)
+    return order_data(order)
+
+
+@router.patch("/portal/payment-orders/{order_id}/proof")
+def update_payment_proof(
+    order_id: int,
+    payload: PaymentProofUpdate,
+    account: BillingAccount = Depends(portal_session_account),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    order = db.scalar(select(PaymentOrder).where(PaymentOrder.id == order_id, PaymentOrder.account_id == account.id).with_for_update())
+    if not order:
+        raise HTTPException(status_code=404, detail="payment order not found")
+    if order.status != "pending":
+        raise HTTPException(status_code=409, detail=f"cannot update proof for an order in {order.status} status")
+    reference = payload.payer_reference.strip()
+    if not reference:
+        raise HTTPException(status_code=422, detail="payer reference is required")
+    order.payer_reference = reference
+    order.payer_note = payload.payer_note.strip() if payload.payer_note else None
+    order.proof_submitted_at = utcnow()
+    record_audit_event(db, actor_type="portal", actor_id=account.external_user_id, action="payment_order.proof_submitted", target_type="payment_order", target_id=order.id, details={"order_no": order.order_no})
     db.commit()
     db.refresh(order)
     return order_data(order)

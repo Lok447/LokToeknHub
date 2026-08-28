@@ -33,7 +33,7 @@ from .payment_providers import payment_providers, require_available_provider
 from .portal import deliver_account_invitation, router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
+from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_password_reset_token, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
@@ -205,6 +205,7 @@ def readyz() -> dict[str, str]:
 
 
 def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> dict[str, object]:
+    provider = next((item for item in payment_providers() if item.id == order.provider), None)
     return {
         "id": order.id,
         "order_no": order.order_no,
@@ -220,6 +221,14 @@ def payment_order_data(order: PaymentOrder, account_name: str | None = None) -> 
         "reviewed_by_admin_id": order.reviewed_by_admin_id,
         "reviewed_at": order.reviewed_at.isoformat() if order.reviewed_at else None,
         "review_note": order.review_note,
+        "payer_reference": order.payer_reference,
+        "payer_note": order.payer_note,
+        "proof_submitted_at": order.proof_submitted_at.isoformat() if order.proof_submitted_at else None,
+        "payment_details": {
+            "automatic_confirmation": provider.automatic_confirmation if provider else False,
+            "qr_url": provider.qr_url if provider else None,
+            "instructions": provider.instructions if provider else None,
+        },
     }
 
 
@@ -1001,6 +1010,30 @@ def confirm_payment_order(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return payment_order_data(order)
+
+
+@app.post("/admin/payment-orders/{order_id}/reject", dependencies=[Depends(require_finance_operator)])
+def reject_payment_order(
+    order_id: int,
+    payload: PaymentReject,
+    context: AdminContext = Depends(require_finance_operator),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    order = db.scalar(select(PaymentOrder).where(PaymentOrder.id == order_id).with_for_update())
+    if not order:
+        raise HTTPException(status_code=404, detail="payment order not found")
+    if order.status == "rejected":
+        return payment_order_data(order)
+    if order.status != "pending":
+        raise HTTPException(status_code=409, detail=f"cannot reject an order in {order.status} status")
+    order.status = "rejected"
+    order.reviewed_by_admin_id = context.user.id if context.user else None
+    order.reviewed_at = utcnow()
+    order.review_note = payload.review_note.strip()
+    record_audit_event(db, actor_type="admin", actor_id=context.actor_id, action="payment_order.rejected", target_type="payment_order", target_id=order.id, details={"order_no": order.order_no, "review_note": order.review_note})
+    db.commit()
+    db.refresh(order)
     return payment_order_data(order)
 
 

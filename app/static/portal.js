@@ -1275,8 +1275,8 @@ function renderOrders() {
   const items = portalState.orders.filter((item) => !selectedStatus || item.status === selectedStatus);
   document.getElementById("order-result-count").textContent = `显示 ${formatNumber(items.length)} 个 / 共 ${formatNumber(portalState.orders.length)} 个订单`;
   document.getElementById("portal-orders-table").innerHTML = items.length ? items.map((item) => `
-    <tr><td class="mono" title="${escapeHtml(item.order_no)}">${escapeHtml(shortId(item.order_no))}</td><td>${escapeHtml(item.provider)}</td><td><strong>${formatMoney(item.amount_micros)}</strong></td><td>${statusBadge(item.status)}</td><td>${formatDate(item.created_at)}</td><td>${item.paid_at ? formatDate(item.paid_at) : "-"}</td></tr>
-  `).join("") : emptyRow(6);
+    <tr><td class="mono" title="${escapeHtml(item.order_no)}">${escapeHtml(shortId(item.order_no))}</td><td>${escapeHtml(item.provider)}</td><td><strong>${formatMoney(item.amount_micros)}</strong></td><td title="${escapeHtml(item.review_note || "")}">${statusBadge(item.status)}</td><td>${item.payer_reference ? `<span class="mono" title="${escapeHtml(item.payer_note || "")}">${escapeHtml(item.payer_reference)}</span>` : "-"}</td><td>${formatDate(item.created_at)}</td><td>${item.paid_at ? formatDate(item.paid_at) : "-"}</td><td>${item.status === "pending" ? `<button class="table-button" data-action="payment-proof" data-id="${item.id}">${item.payer_reference ? "修改凭证" : "提交凭证"}</button>` : "-"}</td></tr>
+  `).join("") : emptyRow(8);
 }
 
 async function loadOrders() {
@@ -1428,7 +1428,34 @@ async function paymentDialog() {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
     const payload = { account_id: portalState.profile.id, project_id: activeProjectId(), amount_micros: Math.round(Number(data.amount) * 1_000_000), provider: data.provider };
-    try { await portalApi("/portal/payment-orders", { method: "POST", body: JSON.stringify(payload) }); closePortalDialog(); portalToast("充值申请已提交"); await Promise.all([loadQuota(), loadOrders()]); } catch (error) { portalToast(error.message, true); }
+    try {
+      const result = await portalApi("/portal/payment-orders", { method: "POST", body: JSON.stringify(payload) });
+      const details = result.payment_details || {};
+      const qr = details.qr_url ? `<div class="payment-qr"><img src="${escapeHtml(details.qr_url)}" alt="收款二维码"></div>` : "";
+      const instructions = details.instructions ? `<p class="dialog-copy">${escapeHtml(details.instructions)}</p>` : "";
+      closePortalDialog();
+      if (details.automatic_confirmation === false && (qr || instructions)) {
+        openPortalDialog("充值申请已提交", `<div class="dialog-body"><div class="key-secret-alert"><i data-lucide="triangle-alert"></i><span>个人收款码属于人工确认通道，付款后不会自动入账。</span></div>${qr}${instructions}<div class="field"><label>订单号</label><div class="secret-box mono">${escapeHtml(result.order_no)}</div></div></div><div class="dialog-actions"><button class="primary-button" type="button" data-close>我已了解</button></div>`);
+      } else {
+        portalToast("充值申请已提交");
+      }
+      await Promise.all([loadQuota(), loadOrders()]);
+    } catch (error) { portalToast(error.message, true); }
+  });
+}
+
+function paymentProofDialog(orderId) {
+  const item = portalState.orders.find((order) => order.id === Number(orderId));
+  if (!item || item.status !== "pending") return;
+  openPortalDialog("提交付款凭证", `<form id="portal-payment-proof-form"><div class="dialog-body"><p class="dialog-copy">请填写转账流水号或付款备注，便于管理员核对。提交后仍需人工确认到账。</p><div class="field"><label for="payment-proof-reference">付款流水号 / 付款人备注</label><input id="payment-proof-reference" name="payer_reference" value="${escapeHtml(item.payer_reference || "")}" minlength="3" maxlength="160" required></div><div class="field"><label for="payment-proof-note">补充说明（可选）</label><textarea id="payment-proof-note" name="payer_note" maxlength="500" rows="3">${escapeHtml(item.payer_note || "")}</textarea></div></div><div class="dialog-actions"><button type="button" class="secondary-button" data-close>取消</button><button class="primary-button" type="submit">提交凭证</button></div></form>`);
+  document.getElementById("portal-payment-proof-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      await portalApi(`/portal/payment-orders/${orderId}/proof`, { method: "PATCH", body: JSON.stringify(Object.fromEntries(new FormData(event.currentTarget))) });
+      closePortalDialog();
+      portalToast("付款凭证已提交，等待人工确认");
+      await loadOrders();
+    } catch (error) { portalToast(error.message, true); }
   });
 }
 
@@ -1599,6 +1626,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     if (target.dataset.action === "key-columns") keyColumnsDialog();
     if (target.dataset.action === "create-payment") paymentDialog().catch((error) => portalToast(error.message, true));
+    if (target.dataset.action === "payment-proof") paymentProofDialog(target.dataset.id);
     if (target.dataset.toggleKey) {
       try { await portalApi(`/portal/api-keys/${target.dataset.toggleKey}`, { method: "PATCH", body: JSON.stringify({ active: target.dataset.active === "true" }) }); portalToast(target.dataset.active === "true" ? "Key 已启用" : "Key 已停用"); await loadKeys(); } catch (error) { portalToast(error.message, true); }
     }

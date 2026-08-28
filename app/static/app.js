@@ -225,6 +225,7 @@ function paymentBadge(status) {
   const map = {
     pending: ["warning", "待支付"],
     paid: ["success", "已支付"],
+    rejected: ["error", "已拒绝"],
     refunded: ["neutral", "已退款"],
   };
   const [kind, label] = map[status] || ["neutral", status || "未知"];
@@ -473,7 +474,7 @@ async function loadOverview() {
   document.getElementById("recent-usage").innerHTML = recent.length ? recent.map((item) => `
     <tr>
       <td class="mono" title="${escapeHtml(item.request_id)}">${escapeHtml(shortId(item.request_id))}</td>
-      <td>${escapeHtml(item.account_name)}</td>
+      <td><div class="primary-cell"><strong>${escapeHtml(item.account_name)}</strong>${item.payer_reference ? `<span class="secondary mono" title="${escapeHtml(item.payer_note || "")}">凭证：${escapeHtml(item.payer_reference)}</span>` : '<span class="secondary">未提交付款凭证</span>'}</div></td>
       <td>${escapeHtml(item.model)}</td>
       <td>${formatNumber(item.total_tokens)}</td>
       <td>${formatMoney(item.amount_micros)}</td>
@@ -1006,7 +1007,7 @@ async function loadPayments() {
       <td>${paymentBadge(item.status)}</td>
       <td>${formatDate(item.created_at)}</td>
       <td class="align-right"><div class="table-actions">
-        ${item.status === "pending" && canOperate() ? `<button class="table-button" data-action="confirm-payment" data-id="${item.id}">确认支付</button>` : ""}
+        ${item.status === "pending" && canOperate() ? `<button class="table-button" data-action="confirm-payment" data-id="${item.id}">确认支付</button><button class="table-button danger" data-action="reject-payment" data-id="${item.id}">拒绝</button>` : ""}
         ${item.status === "paid" && isSuperadmin() ? `<button class="table-button danger" data-action="refund-payment" data-id="${item.id}">退款</button>` : ""}
         ${item.status === "refunded" ? '<span class="secondary">已完成</span>' : ""}
       </div></td>
@@ -1702,6 +1703,12 @@ async function confirmPayment(orderId) {
   try { await api(`/admin/payment-orders/${orderId}/confirm`, { method: "POST", body: "{}" }); toast("支付已确认，余额已入账"); await loadPayments(); } catch (error) { toast(error.message, true); }
 }
 
+async function rejectPayment(orderId) {
+  const reason = window.prompt("请输入拒绝原因", "未查到对应到账记录");
+  if (!reason || !reason.trim()) return;
+  try { await api(`/admin/payment-orders/${orderId}/reject`, { method: "POST", body: JSON.stringify({ review_note: reason.trim() }) }); toast("订单已拒绝"); await loadPayments(); } catch (error) { toast(error.message, true); }
+}
+
 async function refundPayment(orderId) {
   if (!window.confirm("确认全额退款？账户余额将同步扣减。")) return;
   try { await api(`/admin/payment-orders/${orderId}/refund`, { method: "POST", body: "{}" }); toast("订单已退款"); await loadPayments(); } catch (error) { toast(error.message, true); }
@@ -1904,6 +1911,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (target.dataset.action === "create-redemption") redemptionDialog();
     if (target.dataset.action === "toggle-redemption") toggleRedemption(target.dataset.id, target.dataset.active === "true");
     if (target.dataset.action === "confirm-payment") confirmPayment(target.dataset.id);
+    if (target.dataset.action === "reject-payment") rejectPayment(target.dataset.id);
     if (target.dataset.action === "refund-payment") refundPayment(target.dataset.id);
     if (target.dataset.action === "reconcile-ledger") reconcileLedger();
     if (target.dataset.action === "provider-bills") providerBillsDialog().catch((error) => toast(error.message, true));

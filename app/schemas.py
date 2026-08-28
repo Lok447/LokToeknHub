@@ -183,6 +183,15 @@ class PaymentConfirm(BaseModel):
     review_note: str | None = Field(default=None, max_length=500)
 
 
+class PaymentProofUpdate(BaseModel):
+    payer_reference: str = Field(min_length=3, max_length=160)
+    payer_note: str | None = Field(default=None, max_length=500)
+
+
+class PaymentReject(BaseModel):
+    review_note: str = Field(min_length=1, max_length=500)
+
+
 class PaymentRefund(BaseModel):
     review_note: str | None = Field(default=None, max_length=500)
 

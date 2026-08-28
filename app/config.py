@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     channel_circuit_cooldown_seconds: int = 60
     payment_webhook_secret: str = "change-webhook-secret"
     require_real_payment: bool = True
+    manual_payment_qr_url: str = ""
+    manual_payment_instructions: str = "请扫码付款，并在订单备注中填写订单号；付款后等待管理员确认。"
     trial_signing_secret: str = "change-trial-secret"
     trial_token_ttl_seconds: int = 604800
     public_base_url: str = "http://127.0.0.1:8000"

@@ -67,6 +67,8 @@
 .field-hint { display: block; margin-top: 1px; }
 .key-secret-alert { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 5px; color: var(--warning); background: var(--warning-soft); font-size: 11px; }
 .key-secret-alert svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.payment-qr { display: flex; justify-content: center; padding: 12px 0; }
+.payment-qr img { display: block; width: min(240px, 100%); aspect-ratio: 1; object-fit: contain; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
 .key-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 14px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
 .key-detail-head > div { min-width: 0; display: grid; gap: 5px; }
 .key-detail-head strong { color: var(--ink); font-size: 15px; }

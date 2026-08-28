@@ -109,6 +109,12 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN reviewed_at DATETIME"))
         if "review_note" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN review_note TEXT"))
+        if "payer_reference" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN payer_reference VARCHAR(160)"))
+        if "payer_note" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN payer_note TEXT"))
+        if "proof_submitted_at" not in payment_order_columns:
+            connection.execute(text("ALTER TABLE payment_orders ADD COLUMN proof_submitted_at DATETIME"))
         if "workspace_id" not in payment_order_columns:
             connection.execute(text("ALTER TABLE payment_orders ADD COLUMN workspace_id INTEGER"))
         if "project_id" not in payment_order_columns:

@@ -297,6 +297,9 @@ class PaymentOrder(Base):
     reviewed_by_admin_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payer_reference: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    payer_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proof_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AdminUser(Base):

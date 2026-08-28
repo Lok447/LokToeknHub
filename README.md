@@ -286,9 +286,11 @@ curl.exe -N http://127.0.0.1:8000/v1/chat/completions `
 
 回调请求体使用 `TOKEN_PAYMENT_WEBHOOK_SECRET` 进行 HMAC-SHA256 签名，并通过 `X-Token-Signature: sha256=<hex>` 传入。`/admin/payment-orders/{order_id}/confirm` 仅用于人工确认或联调环境。直接余额充值接口继续保留，用于线下调整，不应代替线上支付订单。
 
-当前只有 `manual`（人工确认）支付渠道可用。微信支付和支付宝会在管理后台显示为“未接入”，平台不会接受这两个渠道的订单；相关环境变量仅是后续适配器的配置占位。正式接入需要商户号、应用 ID、私钥和平台证书，并实现渠道签名验签、异步通知校验以及支付链接或二维码生成。
+当前只有 `manual`（人工确认）支付渠道可用。微信支付和支付宝会在管理后台显示为“未接入”，平台不会接受这两个渠道的订单；相关环境变量仅是后续适配器的配置占位。开发或小范围联调可以配置 `TOKEN_MANUAL_PAYMENT_QR_URL` 展示个人收款码（支持 HTTPS 图片地址或 `/static/...` 路径），并通过 `TOKEN_MANUAL_PAYMENT_INSTRUCTIONS` 补充付款说明。个人收款码没有可靠的商户回调、金额校验和自动对账能力，付款后必须由管理员核验并确认订单，不能作为生产自动支付。正式接入需要商户号、应用 ID、私钥和平台证书，并实现渠道签名验签、异步通知校验以及支付链接或二维码生成。
 
 ## 发布检查
+
+按阶段执行发布检查：`python scripts/release_stage_check.py A`（本地开发）、`B`（小范围内测）或 `C`（公开免费/邀请测试）。详细入口、验收证据和当前 P0 放行标准见 [`docs/RELEASE_STAGES.md`](docs/RELEASE_STAGES.md)。
 
 1. 使用 `.env.docker.example` 创建 `.env.docker`，替换全部密码和签名密钥，并保留 `TOKEN_MOCK_MODE=false`。
 2. 以空 PostgreSQL 数据库启动 Compose，让容器执行 `alembic upgrade head`；不要在已由开发模式自动建表的 SQLite 文件上直接执行首次 Alembic 升级。
