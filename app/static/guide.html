@@ -12,7 +12,7 @@
 </head>
 <body class="guide-page">
   <header class="guide-topbar">
-    <a class="guide-brand" href="/"><img src="/static/loksystem-icon.png" alt="LokSystem"><span><strong>LokSystem</strong><small>LOKTOKEN</small></span></a>
+    <a class="guide-brand" href="/"><img src="/static/loksystem-icon.png" alt="LokToken"><span><strong>LokToken</strong><small>MODEL SERVICE</small></span></a>
     <nav aria-label="文档导航"><a id="guide-console-link" href="/">返回控制台</a><a href="/docs" target="_blank">OpenAPI 参考</a></nav>
   </header>
 
@@ -29,10 +29,10 @@
         <section id="user-start"><p class="guide-index">01 / 开始使用</p><h2>注册或使用试用链接进入</h2><p>在用户中心可直接注册账号，也可以使用管理员发放的试用链接进入。注册账号用于长期使用；试用链接创建的 API Key 会跟随试用期限自动失效。</p><div class="guide-note"><i data-lucide="shield-check"></i><span>登录后可在右上角确认当前账户身份；退出会清除当前浏览器会话。</span></div></section>
         <section id="user-models"><p class="guide-index">02 / 选择模型</p><h2>在模型广场确认可调用能力</h2><p>模型广场提供公开模型名称、能力标签、价格、渠道健康状态和 OpenAI 兼容调用示例。将示例中的 <code>YOUR_API_KEY</code> 替换为自己的 Key 后即可接入。</p><ul><li>优先选择显示“渠道健康”的模型。</li><li>调用请求中的 <code>model</code> 必须使用模型广场显示的公开模型 ID。</li><li>模型价格以输入和输出 Token 分别结算。</li></ul></section>
         <section id="user-quota"><p class="guide-index">03 / 获取额度</p><h2>通过福利兑换或充值申请补充额度</h2><p>新注册账户默认余额为 0。可在“兑换福利”输入有效兑换码，额度会即时到账；也可以在“额度管理”创建充值申请，待运营人员确认后入账。</p><div class="guide-note"><i data-lucide="wallet-cards"></i><span>当前阶段不接入真实在线支付。订单状态、到账时间和退款状态可在订单管理中追踪。</span></div></section>
-        <section id="user-api"><p class="guide-index">04 / 创建 API Key</p><h2>为应用创建独立凭证</h2><p>在 API管理中创建 Key，可按应用设置名称、有效期和消费上限。完整 Key 只在创建成功时显示一次，后续只能查看前缀。</p><pre><code>curl https://YOUR_DOMAIN/v1/chat/completions \
+        <section id="user-api"><p class="guide-index">04 / 创建 API Key</p><h2>为应用创建独立凭证</h2><p>在密钥管理中创建 Key，可按应用设置名称、有效期和消费上限。完整 Key 只在创建成功时显示一次，后续只能查看前缀。</p><pre><code>curl https://YOUR_DOMAIN/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"lok-chat","messages":[{"role":"user","content":"你好"}]}'</code></pre></section>
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"你好"}]}'</code></pre><p class="guide-note"><i data-lucide="circle-alert"></i><span>如果账户余额不足，接口会返回 <code>402</code>，并在 <code>error.code</code> 中返回 <code>insufficient_balance</code>；请先充值或兑换额度。<code>401</code> 才表示 API Key 无效或已过期。</span></p></section>
         <section id="user-records"><p class="guide-index">05 / 查看记录</p><h2>用请求记录排查调用问题</h2><p>请求记录支持按时间、模型、API Key、状态和请求 ID 筛选。详情中可查看 Trace ID、Token、耗时、费用和错误信息；不会展示或保存模型输入、输出正文。</p><p>需要对接程序时，可使用右上方 OpenAPI 参考查看完整参数和响应结构。</p></section>
       </div>
     </section>
@@ -40,8 +40,8 @@
     <section class="guide-layout" data-guide="admin" hidden>
       <aside class="guide-aside"><p>管理员使用路径</p><a href="#admin-models">01 模型管理</a><a href="#admin-accounts">02 账户与 API</a><a href="#admin-orders">03 订单与福利</a><a href="#admin-operations">04 运营与审计</a><a href="#admin-release">05 上线检查</a></aside>
       <div class="guide-content">
-        <section id="admin-models"><p class="guide-index">01 / 模型管理</p><h2>接入上游并维护统一模型目录</h2><p>在模型管理中新增单个模型，或批量读取 OpenAI 兼容上游的模型目录。为用户公开的模型名称、统一定价和渠道配置均在此维护。</p><ul><li>每个公开模型可配置多个渠道，按优先级和权重路由。</li><li>通过“检测全部渠道”确认上游 <code>/models</code> 的可用性。</li><li>生产环境只引用环境变量中的供应商密钥，不在浏览器或数据库保存明文。</li></ul></section>
-        <section id="admin-accounts"><p class="guide-index">02 / 账户与 API</p><h2>管理账户、余额和访问凭证</h2><p>账户管理用于维护 LokSystem 用户与共享余额；API管理用于创建、停用和审查 API Key。管理员还可为账户生成限时试用链接。</p><div class="guide-note"><i data-lucide="key-round"></i><span>API Key 是实际调用模型网关的凭证；用户中心会话令牌不能用于调用 <code>/v1</code> 接口。</span></div></section>
+        <section id="admin-models"><p class="guide-index">01 / 模型管理</p><h2>接入上游并维护统一模型目录</h2><p>系统初始化时会预置 DeepSeek、Qwen、GLM、Kimi、MiniMax 和 Doubao 的常用文本、多模态、图像与视频候选，后续也可新增单个模型或批量读取 OpenAI 兼容上游目录。候选默认停用，不会在价格、密钥和真实渠道检测完成前向用户发布。</p><ul><li>每个公开模型可配置多个渠道，按优先级和权重路由。</li><li>供应商密钥可由控制台加密保存，也可引用部署环境变量；页面只显示配置状态，不回显明文。</li><li>通过“检测全部渠道”确认上游 <code>/models</code> 的可用性，再设置平台价格、执行预检并启用。</li><li>图像和视频模型当前作为候选目录展示，需等待对应统一调用适配器与计费规则启用。</li></ul></section>
+        <section id="admin-accounts"><p class="guide-index">02 / 账户与密钥</p><h2>管理账户、余额和访问凭证</h2><p>账户管理用于维护客户账户与共享余额；密钥管理用于创建、停用和审查 API Key。管理员还可为账户生成限时试用链接。</p><div class="guide-note"><i data-lucide="key-round"></i><span>API Key 是实际调用模型网关的凭证；用户中心会话令牌不能用于调用 <code>/v1</code> 接口。</span></div></section>
         <section id="admin-orders"><p class="guide-index">03 / 订单与福利</p><h2>处理额度发放，不直接处理真实支付</h2><p>订单管理记录用户充值申请，可在确认到账后入账或执行退款。福利管理可创建限次、可过期的兑换码，用于试用、活动和线下发放。</p><p>所有额度变动都写入账户流水，重复确认和重复兑换均受幂等约束。</p></section>
         <section id="admin-operations"><p class="guide-index">04 / 运营与审计</p><h2>从用量管理和安全审计观察平台</h2><p>用量管理展示近期模型调用的账户、API Key、模型、Token、费用和状态。安全审计记录关键运营动作和用户门户动作，不记录密钥、请求正文或模型输出。</p></section>
         <section id="admin-release"><p class="guide-index">05 / 上线检查</p><h2>生产发布前完成最小安全配置</h2><ul><li>关闭 Mock 模式和自动建表，使用 Alembic 管理数据库迁移。</li><li>替换管理员、支付回调和会话签名密钥，均应使用独立高强度随机值。</li><li>配置 HTTPS 域名、可信 CORS 来源、数据库备份和网关层共享限流。</li><li>在模型管理完成真实供应商渠道配置和健康检查后，再向用户公开模型。</li></ul></section>

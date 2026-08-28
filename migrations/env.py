@@ -1,7 +1,7 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, inspect, pool, text
 
 from app.config import get_settings
 from app.db import Base
@@ -35,6 +35,21 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        if connection.dialect.name == "postgresql":
+            # Alembic defaults version_num to VARCHAR(32), while this project's
+            # descriptive revision identifiers are longer. Bootstrap a wider
+            # column before Alembic records the first revision on PostgreSQL.
+            if not inspect(connection).has_table("alembic_version"):
+                connection.execute(text(
+                    "CREATE TABLE alembic_version ("
+                    "version_num VARCHAR(255) NOT NULL PRIMARY KEY)"
+                ))
+            else:
+                connection.execute(text(
+                    "ALTER TABLE alembic_version "
+                    "ALTER COLUMN version_num TYPE VARCHAR(255)"
+                ))
+            connection.commit()
         context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
         with context.begin_transaction():
             context.run_migrations()

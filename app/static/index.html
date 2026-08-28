@@ -5,30 +5,51 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LokToken管理控制台</title>
   <link rel="icon" type="image/png" href="/static/loksystem-icon.png">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=console-20260827-5">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=console-20260827-21" defer></script>
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
     <div class="auth-layout">
       <section class="auth-product-intro">
-        <div class="auth-product-brand"><img src="/static/loksystem-icon.png" alt="LokSystem"><span><strong>LokSystem</strong><small>LOKTOKEN</small></span></div>
-        <div class="auth-product-copy"><p>UNIFIED MODEL SERVICE</p><h1>LokToken</h1><h2>统一模型接入与运营管理</h2><span>面向 LokSystem 生态的模型管理、账户额度、统一 API 与调用运营平台。</span></div>
+        <div class="auth-product-brand"><img src="/static/loksystem-icon.png" alt="LokToken"><span><strong>LokToken</strong><small>MODEL SERVICE</small></span></div>
+        <div class="auth-product-copy"><p>UNIFIED MODEL SERVICE</p><h1>LokToken</h1><h2>统一模型接入与运营管理</h2><span>连接多家模型供应商，统一管理模型、账户额度、API Key 与调用运营。</span></div>
         <div class="auth-product-points"><div><i data-lucide="boxes"></i><span>多模型统一接入</span></div><div><i data-lucide="shield-check"></i><span>账户与凭证治理</span></div><div><i data-lucide="activity"></i><span>调用链路可追溯</span></div></div>
       </section>
       <div class="auth-panel auth-panel-form">
-        <div class="auth-panel-heading"><p class="auth-kicker">LOKTOKEN / ADMIN</p><h2>管理控制台</h2><span>使用管理员密钥进入服务运营与配置界面。</span></div>
+        <div class="auth-panel-heading"><p class="auth-kicker" id="auth-kicker">LOKTOKEN / ADMIN</p><h2 id="auth-title">管理控制台</h2><span id="auth-description">使用管理员账号进入服务运营与配置界面。</span></div>
         <form id="auth-form">
-          <label for="admin-token">管理员密钥</label>
+          <label for="admin-login-id">管理员账号</label>
+          <input id="admin-login-id" name="login_id" autocomplete="username" placeholder="输入管理员账号" required autofocus>
+          <label for="admin-password">密码</label>
           <div class="password-row">
-            <input id="admin-token" name="token" type="password" autocomplete="current-password" placeholder="输入管理员密钥" required autofocus>
-            <button class="icon-button" id="toggle-token" type="button" title="显示密钥" aria-label="显示密钥"><i data-lucide="eye"></i></button>
+            <input id="admin-password" name="password" type="password" autocomplete="current-password" placeholder="至少 8 位" required minlength="8">
+            <button class="icon-button" id="toggle-token" type="button" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
           </div>
           <button class="primary-button full-button" type="submit"><i data-lucide="log-in"></i><span>进入管理控制台</span></button>
         </form>
+        <form id="bootstrap-form" hidden>
+          <label for="bootstrap-token">初始化令牌</label>
+          <div class="password-row">
+            <input id="bootstrap-token" name="bootstrap_token" type="password" autocomplete="off" placeholder="输入 TOKEN_ADMIN_TOKEN" required minlength="1">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-token" title="显示初始化令牌" aria-label="显示初始化令牌"><i data-lucide="eye"></i></button>
+          </div>
+          <label for="bootstrap-login-id">管理员账号</label>
+          <input id="bootstrap-login-id" name="login_id" autocomplete="username" placeholder="输入管理员账号" required minlength="3" maxlength="160">
+          <label for="bootstrap-password">管理员密码</label>
+          <div class="password-row">
+            <input id="bootstrap-password" name="password" type="password" autocomplete="new-password" placeholder="至少 8 位" required minlength="8" maxlength="128">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-password" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
+          </div>
+          <label for="bootstrap-password-confirm">确认密码</label>
+          <div class="password-row">
+            <input id="bootstrap-password-confirm" name="password_confirm" type="password" autocomplete="new-password" placeholder="再次输入管理员密码" required minlength="8" maxlength="128">
+            <button class="icon-button" type="button" data-password-toggle="bootstrap-password-confirm" title="显示密码" aria-label="显示密码"><i data-lucide="eye"></i></button>
+          </div>
+          <button class="primary-button full-button" type="submit"><i data-lucide="shield-check"></i><span>创建超级管理员</span></button>
+        </form>
         <p class="auth-error" id="auth-error" role="alert"></p>
-        <a class="auth-doc-link" href="/guide/admin"><i data-lucide="book-open"></i><span>查看管理文档</span></a>
       </div>
     </div>
   </section>
@@ -37,40 +58,42 @@
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="/static/loksystem-icon.png" alt="">
-        <span class="brand-copy"><strong>LokSystem</strong><small>TOKEN</small></span>
+        <span class="brand-copy"><strong>LokToken</strong><small>MODEL SERVICE</small></span>
       </div>
       <p class="nav-label">服务管理</p>
       <nav aria-label="主导航">
         <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>管理概览</span></button>
+        <button class="nav-item" data-view="accounts"><i data-lucide="users-round"></i><span>账户与访问</span></button>
         <button class="nav-item" data-view="models"><i data-lucide="boxes"></i><span>模型管理</span></button>
-        <button class="nav-item" data-view="accounts"><i data-lucide="building-2"></i><span>账户管理</span></button>
-        <button class="nav-item" data-view="keys"><i data-lucide="key-round"></i><span>API管理</span></button>
         <button class="nav-item" data-view="payments"><i data-lucide="credit-card"></i><span>订单管理</span></button>
         <button class="nav-item" data-view="redemptions"><i data-lucide="gift"></i><span>福利管理</span></button>
         <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量管理</span></button>
         <button class="nav-item" data-view="audit"><i data-lucide="shield-check"></i><span>安全审计</span></button>
       </nav>
       <div class="sidebar-footer">
-        <a href="/guide/admin" target="_blank"><i data-lucide="book-open"></i><span>管理文档</span></a>
-        <button id="logout-button"><i data-lucide="log-out"></i><span>退出</span></button>
+        <div class="account-menu">
+          <button class="account-menu-trigger" id="admin-account-trigger" type="button" aria-expanded="false" aria-controls="admin-account-menu">
+            <span class="account-avatar" id="admin-user-avatar">管</span>
+            <span class="account-summary"><strong id="admin-user-name">管理员</strong><small id="admin-user-role">管理账号</small></span>
+            <i data-lucide="chevron-up"></i>
+          </button>
+          <div class="account-menu-panel" id="admin-account-menu" hidden>
+            <button id="admin-personal-space" type="button"><i data-lucide="user-round"></i><span>个人空间</span></button>
+            <button id="logout-button" type="button"><i data-lucide="log-out"></i><span>退出</span></button>
+          </div>
+        </div>
       </div>
     </aside>
 
     <main>
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">LOKSYSTEM / TOKEN</p>
-          <h1 id="page-title">管理概览</h1>
-        </div>
-        <div class="topbar-actions">
-          <span class="environment"><span class="status-dot"></span>Mock 环境</span>
-          <button class="icon-button" id="refresh-button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
-        </div>
-      </header>
-
       <div class="content">
         <section class="view active" id="view-overview">
+          <div class="section-header page-section-header"><div><h2>管理概览</h2><p>平台运营状态、模型调用与待办事项</p></div><div class="content-page-actions" id="admin-page-actions-overview"></div></div>
           <div class="metric-grid" id="overview-metrics"></div>
+          <section class="panel operational-alerts-panel">
+            <div class="section-header"><div><h2>运营告警</h2><p>余额、渠道、失败率、成本与待办</p></div><span class="badge neutral" id="operational-alert-count">读取中</span></div>
+            <div class="operational-alert-list" id="operational-alerts"></div>
+          </section>
           <div class="split-layout">
             <section class="panel wide-panel">
               <div class="section-header"><div><h2>最近调用</h2><p>最新 8 条模型请求</p></div><button class="text-button" data-go="usage">查看全部<i data-lucide="arrow-right"></i></button></div>
@@ -84,39 +107,49 @@
         </section>
 
         <section class="view" id="view-accounts">
-          <div class="section-header page-section-header"><div><h2>账户管理</h2><p>loksystem 用户与共享余额</p></div><button class="primary-button" data-action="create-account"><i data-lucide="plus"></i><span>新建账户</span></button></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>账户</th><th>外部用户 ID</th><th>API Key</th><th>余额</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div></section>
-        </section>
-
-        <section class="view" id="view-keys">
-          <div class="section-header page-section-header"><div><h2>API Key</h2><p>账户访问凭证</p></div><button class="primary-button" data-action="create-key"><i data-lucide="plus"></i><span>生成 Key</span></button></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div></section>
+          <div class="section-header page-section-header"><div><h2>账户与访问</h2><p>账户主体、共享余额与 API 访问凭证</p></div><div class="content-page-actions" id="admin-page-actions-accounts"></div></div>
+          <div class="account-access-tabs" role="tablist" aria-label="账户与访问视图">
+            <button class="active" type="button" role="tab" aria-selected="true" aria-controls="account-access-accounts" data-account-access-tab="accounts"><i data-lucide="building-2"></i><span>账户</span></button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="account-access-keys" data-account-access-tab="keys"><i data-lucide="key-round"></i><span>API Key</span></button>
+          </div>
+          <section class="panel" id="account-access-accounts" role="tabpanel"><div class="account-list-toolbar"><div class="input-with-icon"><i data-lucide="search"></i><input id="account-search" type="search" placeholder="搜索账户名称、外部 ID 或登录名" aria-label="搜索账户"></div><select id="account-active-filter" aria-label="账户状态筛选"><option value="">全部状态</option><option value="true">已启用</option><option value="false">已停用</option></select><select id="account-access-filter" aria-label="访问模式筛选"><option value="">全部访问模式</option><option value="api">API</option><option value="portal">用户中心</option></select><select id="account-page-size" aria-label="账户每页数量"><option value="25">25 条/页</option><option value="50">50 条/页</option><option value="100">100 条/页</option></select><span id="accounts-result-count" class="table-result-count">共 0 条</span></div><div class="table-wrap"><table><thead><tr><th>账户</th><th>类型</th><th>访问就绪</th><th>余额</th><th>近 30 天消费</th><th>最近活动</th><th>状态</th><th class="align-right">操作</th></tr></thead><tbody id="accounts-table"></tbody></table></div><div class="table-pager"><span id="accounts-page-current">1 / 1</span><div><button class="icon-button" type="button" data-page-prev="accounts" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button class="icon-button" type="button" data-page-next="accounts" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div></div></section>
+          <section class="panel" id="account-access-keys" role="tabpanel" hidden><div class="account-list-toolbar"><div class="input-with-icon"><i data-lucide="search"></i><input id="key-search" type="search" placeholder="搜索 Key 名称、前缀或所属账户" aria-label="搜索 API Key"></div><select id="key-active-filter" aria-label="Key 状态筛选"><option value="">全部状态</option><option value="true">已启用</option><option value="false">已停用</option></select><select id="key-page-size" aria-label="Key 每页数量"><option value="25">25 条/页</option><option value="50">50 条/页</option><option value="100">100 条/页</option></select><span id="keys-result-count" class="table-result-count">共 0 条</span></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>所属账户</th><th>状态</th><th>有效期</th><th>额度</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="keys-table"></tbody></table></div><div class="table-pager"><span id="keys-page-current">1 / 1</span><div><button class="icon-button" type="button" data-page-prev="keys" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button class="icon-button" type="button" data-page-next="keys" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div></div></section>
         </section>
 
         <section class="view" id="view-models">
-          <div class="section-header page-section-header"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="table-actions"><button class="secondary-button" data-action="health-check-all"><i data-lucide="activity"></i><span>检测全部渠道</span></button><button class="secondary-button" data-action="import-models"><i data-lucide="list-plus"></i><span>批量接入</span></button><button class="primary-button" data-action="create-model"><i data-lucide="plus"></i><span>添加模型</span></button></div></div>
-          <section class="panel"><div class="table-wrap"><table><thead><tr><th>公开模型</th><th>输入价格 / 1K</th><th>输出价格 / 1K</th><th>渠道</th><th>健康状态</th><th>模型状态</th><th class="align-right">操作</th></tr></thead><tbody id="models-table"></tbody></table></div></section>
+          <div class="section-header page-section-header model-page-header"><div><h2>模型与渠道</h2><p>统一定价、上游路由和故障转移</p></div><div class="content-page-actions" id="admin-page-actions-models"></div></div>
+          <section class="panel model-catalog-panel">
+            <div class="model-catalog-toolbar">
+              <div class="model-type-tabs" aria-label="模型类型筛选"><button class="active" type="button" data-model-type=""><i data-lucide="layout-grid"></i><span>全部</span><small data-model-type-count="all">0</small></button><button type="button" data-model-type="text"><i data-lucide="message-square-text"></i><span>文本</span><small data-model-type-count="text">0</small></button><button type="button" data-model-type="image"><i data-lucide="image"></i><span>图像</span><small data-model-type-count="image">0</small></button><button type="button" data-model-type="video"><i data-lucide="video"></i><span>视频</span><small data-model-type-count="video">0</small></button><button type="button" data-model-type="audio"><i data-lucide="audio-lines"></i><span>语音</span><small data-model-type-count="audio">0</small></button></div>
+              <div class="input-with-icon"><i data-lucide="search"></i><input id="model-search" type="search" placeholder="搜索模型、上游 ID 或服务商" aria-label="搜索模型"></div>
+              <select id="model-provider-filter" aria-label="服务商筛选"><option value="">全部服务商</option></select>
+              <select id="model-state-filter" aria-label="发布状态筛选"><option value="">全部状态</option><option value="published">已上架</option><option value="candidate">候选</option><option value="blocked">待完善</option></select>
+              <span id="model-result-count">共 0 个模型</span>
+            </div>
+            <div class="admin-provider-grid" id="admin-provider-grid"></div>
+            <div class="model-provider-overview" id="model-provider-overview" hidden></div><div class="admin-model-list" id="admin-model-list" hidden><div id="models-table"></div></div>
+          </section>
         </section>
 
         <section class="view" id="view-payments">
-          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><button class="primary-button" data-action="create-payment"><i data-lucide="plus"></i><span>创建订单</span></button></div>
+          <div class="section-header page-section-header"><div><h2>充值订单</h2><p>支付确认、入账和退款</p></div><div class="content-page-actions" id="admin-page-actions-payments"></div></div>
           <div class="metric-grid compact" id="payment-metrics"></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>订单号</th><th>账户</th><th>渠道</th><th>金额</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="payments-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-redemptions">
-          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>创建、发放和管理账户福利额度</p></div><button class="primary-button" data-action="create-redemption"><i data-lucide="plus"></i><span>创建兑换码</span></button></div>
+          <div class="section-header page-section-header"><div><h2>兑换福利</h2><p>创建、发放和管理账户福利额度</p></div><div class="content-page-actions" id="admin-page-actions-redemptions"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>福利</th><th>兑换码前缀</th><th>额度</th><th>领取进度</th><th>有效期</th><th>状态</th><th>创建时间</th><th class="align-right">操作</th></tr></thead><tbody id="redemptions-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-usage">
-          <div class="section-header page-section-header"><div><h2>用量明细</h2><p>最近 100 条调用记录</p></div></div>
+          <div class="section-header page-section-header"><div><h2>用量明细</h2><p>最近 100 条调用记录</p></div><div class="content-page-actions" id="admin-page-actions-usage"></div></div>
           <div class="metric-grid compact" id="usage-metrics"></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>账户 / Key</th><th>模型</th><th>输入 / 输出</th><th>耗时</th><th>费用</th><th>状态</th></tr></thead><tbody id="usage-table"></tbody></table></div></section>
         </section>
 
         <section class="view" id="view-audit">
-          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div></div>
+          <div class="section-header page-section-header"><div><h2>操作审计</h2><p>最近 200 条关键运营与门户动作，不包含敏感明文</p></div><div class="content-page-actions" id="admin-page-actions-audit"></div></div>
           <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>摘要</th></tr></thead><tbody id="audit-table"></tbody></table></div></section>
         </section>
       </div>
@@ -124,7 +157,7 @@
   </div>
 
   <dialog id="action-dialog">
-    <div class="dialog-header"><div><p class="eyebrow">LOKSYSTEM TOKEN</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
+    <div class="dialog-header"><div><p class="eyebrow">LokToken</p><h2 id="dialog-title"></h2></div><button class="icon-button" id="close-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></div>
     <div id="dialog-content"></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
