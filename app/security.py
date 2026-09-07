@@ -169,13 +169,14 @@ def require_trial_account(authorization: str | None, db: Session) -> BillingAcco
     return context.account
 
 
-def verify_webhook_signature(body: bytes, signature: str | None) -> bool:
+def verify_webhook_signature(body: bytes, signature: str | None, timestamp: str | None = None) -> bool:
     if not signature:
         return False
     supplied = signature.removeprefix("sha256=")
+    signed_payload = f"{timestamp}.".encode("ascii") + body if timestamp is not None else body
     expected = hmac.new(
         get_settings().payment_webhook_secret.encode("utf-8"),
-        body,
+        signed_payload,
         hashlib.sha256,
     ).hexdigest()
     return secrets.compare_digest(supplied, expected)

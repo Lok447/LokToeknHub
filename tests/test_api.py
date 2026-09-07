@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1420,6 +1421,85 @@ async def test_payment_webhook_checks_provider_and_amount_for_real_orders() -> N
         )
     assert response.status_code == 422
     assert "amount" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_payment_webhook_rejects_event_payload_reuse_and_production_replay(monkeypatch) -> None:
+    from app.models import BillingAccount, PaymentOrder, PaymentWebhookEvent
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="webhook-replay-user", name="Webhook Replay User")
+        db.add(account)
+        db.flush()
+        order = PaymentOrder(order_no="pay_webhook_replay", account_id=account.id, amount_micros=1_000_000, provider="manual")
+        db.add(order)
+        db.commit()
+
+    payload = {
+        "event_id": "evt-replay-001",
+        "order_no": "pay_webhook_replay",
+        "provider_order_id": "manual-replay-001",
+        "status": "paid",
+    }
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    signature = hmac.new(b"test-webhook", body, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "X-Token-Signature": f"sha256={signature}"}
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first = await client.post("/payments/webhook", content=body, headers=headers)
+        changed = {**payload, "provider_order_id": "manual-replay-002"}
+        changed_body = json.dumps(changed, separators=(",", ":")).encode()
+        changed_signature = hmac.new(b"test-webhook", changed_body, hashlib.sha256).hexdigest()
+        conflict = await client.post(
+            "/payments/webhook",
+            content=changed_body,
+            headers={**headers, "X-Token-Signature": f"sha256={changed_signature}"},
+        )
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    with SessionLocal() as db:
+        event = db.query(PaymentWebhookEvent).filter(PaymentWebhookEvent.event_id == "evt-replay-001").one()
+        assert event.status == "processed"
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "environment", "production")
+    timestamp = str(int(time.time()) - settings.payment_webhook_tolerance_seconds - 1)
+    timed_signature = hmac.new(b"test-webhook", f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        expired = await client.post(
+            "/payments/webhook",
+            content=body,
+            headers={"Content-Type": "application/json", "X-Token-Signature": f"sha256={timed_signature}", "X-Token-Timestamp": timestamp},
+        )
+    assert expired.status_code == 401
+
+
+def test_orphaned_reservation_recovery_is_idempotent() -> None:
+    from app.models import AccountBalanceTransaction, BillingAccount, ModelConfig
+    from app.services import recover_orphaned_reservations, reserve_balance
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="orphan-recovery-user", name="Orphan Recovery User", balance_micros=5_000_000)
+        db.add(account)
+        db.flush()
+        key = ApiKey(name="orphan-key", account_id=account.id, key_prefix="orphan", key_hash="orphan-recovery-key")
+        db.add(key)
+        model = ModelConfig(public_name="orphan-model", upstream_model="orphan-model", provider_base_url="https://provider.invalid/v1", input_price_micros_per_1k=1000, output_price_micros_per_1k=1000)
+        db.add(model)
+        db.commit()
+        reserve_balance(db, account, key, 1_000_000, "orphan-request-001")
+        reservation = db.query(AccountBalanceTransaction).filter(AccountBalanceTransaction.reference_id == "orphan-request-001").one()
+        reservation.created_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        db.commit()
+        assert account.balance_micros == 4_000_000
+        assert recover_orphaned_reservations(db, older_than_seconds=60) == 1
+        assert recover_orphaned_reservations(db, older_than_seconds=60) == 0
+        db.refresh(account)
+        db.refresh(key)
+        assert account.balance_micros == 5_000_000
+        assert key.spent_micros == 0
+        settlements = db.query(AccountBalanceTransaction).filter(AccountBalanceTransaction.reference_id == "orphan-request-001:settlement").all()
+        assert len(settlements) == 1
 
 
 @pytest.mark.asyncio

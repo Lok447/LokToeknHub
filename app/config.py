@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     default_provider_api_key: str = ""
     usd_to_cny_rate: float = 7.2
     reservation_output_tokens: int = 1024
+    reservation_timeout_seconds: int = 900
+    reservation_recovery_interval_seconds: int = 60
     provider_timeout_seconds: int = 120
     channel_health_timeout_seconds: int = 10
     max_channel_attempts: int = 3
@@ -24,6 +26,7 @@ class Settings(BaseSettings):
     channel_failure_threshold: int = 3
     channel_circuit_cooldown_seconds: int = 60
     payment_webhook_secret: str = "change-webhook-secret"
+    payment_webhook_tolerance_seconds: int = 300
     require_real_payment: bool = True
     manual_payment_qr_url: str = ""
     manual_payment_instructions: str = "请扫码付款，并在订单备注中填写订单号；付款后等待管理员确认。"
@@ -139,6 +142,12 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_PROVIDER_BILL_COST_TOLERANCE_MICROS must be non-negative")
     if settings.alert_failure_rate_percent <= 0 or settings.alert_failure_rate_percent > 100:
         errors.append("TOKEN_ALERT_FAILURE_RATE_PERCENT must be between 0 and 100")
+    if settings.payment_webhook_tolerance_seconds < 30 or settings.payment_webhook_tolerance_seconds > 3600:
+        errors.append("TOKEN_PAYMENT_WEBHOOK_TOLERANCE_SECONDS must be between 30 and 3600")
+    if settings.reservation_timeout_seconds < 120 or settings.reservation_timeout_seconds > 86400:
+        errors.append("TOKEN_RESERVATION_TIMEOUT_SECONDS must be between 120 and 86400")
+    if settings.reservation_recovery_interval_seconds < 10 or settings.reservation_recovery_interval_seconds > 3600:
+        errors.append("TOKEN_RESERVATION_RECOVERY_INTERVAL_SECONDS must be between 10 and 3600")
     if settings.admin_session_ttl_seconds < 300 or settings.password_reset_ttl_seconds < 300:
         errors.append("Session and password reset TTL settings must be at least 300 seconds")
     if settings.security_delivery_mode != "webhook":

@@ -27,7 +27,7 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, PaymentWebhookEvent, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import deliver_account_invitation, router as portal_router
@@ -35,7 +35,7 @@ from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provid
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
 from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_password_reset_token, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, recover_orphaned_reservations, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -46,12 +46,18 @@ async def lifespan(_app: FastAPI):
         with engine.connect() as connection:
             connection.execute(select(1))
     alert_task = asyncio.create_task(alert_evaluation_loop())
+    reservation_task = asyncio.create_task(reservation_recovery_loop())
     try:
         yield
     finally:
         alert_task.cancel()
+        reservation_task.cancel()
         try:
             await alert_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await reservation_task
         except asyncio.CancelledError:
             pass
 
@@ -65,6 +71,20 @@ async def alert_evaluation_loop() -> None:
             # Delivery state stays pending and will be retried on the next tick.
             pass
         await asyncio.sleep(get_settings().alert_evaluation_interval_seconds)
+
+
+async def reservation_recovery_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(run_reservation_recovery)
+        except Exception:
+            pass
+        await asyncio.sleep(get_settings().reservation_recovery_interval_seconds)
+
+
+def run_reservation_recovery() -> int:
+    with SessionLocal() as db:
+        return recover_orphaned_reservations(db)
 
 
 def run_alert_evaluation() -> None:
@@ -1063,10 +1083,22 @@ def refund_payment_order(
 async def payment_webhook(
     request: Request,
     x_token_signature: str | None = Header(default=None),
+    x_token_timestamp: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     body = await request.body()
-    if not verify_webhook_signature(body, x_token_signature):
+    settings = get_settings()
+    timestamp_value: int | None = None
+    if x_token_timestamp is not None:
+        try:
+            timestamp_value = int(x_token_timestamp)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="invalid webhook timestamp") from None
+        if abs(int(time.time()) - timestamp_value) > settings.payment_webhook_tolerance_seconds:
+            raise HTTPException(status_code=401, detail="webhook timestamp is outside the allowed window")
+    elif settings.environment.lower() == "production":
+        raise HTTPException(status_code=401, detail="webhook timestamp is required")
+    if not verify_webhook_signature(body, x_token_signature, str(timestamp_value) if timestamp_value is not None else None):
         raise HTTPException(status_code=401, detail="invalid webhook signature")
     try:
         payload = PaymentWebhook.model_validate_json(body)
@@ -1082,6 +1114,37 @@ async def payment_webhook(
             raise HTTPException(status_code=422, detail="payment amount does not match order")
     elif payload.amount_micros is not None and payload.amount_micros != order.amount_micros:
         raise HTTPException(status_code=422, detail="payment amount does not match order")
+    payload_hash = hashlib.sha256(body).hexdigest()
+    existing_event = db.scalar(select(PaymentWebhookEvent).where(PaymentWebhookEvent.event_id == payload.event_id))
+    if existing_event:
+        if existing_event.payload_hash != payload_hash:
+            raise HTTPException(status_code=409, detail="webhook event id was already used with a different payload")
+        if existing_event.status == "processed":
+            existing_order = db.scalar(select(PaymentOrder).where(PaymentOrder.order_no == existing_event.order_no))
+            if not existing_order:
+                raise HTTPException(status_code=409, detail="processed webhook order is missing")
+            return {"received": True, "event_id": payload.event_id, "order": payment_order_data(existing_order)}
+    else:
+        existing_event = PaymentWebhookEvent(
+            event_id=payload.event_id,
+            payload_hash=payload_hash,
+            order_no=payload.order_no,
+            status="received",
+            received_at=utcnow(),
+        )
+        db.add(existing_event)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing_event = db.scalar(select(PaymentWebhookEvent).where(PaymentWebhookEvent.event_id == payload.event_id))
+            if not existing_event or existing_event.payload_hash != payload_hash:
+                raise HTTPException(status_code=409, detail="webhook event id conflicts with another payload") from None
+            if existing_event.status == "processed":
+                existing_order = db.scalar(select(PaymentOrder).where(PaymentOrder.order_no == existing_event.order_no))
+                if not existing_order:
+                    raise HTTPException(status_code=409, detail="processed webhook order is missing")
+                return {"received": True, "event_id": payload.event_id, "order": payment_order_data(existing_order)}
     try:
         order = mark_order_paid(
             db, order, payload.provider_order_id,
@@ -1089,6 +1152,9 @@ async def payment_webhook(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    existing_event.status = "processed"
+    existing_event.processed_at = utcnow()
+    db.commit()
     return {"received": True, "event_id": payload.event_id, "order": payment_order_data(order)}
 
 

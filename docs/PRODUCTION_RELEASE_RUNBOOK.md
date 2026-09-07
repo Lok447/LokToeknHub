@@ -15,6 +15,8 @@ uv run python scripts/production_preflight.py
 
 应用启动前必须满足：`TOKEN_ENVIRONMENT=production`、关闭 Mock 和自动建表、PostgreSQL、Redis、HTTPS 公网地址、独立随机密钥，以及 `TOKEN_REQUIRE_REAL_PAYMENT=true`。
 
+支付供应商 webhook 必须使用 `X-Token-Timestamp` 和 `X-Token-Signature: sha256=<hex>`；签名原文为 `{timestamp}.{raw_body}`，时间戳默认允许偏差 5 分钟。应用端口仅绑定宿主机回环地址，公网入口统一经过 TLS 反向代理。
+
 ## 2. 数据库备份与恢复演练
 
 备份文件放在独立磁盘或对象存储，不与应用数据卷共用：

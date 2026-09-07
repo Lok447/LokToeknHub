@@ -211,6 +211,8 @@ docker compose --env-file .env.docker ps
 - 配置 `TOKEN_SECURITY_DELIVERY_MODE=webhook` 与 HTTPS 安全投递 Webhook；密码重置仅发送给已绑定安全联系方式的账户，Webhook 接收方需验证 `X-LokToken-Signature`。
 - 在公网入口终止 TLS，并将 `TOKEN_PUBLIC_BASE_URL` 设置为实际 HTTPS 域名；浏览器跨域调用时仅将可信域写入 `TOKEN_CORS_ORIGINS`。
 - TOKEN 在开发环境使用进程内滑动窗口；生产环境通过 Redis 共享 API、门户和认证限流计数，网关/WAF 仍应配置入口级限流。
+- 支付回调在开发环境兼容 body-only HMAC；生产环境必须传 `X-Token-Timestamp`，签名内容为 `{timestamp}.{raw_body}`，默认时间窗口为 5 分钟。事件 `event_id` 会持久化，重复事件必须使用完全相同的请求体。
+- 应用容器端口只绑定宿主机回环地址，公网流量应通过 Nginx/TLS 入口转发，避免绕过边缘访问控制直接访问 API。
 
 查看迁移状态或手动执行迁移：
 

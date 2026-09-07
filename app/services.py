@@ -183,6 +183,9 @@ def settle_balance(
     delta = reserved_micros - actual_micros
     if delta == 0:
         return
+    settlement_reference = f"{reference_id}:settlement"
+    if db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == settlement_reference)):
+        return
     locked_key = db.scalar(select(ApiKey).where(ApiKey.id == api_key.id).with_for_update())
     billing_account_id = api_key.billing_account_id or account.id
     locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == billing_account_id).with_for_update())
@@ -198,12 +201,65 @@ def settle_balance(
         api_key_id=api_key.id,
         amount_micros=delta,
         transaction_type="settlement",
-        reference_id=f"{reference_id}:settlement",
+        reference_id=settlement_reference,
         description="model request settlement",
     ))
     db.commit()
     if account.id == locked_account.id:
         account.balance_micros = locked_account.balance_micros
+
+
+def recover_orphaned_reservations(db: Session, *, older_than_seconds: int | None = None) -> int:
+    """Refund reservations left behind by a crashed request process.
+
+    A reservation is recoverable only after the configured grace period, has no
+    usage row, has no settlement row, and is not attached to a live async task.
+    The unique settlement reference makes retries safe across worker restarts.
+    """
+    settings = get_settings()
+    timeout = older_than_seconds if older_than_seconds is not None else settings.reservation_timeout_seconds
+    cutoff = utcnow() - timedelta(seconds=timeout)
+    reservations = db.scalars(select(AccountBalanceTransaction).where(
+        AccountBalanceTransaction.transaction_type == "reservation",
+        AccountBalanceTransaction.created_at <= cutoff,
+    ).order_by(AccountBalanceTransaction.id).limit(500)).all()
+    recovered = 0
+    for reservation in reservations:
+        settlement_reference = f"{reservation.reference_id}:settlement"
+        if db.scalar(select(AccountBalanceTransaction.id).where(AccountBalanceTransaction.reference_id == settlement_reference)):
+            continue
+        if db.scalar(select(UsageRecord.id).where(UsageRecord.request_id == reservation.reference_id)):
+            continue
+        task = db.scalar(select(GenerationTask).where(GenerationTask.request_id == reservation.reference_id))
+        if task and task.status == "processing":
+            task_updated_at = task.updated_at
+            if task_updated_at.tzinfo is None:
+                task_updated_at = task_updated_at.replace(tzinfo=utcnow().tzinfo)
+            if task_updated_at > cutoff:
+                continue
+            task.status = "failed"
+            task.error_message = "generation task timed out during recovery"
+            task.updated_at = utcnow()
+        account = db.scalar(select(BillingAccount).where(BillingAccount.id == reservation.account_id).with_for_update())
+        key = db.get(ApiKey, reservation.api_key_id) if reservation.api_key_id else None
+        if not account or not key:
+            continue
+        account.balance_micros += -reservation.amount_micros
+        key.spent_micros = max(0, key.spent_micros + reservation.amount_micros)
+        db.add(AccountBalanceTransaction(
+            account_id=account.id,
+            workspace_id=reservation.workspace_id,
+            project_id=reservation.project_id,
+            api_key_id=reservation.api_key_id,
+            amount_micros=-reservation.amount_micros,
+            transaction_type="settlement",
+            reference_id=settlement_reference,
+            description="orphaned model request reservation recovery",
+        ))
+        recovered += 1
+    if recovered:
+        db.commit()
+    return recovered
 
 
 def credit_balance(

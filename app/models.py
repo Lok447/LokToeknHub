@@ -302,6 +302,20 @@ class PaymentOrder(Base):
     proof_submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PaymentWebhookEvent(Base):
+    """Durable idempotency record for signed payment provider callbacks."""
+
+    __tablename__ = "payment_webhook_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    order_no: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="received", index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
 
