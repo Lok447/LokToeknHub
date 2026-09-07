@@ -12,6 +12,7 @@ class ApiKeyCreate(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
     rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
     rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
+    allowed_models: list[str] | None = Field(default=None, max_length=200)
 
 
 class PortalApiKeyCreate(BaseModel):
@@ -23,6 +24,7 @@ class PortalApiKeyCreate(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
     rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
     rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
+    allowed_models: list[str] | None = Field(default=None, max_length=200)
 
 
 class PortalModelTestRequest(BaseModel):
@@ -260,6 +262,14 @@ class ModelUpdate(BaseModel):
     pricing_margin_bps: int | None = Field(default=None, ge=0, le=9900)
     task_price_micros: int | None = Field(default=None, ge=0)
     active: bool | None = None
+
+
+class ModelAliasCreate(BaseModel):
+    alias: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
+
+
+class ModelAliasUpdate(BaseModel):
+    active: bool
 
 
 class ModelChannelCreate(BaseModel):

@@ -93,6 +93,61 @@ async def test_admin_account_and_key_lists_support_pagination_and_filters() -> N
         assert empty_page.status_code == 200 and empty_page.json()["data"] == []
 
 
+@pytest.mark.asyncio
+async def test_model_alias_lifecycle_and_gateway_resolution() -> None:
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        account = await client.post("/admin/accounts", headers=headers, json={"external_user_id": "alias-account", "name": "Alias Account"})
+        key = await client.post("/admin/api-keys", headers=headers, json={"account_id": account.json()["id"], "name": "alias-key"})
+        from app.db import init_db
+        init_db()
+        with SessionLocal() as db:
+            model = db.query(ModelConfig).filter(ModelConfig.public_name == "lok-chat").one()
+            model.active = True
+            db.commit()
+            model_id = model.id
+        created = await client.post(f"/admin/models/{model_id}/aliases", headers=headers, json={"alias": "stable-chat"})
+        assert created.status_code == 200
+        listed = await client.get("/admin/model-aliases", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["data"][0]["alias"] == "stable-chat"
+        api_headers = {"Authorization": f"Bearer {key.json()['key']}"}
+        models = await client.get("/v1/models", headers=api_headers)
+        assert models.status_code == 200
+        alias_entry = next(item for item in models.json()["data"] if item["id"] == "stable-chat")
+        assert alias_entry["alias_of"] == "lok-chat"
+        retrieved = await client.get("/v1/models/stable-chat", headers=api_headers)
+        assert retrieved.status_code == 200
+        assert retrieved.json()["alias_of"] == "lok-chat"
+        disabled = await client.patch(f"/admin/model-aliases/{created.json()['id']}", headers=headers, json={"active": False})
+        assert disabled.status_code == 200
+        assert (await client.get("/v1/models/stable-chat", headers=api_headers)).status_code == 404
+        deleted = await client.delete(f"/admin/model-aliases/{created.json()['id']}", headers=headers)
+        assert deleted.status_code == 200 and deleted.json()["deleted"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_key_model_allowlist_blocks_unapproved_models() -> None:
+    transport = httpx.ASGITransport(app=app)
+    headers = {"X-Admin-Token": "test-admin"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        created = await client.post("/admin/api-keys", headers=headers, json={"name": "restricted-key", "allowed_models": ["lok-chat"]})
+        assert created.status_code == 200
+        key = created.json()["key"]
+        with SessionLocal() as db:
+            from app.db import init_db
+            init_db()
+            for name in ("lok-chat", "lok-reason"):
+                model = db.query(ModelConfig).filter(ModelConfig.public_name == name).one()
+                model.active = True
+            db.commit()
+        auth = {"Authorization": f"Bearer {key}"}
+        assert (await client.get("/v1/models", headers=auth)).status_code == 200
+        denied = await client.post("/v1/chat/completions", headers=auth, json={"model": "lok-reason", "messages": [{"role": "user", "content": "hello"}]})
+        assert denied.status_code == 403
+
+
 def test_production_provider_url_rejects_insecure_and_private_targets(monkeypatch) -> None:
     from app.main import validate_provider_url
 

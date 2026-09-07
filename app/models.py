@@ -98,6 +98,7 @@ class ApiKey(Base):
     rate_limit_window_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     spending_limit_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     spent_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    allowed_models_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -120,6 +121,19 @@ class ModelConfig(Base):
     official_pricing_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelAlias(Base):
+    """Stable client-facing name mapped to a published canonical model."""
+
+    __tablename__ = "model_aliases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alias: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    model_config_id: Mapped[int] = mapped_column(ForeignKey("model_configs.id", ondelete="CASCADE"), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ModelChangeRecord(Base):

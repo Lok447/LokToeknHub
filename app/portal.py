@@ -796,6 +796,7 @@ def list_api_keys(context: PortalContext = Depends(portal_context), db: Session 
         "rate_limit_window_seconds": item.rate_limit_window_seconds,
         "expires_at": item.expires_at.isoformat() if item.expires_at else None,
         "spending_limit_micros": item.spending_limit_micros,
+        "allowed_models": json.loads(item.allowed_models_json) if item.allowed_models_json else None,
         "spent_micros": item.spent_micros,
         "trial_expires_at": item.trial_expires_at.isoformat() if item.trial_expires_at else None,
         "last_used_at": item.last_used_at.isoformat() if item.last_used_at else None,
@@ -829,6 +830,7 @@ def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_cont
         spent_micros=api_key.spent_micros,
         rate_limit_requests=api_key.rate_limit_requests,
         rate_limit_window_seconds=api_key.rate_limit_window_seconds,
+        allowed_models_json=api_key.allowed_models_json,
         rotated_from_key_id=api_key.id,
     )
     api_key.active = False
@@ -978,6 +980,7 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
         idempotency_key=payload.idempotency_key,
         rate_limit_requests=payload.rate_limit_requests,
         rate_limit_window_seconds=payload.rate_limit_window_seconds,
+        allowed_models_json=json.dumps(payload.allowed_models, ensure_ascii=False) if payload.allowed_models else None,
     )
     db.add(record)
     db.flush()
@@ -1029,9 +1032,12 @@ async def test_model(
     billing_account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not billing_account or not billing_account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
-    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
+    from .main import key_allows_model, resolve_model
+    model = resolve_model(db, payload.model)
     if not model:
         raise HTTPException(status_code=404, detail="model not found")
+    if not key_allows_model(api_key, payload.model, model):
+        raise HTTPException(status_code=403, detail="当前 API Key 无权测试该模型")
     try:
         metadata = json.loads(model.catalog_metadata_json) if model.catalog_metadata_json else {}
     except json.JSONDecodeError:

@@ -27,13 +27,13 @@ from .db import SessionLocal, engine, get_db, init_db
 from .guardrails import rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, PaymentWebhookEvent, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelAlias, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, PaymentWebhookEvent, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import deliver_account_invitation, router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
+from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelAliasCreate, ModelAliasUpdate, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_password_reset_token, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
 from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, recover_orphaned_reservations, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
@@ -1357,6 +1357,7 @@ def list_api_keys(
             "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
             "trial_expires_at": api_key.trial_expires_at.isoformat() if api_key.trial_expires_at else None,
             "spending_limit_micros": api_key.spending_limit_micros,
+            "allowed_models": json.loads(api_key.allowed_models_json) if api_key.allowed_models_json else None,
             "spent_micros": api_key.spent_micros,
             "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
             "created_at": api_key.created_at.isoformat(),
@@ -1411,6 +1412,7 @@ def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(requir
         idempotency_key=payload.idempotency_key,
         rate_limit_requests=payload.rate_limit_requests,
         rate_limit_window_seconds=payload.rate_limit_window_seconds,
+        allowed_models_json=json.dumps(payload.allowed_models, ensure_ascii=False) if payload.allowed_models else None,
     )
     db.add(record)
     db.flush()
@@ -1441,6 +1443,7 @@ def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(requir
         spent_micros=api_key.spent_micros,
         rate_limit_requests=api_key.rate_limit_requests,
         rate_limit_window_seconds=api_key.rate_limit_window_seconds,
+        allowed_models_json=api_key.allowed_models_json,
         rotated_from_key_id=api_key.id,
     )
     api_key.active = False
@@ -1518,6 +1521,7 @@ def provision_account(
             idempotency_key=payload.api_key.idempotency_key,
             rate_limit_requests=payload.api_key.rate_limit_requests,
             rate_limit_window_seconds=payload.api_key.rate_limit_window_seconds,
+            allowed_models_json=json.dumps(payload.api_key.allowed_models, ensure_ascii=False) if payload.api_key.allowed_models else None,
         )
         db.add(record)
         db.flush()
@@ -2282,6 +2286,65 @@ def list_admin_models(db: Session = Depends(get_db)) -> dict[str, object]:
     ]}
 
 
+@app.get("/admin/model-aliases", dependencies=[Depends(require_admin)])
+def list_model_aliases(db: Session = Depends(get_db)) -> dict[str, object]:
+    rows = db.execute(
+        select(ModelAlias, ModelConfig.public_name)
+        .join(ModelConfig, ModelConfig.id == ModelAlias.model_config_id)
+        .order_by(ModelAlias.alias)
+    ).all()
+    return {"data": [{
+        "id": alias.id,
+        "alias": alias.alias,
+        "model_id": alias.model_config_id,
+        "public_name": public_name,
+        "active": alias.active,
+        "created_at": alias.created_at.isoformat(),
+        "updated_at": alias.updated_at.isoformat(),
+    } for alias, public_name in rows]}
+
+
+@app.post("/admin/models/{model_id}/aliases", dependencies=[Depends(require_operator)])
+def create_model_alias(model_id: int, payload: ModelAliasCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    model = db.get(ModelConfig, model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail="model not found")
+    if db.scalar(select(ModelConfig.id).where(ModelConfig.public_name == payload.alias)):
+        raise HTTPException(status_code=409, detail="alias conflicts with a canonical model name")
+    if db.scalar(select(ModelAlias.id).where(ModelAlias.alias == payload.alias)):
+        raise HTTPException(status_code=409, detail="model alias already exists")
+    alias = ModelAlias(alias=payload.alias, model_config_id=model.id)
+    db.add(alias)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model_alias.created", target_type="model_alias", target_id=model.id, details={"alias": payload.alias, "model_id": model.id})
+    db.commit()
+    db.refresh(alias)
+    return {"id": alias.id, "alias": alias.alias, "model_id": model.id, "public_name": model.public_name, "active": alias.active}
+
+
+@app.patch("/admin/model-aliases/{alias_id}", dependencies=[Depends(require_operator)])
+def update_model_alias(alias_id: int, payload: ModelAliasUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    alias = db.get(ModelAlias, alias_id)
+    if not alias:
+        raise HTTPException(status_code=404, detail="model alias not found")
+    alias.active = payload.active
+    alias.updated_at = utcnow()
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model_alias.status_updated", target_type="model_alias", target_id=alias.id, details={"active": alias.active})
+    db.commit()
+    return {"id": alias.id, "alias": alias.alias, "model_id": alias.model_config_id, "active": alias.active}
+
+
+@app.delete("/admin/model-aliases/{alias_id}", dependencies=[Depends(require_operator)])
+def delete_model_alias(alias_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    alias = db.get(ModelAlias, alias_id)
+    if not alias:
+        raise HTTPException(status_code=404, detail="model alias not found")
+    value = {"id": alias.id, "alias": alias.alias, "model_id": alias.model_config_id}
+    db.delete(alias)
+    record_audit_event(db, actor_type="admin", actor_id="token-admin", action="model_alias.deleted", target_type="model_alias", target_id=alias.id, details=value)
+    db.commit()
+    return {**value, "deleted": True}
+
+
 def _model_snapshot(model: ModelConfig) -> dict[str, object]:
     return {
         "public_name": model.public_name,
@@ -2417,6 +2480,38 @@ def parse_model_json(value: str | None) -> dict[str, object] | None:
     except json.JSONDecodeError:
         return None
     return decoded if isinstance(decoded, dict) else None
+
+
+def resolve_model(db: Session, model_name: str, *, active_only: bool = True) -> ModelConfig | None:
+    """Resolve a canonical model name or an active operator-managed alias."""
+    query = select(ModelConfig).where(ModelConfig.public_name == model_name)
+    if active_only:
+        query = query.where(ModelConfig.active.is_(True))
+    model = db.scalar(query)
+    if model:
+        return model
+    alias_query = select(ModelAlias).where(ModelAlias.alias == model_name)
+    if active_only:
+        alias_query = alias_query.where(ModelAlias.active.is_(True))
+    alias = db.scalar(alias_query)
+    if not alias:
+        return None
+    query = select(ModelConfig).where(ModelConfig.id == alias.model_config_id)
+    if active_only:
+        query = query.where(ModelConfig.active.is_(True))
+    return db.scalar(query)
+
+
+def key_allows_model(api_key: ApiKey, requested_name: str, model: ModelConfig) -> bool:
+    if not api_key.allowed_models_json:
+        return True
+    try:
+        allowed = json.loads(api_key.allowed_models_json)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(allowed, list):
+        return False
+    return requested_name in allowed or model.public_name in allowed
 
 
 def official_reference_prices(model: ModelConfig) -> tuple[int, int] | None:
@@ -2662,10 +2757,12 @@ async def preflight_model(
 
 @app.get("/v1/models")
 def list_models(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
-    require_api_key(authorization, db)
+    api_key = require_api_key(authorization, db)
     models = [model for model in db.scalars(select(ModelConfig).where(ModelConfig.active.is_(True)).order_by(ModelConfig.public_name)).all() if model_is_callable(db, model)]
     data = []
     for item in models:
+        if not key_allows_model(api_key, item.public_name, item):
+            continue
         metadata = parse_model_json(item.catalog_metadata_json) or {}
         data.append({
             "id": item.public_name,
@@ -2686,18 +2783,32 @@ def list_models(authorization: str | None = Header(default=None), db: Session = 
             "gateway_profile": metadata.get("gateway_profile"),
             "max_output_tokens": metadata.get("max_output_tokens"),
         })
+    aliases = db.execute(select(ModelAlias, ModelConfig).join(ModelConfig, ModelConfig.id == ModelAlias.model_config_id).where(ModelAlias.active.is_(True), ModelConfig.active.is_(True)).order_by(ModelAlias.alias)).all()
+    for alias, item in aliases:
+        if not model_is_callable(db, item) or not key_allows_model(api_key, alias.alias, item):
+            continue
+        data.append({
+            "id": alias.alias,
+            "object": "model",
+            "owned_by": (parse_model_json(item.catalog_metadata_json) or {}).get("provider", "token"),
+            "created": int(alias.created_at.timestamp()),
+            "alias_of": item.public_name,
+        })
     return {"object": "list", "data": data}
 
 
 @app.get("/v1/models/{model_id:path}")
-def retrieve_model(model_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, str]:
+def retrieve_model(model_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
     require_api_key(authorization, db)
-    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_id, ModelConfig.active.is_(True)))
+    model = resolve_model(db, model_id)
     if not model:
         raise HTTPException(status_code=404, detail=f"unknown model: {model_id}")
     if not model_is_callable(db, model):
         raise HTTPException(status_code=503, detail=f"model unavailable: {model_id}")
-    return {"id": model.public_name, "object": "model", "owned_by": "token"}
+    response: dict[str, object] = {"id": model_id, "object": "model", "owned_by": "token"}
+    if model_id != model.public_name:
+        response["alias_of"] = model.public_name
+    return response
 
 
 @app.get("/v1/account", response_model=AccountBalance)
@@ -2721,9 +2832,11 @@ def _generation_context(
     account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
-    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == model_name, ModelConfig.active.is_(True)))
+    model = resolve_model(db, model_name)
     if not model:
         raise HTTPException(status_code=404, detail=f"unknown model: {model_name}")
+    if not key_allows_model(api_key, model_name, model):
+        raise HTTPException(status_code=403, detail=f"api key is not allowed to use model: {model_name}")
     metadata = parse_model_json(model.catalog_metadata_json) or {}
     if metadata.get("api_type") != expected_api_type:
         raise HTTPException(status_code=422, detail=f"模型 {model_name} 不是当前生成协议可调用模型")
@@ -2911,9 +3024,11 @@ async def chat_completions(
     account = db.get(BillingAccount, api_key.billing_account_id or api_key.account_id)
     if not account or not account.active:
         raise HTTPException(status_code=403, detail="billing account is inactive")
-    model = db.scalar(select(ModelConfig).where(ModelConfig.public_name == payload.model, ModelConfig.active.is_(True)))
+    model = resolve_model(db, payload.model)
     if not model:
         raise HTTPException(status_code=404, detail=f"unknown model: {payload.model}")
+    if not key_allows_model(api_key, payload.model, model):
+        raise HTTPException(status_code=403, detail=f"api key is not allowed to use model: {payload.model}")
     if not model_is_callable(db, model):
         raise HTTPException(status_code=503, detail=f"model unavailable: {payload.model}")
     validate_model_request(model, payload)
