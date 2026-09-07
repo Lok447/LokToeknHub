@@ -24,6 +24,8 @@ class BillingAccount(Base):
     access_mode: Mapped[str] = mapped_column(String(24), default="api", index=True)
     name: Mapped[str] = mapped_column(String(120))
     balance_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    budget_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    concurrency_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -36,6 +38,8 @@ class Organization(Base):
     slug: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     owner_account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    budget_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    concurrency_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -72,6 +76,8 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(120))
     slug: Mapped[str] = mapped_column(String(120))
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    budget_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    concurrency_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -99,6 +105,7 @@ class ApiKey(Base):
     spending_limit_micros: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     spent_micros: Mapped[int] = mapped_column(BigInteger, default=0)
     allowed_models_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    concurrency_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -245,6 +252,12 @@ class GenerationTask(Base):
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    worker_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    worker_claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
 
 class UsageRecord(Base):
@@ -275,6 +288,8 @@ class UsageRecord(Base):
     status: Mapped[str] = mapped_column(String(24), index=True)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    route_decision_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_class: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
 
@@ -328,6 +343,34 @@ class PaymentWebhookEvent(Base):
     status: Mapped[str] = mapped_column(String(24), default="received", index=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Invoice(Base):
+    __tablename__ = "invoices"
+    __table_args__ = (UniqueConstraint("invoice_no", name="uq_invoices_invoice_no"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_no: Mapped[str] = mapped_column(String(64), index=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    amount_micros: Mapped[int] = mapped_column(BigInteger)
+    currency: Mapped[str] = mapped_column(String(12), default="CNY")
+    status: Mapped[str] = mapped_column(String(24), default="requested", index=True)
+    tax_identity: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    file_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RevenueShare(Base):
+    __tablename__ = "revenue_shares"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("billing_accounts.id"), index=True)
+    period: Mapped[str] = mapped_column(String(7), index=True)
+    gross_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    share_micros: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(24), default="calculated", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AdminUser(Base):

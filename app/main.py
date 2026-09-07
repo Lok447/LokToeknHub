@@ -24,18 +24,19 @@ from sqlalchemy.orm import Session
 from .audit import record_audit_event
 from .config import cors_origin_list, get_settings, validate_startup_settings
 from .db import SessionLocal, engine, get_db, init_db
-from .guardrails import rate_limiter
+from .guardrails import concurrency_limiter, rate_limiter
 from .model_release import channel_credentials_configured as _channel_credentials_configured, model_is_callable, model_publication_state as _model_publication_state
 from .metrics import observe_request, render_prometheus
-from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, ModelAlias, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, PaymentWebhookEvent, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
+from .models import AccountBalanceTransaction, AdminSession, AdminUser, AlertIncident, ApiKey, AuditEvent, BillingAccount, ExternalIdentity, GenerationTask, Invoice, ModelAlias, ModelChangeRecord, ModelChannel, ModelConfig, Organization, OrganizationMember, PasswordResetChallenge, PaymentOrder, PaymentWebhookEvent, Project, ProviderBalanceSnapshot, ProviderBillImport, ProviderBillLine, ProviderConnection, RedemptionClaim, RedemptionCode, RevenueShare, SecurityContactChallenge, SecurityNotification, UsageRecord, Workspace, utcnow
 from .payments import mark_order_paid, refund_order
 from .payment_providers import payment_providers, require_available_provider
 from .portal import deliver_account_invitation, router as portal_router
 from .provider_presets import DEPRECATED_PROVIDER_MODEL_PUBLIC_NAMES, get_provider_preset, provider_catalogue_matches, provider_preset_data, PROVIDER_PRESETS
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret, encrypt_provider_secret
-from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, ChatCompletionRequest, ImageGenerationRequest, ModelAliasCreate, ModelAliasUpdate, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
+from .protocols import anthropic_to_openai, gemini_to_openai, openai_to_anthropic, openai_to_gemini, openai_to_responses, responses_to_openai
+from .schemas import AccountBalance, AccountCreate, AccountProvisionCreate, ActiveUpdate, AdminLogin, AdminUserCreate, AdminUserUpdate, ApiKeyCreate, ApiKeyPolicyUpdate, ApiKeyResponse, AudioSpeechRequest, AudioTranscriptionRequest, BalanceAdjust, BudgetUpdate, ChatCompletionRequest, ImageGenerationRequest, InvoiceCreate, InvoiceStatusUpdate, ModelAliasCreate, ModelAliasUpdate, ModelBatchImport, ModelChannelCreate, ModelChannelUpdate, ModelCreate, ModelPreflightRequest, ModelUpdate, PaymentConfirm, PaymentOrderCreate, PaymentProofUpdate, PaymentReject, PaymentRefund, PaymentWebhook, ProviderBalanceManual, ProviderBillImportRequest, ProviderConnectionConfigure, ProviderPresetInstall, RedemptionCodeCreate, UsageSummary, VideoGenerationRequest
 from .security import AdminContext, create_admin_session, create_key, create_password_reset_token, create_redemption_code, hash_key, hash_password, require_admin, require_api_key, require_bootstrap_admin_token, require_finance_operator, require_operator, require_superadmin, verify_password, verify_webhook_signature
-from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, recover_orphaned_reservations, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
+from .services import calculate_amount, call_provider, call_provider_details, check_channel_health, classify_provider_failure, create_provider_task, credit_balance, discover_upstream_models, estimate_tokens, fetch_provider_balance, normalize_request_payload, provider_cost, recover_orphaned_reservations, refresh_provider_task, reserve_balance, save_usage, settle_balance, stream_provider, validate_model_request
 from .workspaces import ensure_default_project, ensure_personal_workspace
 
 @asynccontextmanager
@@ -47,13 +48,19 @@ async def lifespan(_app: FastAPI):
             connection.execute(select(1))
     alert_task = asyncio.create_task(alert_evaluation_loop())
     reservation_task = asyncio.create_task(reservation_recovery_loop())
+    task_worker = asyncio.create_task(generation_task_worker_loop())
     try:
         yield
     finally:
         alert_task.cancel()
         reservation_task.cancel()
+        task_worker.cancel()
         try:
             await alert_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await task_worker
         except asyncio.CancelledError:
             pass
         try:
@@ -80,6 +87,70 @@ async def reservation_recovery_loop() -> None:
         except Exception:
             pass
         await asyncio.sleep(get_settings().reservation_recovery_interval_seconds)
+
+
+async def generation_task_worker_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(run_generation_task_worker)
+        except Exception:
+            pass
+        await asyncio.sleep(get_settings().task_worker_interval_seconds)
+
+
+def run_generation_task_worker() -> int:
+    with SessionLocal() as db:
+        now = utcnow()
+        claim_expiry = now - timedelta(seconds=max(30, get_settings().task_worker_interval_seconds * 3))
+        tasks = db.scalars(select(GenerationTask).where(GenerationTask.status == "processing", GenerationTask.dead_lettered_at.is_(None), or_(GenerationTask.next_retry_at.is_(None), GenerationTask.next_retry_at <= now), or_(GenerationTask.worker_claimed_at.is_(None), GenerationTask.worker_claimed_at < claim_expiry)).order_by(GenerationTask.id).limit(20)).all()
+        processed = 0
+        for task in tasks:
+            claim_token = uuid.uuid4().hex
+            claimed = db.query(GenerationTask).filter(
+                GenerationTask.id == task.id,
+                GenerationTask.status == "processing",
+                or_(GenerationTask.worker_claimed_at.is_(None), GenerationTask.worker_claimed_at < claim_expiry),
+            ).update({"worker_claimed_at": now, "worker_claim_token": claim_token}, synchronize_session=False)
+            db.commit()
+            if claimed != 1:
+                continue
+            model = db.get(ModelConfig, task.model_config_id)
+            account = db.get(BillingAccount, task.account_id)
+            key = db.get(ApiKey, task.api_key_id)
+            if not model or not account or not key:
+                task.worker_claimed_at = None
+                task.worker_claim_token = None
+                db.commit()
+                continue
+            try:
+                task.attempt_count += 1
+                detail = asyncio.run(refresh_provider_task(db, task, model))
+                task.status = detail.status
+                task.provider_task_id = detail.provider_task_id or task.provider_task_id
+                task.result_json = json.dumps(detail.result, ensure_ascii=False)
+                task.updated_at = utcnow()
+                if task.status in {"completed", "failed"}:
+                    task.error_message = None if task.status == "completed" else "provider task failed"
+                    _settle_generation_task(db, task, account, key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros)
+                db.commit()
+                processed += 1
+            except Exception as exc:
+                task.failure_class = "worker"
+                task.error_message = str(exc)[:1000]
+                if task.attempt_count >= get_settings().task_max_attempts:
+                    task.status = "failed"
+                    task.dead_lettered_at = utcnow()
+                    _settle_generation_task(db, task, account, key, model, success=False)
+                else:
+                    task.next_retry_at = utcnow() + timedelta(seconds=2 ** task.attempt_count)
+                task.worker_claimed_at = None
+                task.worker_claim_token = None
+                db.commit()
+            else:
+                task.worker_claimed_at = None
+                task.worker_claim_token = None
+                db.commit()
+        return processed
 
 
 def run_reservation_recovery() -> int:
@@ -188,6 +259,51 @@ def metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
     }
     payload = render_prometheus() + "\n".join(f"# TYPE {name} gauge\n{name} {value}" for name, value in business_metrics.items()) + "\n"
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4")
+
+
+def require_scim_token(authorization: str | None) -> None:
+    settings = get_settings()
+    if not settings.scim_enabled or not settings.scim_bearer_token:
+        raise HTTPException(status_code=404, detail="SCIM is disabled")
+    if not authorization or not hmac.compare_digest(authorization, f"Bearer {settings.scim_bearer_token}"):
+        raise HTTPException(status_code=401, detail="invalid SCIM credentials")
+
+
+@app.get("/scim/v2/Users")
+def scim_list_users(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
+    require_scim_token(authorization)
+    accounts = db.scalars(select(BillingAccount).order_by(BillingAccount.id)).all()
+    return {"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"], "totalResults": len(accounts), "Resources": [{"id": str(item.id), "userName": item.login_id or item.external_user_id, "displayName": item.name, "active": item.active, "externalId": item.external_user_id} for item in accounts]}
+
+
+@app.post("/scim/v2/Users")
+def scim_create_user(payload: dict[str, object], authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
+    require_scim_token(authorization)
+    login_id = str(payload.get("userName") or "").strip().lower()
+    external_id = str(payload.get("externalId") or login_id).strip()
+    if not login_id or db.scalar(select(BillingAccount.id).where(BillingAccount.login_id == login_id)):
+        raise HTTPException(status_code=409, detail="SCIM user already exists or userName is missing")
+    account = BillingAccount(login_id=login_id, external_user_id=external_id, name=str(payload.get("displayName") or login_id), account_source="scim", access_mode="portal", active=bool(payload.get("active", True)))
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return {"id": str(account.id), "userName": account.login_id, "displayName": account.name, "active": account.active, "externalId": account.external_user_id}
+
+
+@app.patch("/scim/v2/Users/{user_id}")
+def scim_update_user(user_id: int, payload: dict[str, object], authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
+    require_scim_token(authorization)
+    account = db.get(BillingAccount, user_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="SCIM user not found")
+    if "active" in payload:
+        account.active = bool(payload["active"])
+        if not account.active:
+            account.session_version += 1
+    if payload.get("displayName"):
+        account.name = str(payload["displayName"])
+    db.commit()
+    return {"id": str(account.id), "userName": account.login_id or account.external_user_id, "displayName": account.name, "active": account.active, "externalId": account.external_user_id}
 
 
 @app.get("/", include_in_schema=False)
@@ -1386,6 +1502,50 @@ def update_api_key(api_key_id: int, payload: ActiveUpdate, context: AdminContext
     return {"id": api_key.id, "active": api_key.active}
 
 
+@app.patch("/admin/api-keys/{api_key_id}/policy", dependencies=[Depends(require_operator)])
+def update_api_key_policy(api_key_id: int, payload: ApiKeyPolicyUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    api_key = db.get(ApiKey, api_key_id)
+    if not api_key:
+        raise HTTPException(status_code=404, detail="api key not found")
+    api_key.allowed_models_json = json.dumps(payload.allowed_models, ensure_ascii=False) if payload.allowed_models else None
+    api_key.concurrency_limit = payload.concurrency_limit
+    db.commit()
+    return {"id": api_key.id, "allowed_models": payload.allowed_models, "concurrency_limit": api_key.concurrency_limit}
+
+
+@app.patch("/admin/accounts/{account_id}/budget", dependencies=[Depends(require_finance_operator)])
+def update_account_budget(account_id: int, payload: BudgetUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(BillingAccount, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    account.budget_micros = payload.budget_micros
+    account.concurrency_limit = payload.concurrency_limit
+    db.commit()
+    return {"account_id": account.id, "budget_micros": account.budget_micros, "concurrency_limit": account.concurrency_limit}
+
+
+@app.patch("/admin/organizations/{organization_id}/budget", dependencies=[Depends(require_finance_operator)])
+def update_organization_budget(organization_id: int, payload: BudgetUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    organization = db.get(Organization, organization_id)
+    if not organization:
+        raise HTTPException(status_code=404, detail="organization not found")
+    organization.budget_micros = payload.budget_micros
+    organization.concurrency_limit = payload.concurrency_limit
+    db.commit()
+    return {"organization_id": organization.id, "budget_micros": organization.budget_micros, "concurrency_limit": organization.concurrency_limit}
+
+
+@app.patch("/admin/projects/{project_id}/budget", dependencies=[Depends(require_finance_operator)])
+def update_project_budget(project_id: int, payload: BudgetUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    project.budget_micros = payload.budget_micros
+    project.concurrency_limit = payload.concurrency_limit
+    db.commit()
+    return {"project_id": project.id, "budget_micros": project.budget_micros, "concurrency_limit": project.concurrency_limit}
+
+
 @app.post("/admin/api-keys", response_model=ApiKeyResponse, dependencies=[Depends(require_operator)])
 def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(require_operator), db: Session = Depends(get_db)) -> ApiKeyResponse:
     if payload.idempotency_key:
@@ -1413,6 +1573,7 @@ def create_api_key(payload: ApiKeyCreate, context: AdminContext = Depends(requir
         rate_limit_requests=payload.rate_limit_requests,
         rate_limit_window_seconds=payload.rate_limit_window_seconds,
         allowed_models_json=json.dumps(payload.allowed_models, ensure_ascii=False) if payload.allowed_models else None,
+        concurrency_limit=payload.concurrency_limit,
     )
     db.add(record)
     db.flush()
@@ -1444,6 +1605,7 @@ def rotate_admin_api_key(api_key_id: int, context: AdminContext = Depends(requir
         rate_limit_requests=api_key.rate_limit_requests,
         rate_limit_window_seconds=api_key.rate_limit_window_seconds,
         allowed_models_json=api_key.allowed_models_json,
+        concurrency_limit=api_key.concurrency_limit,
         rotated_from_key_id=api_key.id,
     )
     api_key.active = False
@@ -1522,6 +1684,7 @@ def provision_account(
             rate_limit_requests=payload.api_key.rate_limit_requests,
             rate_limit_window_seconds=payload.api_key.rate_limit_window_seconds,
             allowed_models_json=json.dumps(payload.api_key.allowed_models, ensure_ascii=False) if payload.api_key.allowed_models else None,
+            concurrency_limit=payload.api_key.concurrency_limit,
         )
         db.add(record)
         db.flush()
@@ -2847,6 +3010,38 @@ def _generation_context(
     return api_key, account, model
 
 
+def _acquire_concurrency(api_key: ApiKey, account: BillingAccount, db: Session) -> list[tuple[str, str]]:
+    """Acquire hierarchical request slots and roll back partial acquisition on failure."""
+    settings = get_settings()
+    scopes: list[tuple[str, str, int]] = [("global", "all", settings.max_concurrent_requests)]
+    if account.concurrency_limit:
+        scopes.append(("account", str(account.id), account.concurrency_limit))
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
+    if project and project.concurrency_limit:
+        scopes.append(("project", str(project.id), project.concurrency_limit))
+        workspace = db.get(Workspace, project.workspace_id)
+        if workspace and workspace.organization_id:
+            organization = db.get(Organization, workspace.organization_id)
+            if organization and organization.concurrency_limit:
+                scopes.append(("organization", str(organization.id), organization.concurrency_limit))
+    scopes.append(("key", str(api_key.id), api_key.concurrency_limit or settings.max_concurrent_per_key))
+    acquired: list[tuple[str, str]] = []
+    try:
+        for scope, subject, limit in scopes:
+            concurrency_limiter.acquire(scope, subject, limit)
+            acquired.append((scope, subject))
+    except Exception:
+        for scope, subject in reversed(acquired):
+            concurrency_limiter.release(scope, subject)
+        raise
+    return acquired
+
+
+def _release_concurrency(acquired: list[tuple[str, str]]) -> None:
+    for scope, subject in reversed(acquired):
+        concurrency_limiter.release(scope, subject)
+
+
 def _generation_response(task: GenerationTask, model: ModelConfig) -> dict[str, object]:
     result = parse_model_json(task.result_json) or {}
     return {
@@ -2893,11 +3088,13 @@ async def _create_generation(
         raise HTTPException(status_code=422, detail="request and trace IDs must be 1-64 URL-safe characters")
     if db.scalar(select(GenerationTask).where(GenerationTask.request_id == request_id)) or db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
         raise HTTPException(status_code=409, detail="request id already used")
+    lease = _acquire_concurrency(api_key, account, db)
     quantity = int(getattr(payload, "n", 1) or 1)
     reservation = model.task_price_micros * quantity
     try:
         reserve_balance(db, account, api_key, reservation, request_id)
     except ValueError as exc:
+        _release_concurrency(lease)
         raise HTTPException(status_code=402, detail=str(exc)) from exc
     task = GenerationTask(
         task_id="task_" + uuid.uuid4().hex,
@@ -2926,6 +3123,7 @@ async def _create_generation(
             task.error_message = None if detail.status == "completed" else "provider task failed"
             _settle_generation_task(db, task, account, api_key, model, success=detail.status == "completed", provider_cost_micros=detail.provider_cost_micros)
         response = _generation_response(task, model)
+        _release_concurrency(lease)
         return JSONResponse(response, status_code=200 if detail.status == "completed" else 202, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
     except HTTPException as exc:
         task.status = "failed"
@@ -2933,6 +3131,15 @@ async def _create_generation(
         task.updated_at = utcnow()
         db.commit()
         _settle_generation_task(db, task, account, api_key, model, success=False)
+        _release_concurrency(lease)
+        raise
+    except Exception as exc:
+        task.status = "failed"
+        task.error_message = str(exc)[:1000]
+        task.updated_at = utcnow()
+        db.commit()
+        _settle_generation_task(db, task, account, api_key, model, success=False)
+        _release_concurrency(lease)
         raise
 
 
@@ -3010,6 +3217,52 @@ async def generation_task(task_id: str, authorization: str | None = Header(defau
     return _generation_response(task, model)
 
 
+@app.get("/admin/generation-tasks", dependencies=[Depends(require_admin)])
+def list_generation_tasks(
+    status: str | None = Query(None, max_length=24),
+    dead_lettered: bool | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    query = select(GenerationTask).order_by(GenerationTask.id.desc()).limit(500)
+    if status:
+        query = query.where(GenerationTask.status == status)
+    if dead_lettered is True:
+        query = query.where(GenerationTask.dead_lettered_at.is_not(None))
+    elif dead_lettered is False:
+        query = query.where(GenerationTask.dead_lettered_at.is_(None))
+    rows = db.scalars(query).all()
+    return {"data": [{
+        "task_id": task.task_id,
+        "request_id": task.request_id,
+        "trace_id": task.trace_id,
+        "status": task.status,
+        "attempt_count": task.attempt_count,
+        "next_retry_at": task.next_retry_at.isoformat() if task.next_retry_at else None,
+        "failure_class": task.failure_class,
+        "dead_lettered_at": task.dead_lettered_at.isoformat() if task.dead_lettered_at else None,
+        "error": task.error_message,
+        "created_at": task.created_at.isoformat(),
+    } for task in rows]}
+
+
+@app.post("/admin/generation-tasks/{task_id}/replay", dependencies=[Depends(require_operator)])
+def replay_generation_task(task_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    task = db.scalar(select(GenerationTask).where(GenerationTask.task_id == task_id).with_for_update())
+    if not task:
+        raise HTTPException(status_code=404, detail="generation task not found")
+    if task.settled_at:
+        raise HTTPException(status_code=409, detail="settled task cannot be replayed; create a new task")
+    task.status = "processing"
+    task.dead_lettered_at = None
+    task.next_retry_at = utcnow()
+    task.failure_class = None
+    task.error_message = None
+    task.worker_claimed_at = None
+    task.worker_claim_token = None
+    db.commit()
+    return {"task_id": task.task_id, "status": task.status, "next_retry_at": task.next_retry_at.isoformat()}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
@@ -3038,14 +3291,32 @@ async def chat_completions(
         raise HTTPException(status_code=422, detail="request and trace IDs must be 1-64 URL-safe characters")
     if db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id)):
         raise HTTPException(status_code=409, detail="request id already used")
+    cache_key = None
+    if not payload.stream and not payload.tools and not payload.tool_choice and settings.cache_enabled:
+        from .cache import response_cache
+        cache_key = response_cache.key(payload.model_dump(exclude_none=True), tenant=f"account:{account.id}:key:{api_key.id}")
+    lease = _acquire_concurrency(api_key, account, db)
     estimated_input = estimate_tokens(payload.messages)
     reservation = calculate_amount(model, estimated_input, payload.max_tokens or payload.max_completion_tokens or settings.reservation_output_tokens)
     try:
         reserve_balance(db, account, api_key, reservation, request_id)
     except ValueError as exc:
+        _release_concurrency(lease)
         detail = str(exc)
         save_usage(db, api_key, model, request_id, trace_id, estimated_input, 0, "rejected", 0, detail)
         raise HTTPException(status_code=402, detail=detail) from exc
+    if cache_key:
+        from .cache import response_cache
+        cached = response_cache.get(cache_key)
+        if cached:
+            usage = cached.get("usage") or {}
+            cached_input = int(usage.get("prompt_tokens", estimated_input) or estimated_input)
+            cached_output = int(usage.get("completion_tokens", 0) or 0)
+            settle_balance(db, account, api_key, reservation, calculate_amount(model, cached_input, cached_output), request_id)
+            save_usage(db, api_key, model, request_id, trace_id, cached_input, cached_output, "success", 0, usage_details={"cache_hit": True}, raw_usage=usage, route_attempts=[{"cache": "hit"}])
+            cached.setdefault("model", model.public_name)
+            _release_concurrency(lease)
+            return JSONResponse(cached, headers={"X-Cache": "HIT", "X-Request-ID": request_id, "X-Trace-ID": trace_id})
     if payload.stream:
         async def event_stream():
             started = time.perf_counter()
@@ -3108,6 +3379,7 @@ async def chat_completions(
                     raw_usage=route_meta.get("raw_usage"),
                     route_attempts=route_meta.get("route_attempts"),
                 )
+                _release_concurrency(lease)
 
         return StreamingResponse(
             event_stream(),
@@ -3133,15 +3405,112 @@ async def chat_completions(
             route_attempts=provider_result.route_attempts,
         )
         response.setdefault("model", model.public_name)
+        if cache_key:
+            from .cache import response_cache
+            response_cache.set(cache_key, response)
+        _release_concurrency(lease)
         return JSONResponse(response, headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id})
     except HTTPException as exc:
+        _release_concurrency(lease)
         settle_balance(db, account, api_key, reservation, 0, request_id)
-        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc.detail))
+        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc.detail), failure_class=classify_provider_failure(exc.status_code, str(exc.detail)))
         raise
     except Exception as exc:
+        _release_concurrency(lease)
         settle_balance(db, account, api_key, reservation, 0, request_id)
-        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc))
+        save_usage(db, api_key, model, request_id, trace_id, 0, 0, "error", int((time.perf_counter() - started) * 1000), str(exc), failure_class=classify_provider_failure(None, exc))
         raise HTTPException(status_code=502, detail="provider response could not be processed") from exc
+
+
+async def _compat_chat_response(
+    request_payload: dict[str, object],
+    authorization: str | None,
+    x_request_id: str | None,
+    x_trace_id: str | None,
+    db: Session,
+    response_format: str,
+) -> JSONResponse | StreamingResponse:
+    canonical = ChatCompletionRequest(**request_payload)
+    response = await chat_completions(canonical, authorization, x_request_id, x_trace_id, db)
+    if isinstance(response, StreamingResponse):
+        async def event_stream():
+            async for chunk in response.body_iterator:
+                raw = chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+                for event in raw.split("\n\n"):
+                    if not event.strip():
+                        continue
+                    if "[DONE]" in event:
+                        if response_format == "anthropic":
+                            yield b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                        elif response_format == "gemini":
+                            yield b"data: {\"candidates\":[]}\n\n"
+                        else:
+                            yield b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+                        continue
+                    if not event.startswith("data: "):
+                        continue
+                    try:
+                        item = json.loads(event[6:].strip())
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    text_delta = ""
+                    for choice in item.get("choices") or []:
+                        text_delta += str((choice.get("delta") or {}).get("content") or "")
+                    if response_format == "anthropic":
+                        payload = {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text_delta}}
+                        yield f"event: content_block_delta\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+                    elif response_format == "gemini":
+                        payload = {"candidates": [{"content": {"role": "model", "parts": [{"text": text_delta}]}}]}
+                        yield f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+                    else:
+                        payload = {"type": "response.output_text.delta", "delta": text_delta, "item_id": item.get("id")}
+                        yield f"event: response.output_text.delta\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode()
+        headers = {key: value for key, value in response.headers.items() if key.lower() not in {"content-length", "content-type"}}
+        return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+    body = json.loads(response.body.decode("utf-8"))
+    if response_format == "anthropic":
+        body = openai_to_anthropic(body, model=canonical.model)
+    elif response_format == "gemini":
+        body = openai_to_gemini(body)
+    elif response_format == "responses":
+        body = openai_to_responses(body)
+    headers = {key: value for key, value in response.headers.items() if key.lower() not in {"content-length", "content-type"}}
+    return JSONResponse(body, status_code=response.status_code, headers=headers)
+
+
+@app.post("/v1/responses")
+async def responses_compat(
+    payload: dict[str, object],
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _compat_chat_response(responses_to_openai(payload), authorization, x_request_id, x_trace_id, db, "responses")
+
+
+@app.post("/v1/messages")
+async def anthropic_compat(
+    payload: dict[str, object],
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return await _compat_chat_response(anthropic_to_openai(payload), authorization, x_request_id, x_trace_id, db, "anthropic")
+
+
+@app.post("/v1beta/models/{model_id}:generateContent")
+async def gemini_compat(
+    model_id: str,
+    payload: dict[str, object],
+    authorization: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
+    x_trace_id: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    canonical = gemini_to_openai(payload, model_id)
+    return await _compat_chat_response(canonical, authorization, x_request_id, x_trace_id, db, "gemini")
 
 
 @app.get("/admin/usage", response_model=UsageSummary, dependencies=[Depends(require_admin)])
@@ -3195,6 +3564,59 @@ def usage_records(db: Session = Depends(get_db)) -> dict[str, object]:
         }
         for record, account_name, api_key_name in rows
     ]}
+
+
+@app.get("/admin/traces/{trace_id}", dependencies=[Depends(require_admin)])
+def trace_detail(trace_id: str, db: Session = Depends(get_db)) -> dict[str, object]:
+    records = db.scalars(select(UsageRecord).where(UsageRecord.trace_id == trace_id).order_by(UsageRecord.id)).all()
+    if not records:
+        raise HTTPException(status_code=404, detail="trace not found")
+    return {"trace_id": trace_id, "request_count": len(records), "data": [{
+        "request_id": row.request_id,
+        "model": row.model,
+        "status": row.status,
+        "failure_class": row.failure_class,
+        "route_decision": json.loads(row.route_decision_json) if row.route_decision_json else None,
+        "route_attempts": json.loads(row.route_attempts_json) if row.route_attempts_json else [],
+        "latency_ms": row.latency_ms,
+        "amount_micros": row.amount_micros,
+        "provider_cost_micros": row.provider_cost_micros,
+        "created_at": row.created_at.isoformat(),
+    } for row in records]}
+
+
+@app.post("/admin/invoices", dependencies=[Depends(require_finance_operator)])
+def create_invoice(payload: InvoiceCreate, db: Session = Depends(get_db)) -> dict[str, object]:
+    account = db.get(BillingAccount, payload.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="account not found")
+    invoice = Invoice(invoice_no="INV-" + uuid.uuid4().hex[:20].upper(), account_id=account.id, amount_micros=payload.amount_micros, tax_identity=payload.tax_identity)
+    db.add(invoice)
+    db.commit()
+    db.refresh(invoice)
+    return {"id": invoice.id, "invoice_no": invoice.invoice_no, "account_id": invoice.account_id, "amount_micros": invoice.amount_micros, "status": invoice.status, "tax_identity": invoice.tax_identity}
+
+
+@app.patch("/admin/invoices/{invoice_id}", dependencies=[Depends(require_finance_operator)])
+def update_invoice(invoice_id: int, payload: InvoiceStatusUpdate, db: Session = Depends(get_db)) -> dict[str, object]:
+    invoice = db.get(Invoice, invoice_id)
+    if not invoice:
+        raise HTTPException(status_code=404, detail="invoice not found")
+    invoice.status = payload.status
+    invoice.file_url = payload.file_url or invoice.file_url
+    if payload.status == "issued":
+        invoice.issued_at = utcnow()
+    db.commit()
+    return {"id": invoice.id, "invoice_no": invoice.invoice_no, "status": invoice.status, "file_url": invoice.file_url}
+
+
+@app.get("/admin/revenue-shares", dependencies=[Depends(require_admin)])
+def list_revenue_shares(period: str | None = Query(None, pattern=r"^\d{4}-\d{2}$"), db: Session = Depends(get_db)) -> dict[str, object]:
+    query = select(RevenueShare).order_by(RevenueShare.id.desc())
+    if period:
+        query = query.where(RevenueShare.period == period)
+    rows = db.scalars(query.limit(500)).all()
+    return {"data": [{"id": row.id, "account_id": row.account_id, "period": row.period, "gross_micros": row.gross_micros, "share_micros": row.share_micros, "status": row.status} for row in rows]}
 
 
 @app.get("/admin/audit-events", dependencies=[Depends(require_admin)])

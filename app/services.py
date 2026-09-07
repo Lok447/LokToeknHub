@@ -11,12 +11,12 @@ from typing import Any
 
 import httpx
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .audit import record_audit_event
 from .config import get_settings
-from .models import AccountBalanceTransaction, ApiKey, BillingAccount, GenerationTask, ModelChannel, ModelConfig, Project, ProviderConnection, UsageRecord, utcnow
+from .models import AccountBalanceTransaction, ApiKey, BillingAccount, GenerationTask, ModelChannel, ModelConfig, Organization, Project, ProviderConnection, UsageRecord, Workspace, utcnow
 from .provider_presets import get_provider_preset, provider_catalogue_matches
 from .provider_secrets import ProviderSecretError, decrypt_provider_secret
 from .schemas import ChatCompletionRequest
@@ -154,9 +154,24 @@ def reserve_balance(
     locked_account = db.scalar(select(BillingAccount).where(BillingAccount.id == billing_account_id).with_for_update())
     if not locked_account or not locked_account.active or locked_account.balance_micros < amount_micros:
         raise ValueError("insufficient balance")
+    if locked_account.budget_micros is not None:
+        account_spent = db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(UsageRecord.account_id == locked_account.id, UsageRecord.status == "success")) or 0
+        if account_spent + amount_micros > locked_account.budget_micros:
+            raise ValueError("account budget exceeded")
+    project = db.get(Project, api_key.project_id) if api_key.project_id else None
+    if project and project.budget_micros is not None:
+        spent = db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(UsageRecord.project_id == project.id, UsageRecord.status == "success")) or 0
+        if spent + amount_micros > project.budget_micros:
+            raise ValueError("project budget exceeded")
+        workspace = db.get(Workspace, project.workspace_id)
+        if workspace and workspace.organization_id:
+            organization = db.get(Organization, workspace.organization_id)
+            if organization and organization.budget_micros is not None:
+                org_spent = db.scalar(select(func.coalesce(func.sum(UsageRecord.amount_micros), 0)).where(UsageRecord.workspace_id == workspace.id, UsageRecord.status == "success")) or 0
+                if org_spent + amount_micros > organization.budget_micros:
+                    raise ValueError("organization budget exceeded")
     locked_account.balance_micros -= amount_micros
     locked_key.spent_micros += amount_micros
-    project = db.get(Project, api_key.project_id) if api_key.project_id else None
     db.add(AccountBalanceTransaction(
         account_id=locked_account.id,
         workspace_id=project.workspace_id if project else None,
@@ -303,6 +318,22 @@ class ProviderCallError(Exception):
         super().__init__(detail)
         self.detail = detail
         self.retryable = retryable
+
+
+def classify_provider_failure(status_code: int | None, error: BaseException | str) -> str:
+    if status_code == 401 or status_code == 403:
+        return "authentication"
+    if status_code == 429:
+        return "rate_limit"
+    if status_code is not None and status_code >= 500:
+        return "upstream_5xx"
+    if status_code in {408, 425}:
+        return "timeout"
+    if isinstance(error, (httpx.TimeoutException, TimeoutError)):
+        return "timeout"
+    if isinstance(error, httpx.HTTPError):
+        return "network"
+    return "protocol"
 
 
 def _is_circuit_open(channel: ModelChannel) -> bool:
@@ -687,7 +718,7 @@ async def call_provider_details(db: Session, model: ModelConfig, request: ChatCo
             async with httpx.AsyncClient(timeout=settings.provider_timeout_seconds) as client:
                 response = await client.post(endpoint, json=payload, headers=headers)
             if response.is_error:
-                route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
+                route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": response.status_code, "failure_class": classify_provider_failure(response.status_code, response.text), "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
                 raise ProviderCallError(
                     f"{channel.name}: HTTP {response.status_code}: {response.text[:500]}",
                     retryable=_retryable_status(response.status_code),
@@ -715,11 +746,11 @@ async def call_provider_details(db: Session, model: ModelConfig, request: ChatCo
                 break
         except httpx.HTTPError as exc:
             last_detail = f"{channel.name}: provider unavailable: {exc}"
-            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "failure_class": classify_provider_failure(None, exc), "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             last_detail = f"{channel.name}: invalid provider response: {exc}"
-            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
+            route_attempts.append({"channel_id": channel.id, "channel": channel.name, "status": None, "failure_class": "protocol", "error": str(exc)[:300], "latency_ms": int((time.perf_counter() - attempt_started) * 1000)})
             mark_channel_failure(db, channel, last_detail)
     raise HTTPException(status_code=502, detail=last_detail)
 
@@ -841,6 +872,7 @@ def save_usage(
     route_attempts: list[dict[str, Any]] | None = None,
     price_version: str | None = None,
     amount_micros: int | None = None,
+    failure_class: str | None = None,
 ) -> UsageRecord:
     tracked_key = db.get(ApiKey, api_key.id)
     if tracked_key:
@@ -866,6 +898,8 @@ def save_usage(
         reasoning_tokens=(usage_details or {}).get("reasoning_tokens", 0),
         price_version=price_version,
         route_attempts_json=json.dumps(route_attempts or [], ensure_ascii=False, separators=(",", ":")),
+        route_decision_json=json.dumps({"selected_channel_id": provider_channel_id, "attempt_count": len(route_attempts or []), "attempts": route_attempts or []}, ensure_ascii=False, separators=(",", ":")),
+        failure_class=failure_class or (next((item.get("failure_class") for item in reversed(route_attempts or []) if item.get("failure_class")), None) if status != "success" else None),
         raw_usage_json=json.dumps(raw_usage or {}, ensure_ascii=False, separators=(",", ":")),
         status=status,
         latency_ms=latency_ms,

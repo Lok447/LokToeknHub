@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     redis_url: str = ""
     rate_limit_key_prefix: str = "loktoken:rate-limit"
     rate_limit_fail_open: bool = False
+    cache_enabled: bool = False
+    cache_ttl_seconds: int = 30
+    max_concurrent_requests: int = 100
+    max_concurrent_per_key: int = 8
     alert_low_balance_micros: int = 1_000_000
     alert_lookback_minutes: int = 15
     alert_failure_rate_percent: float = 20.0
@@ -75,6 +79,10 @@ class Settings(BaseSettings):
     oidc_scopes: str = "openid profile email lok_user_id"
     oidc_account_id_claim: str = "lok_user_id"
     oidc_allow_account_creation: bool = True
+    scim_bearer_token: str = ""
+    scim_enabled: bool = False
+    task_worker_interval_seconds: int = 10
+    task_max_attempts: int = 3
     loksystem_sso_enabled: bool = False
     loksystem_sso_base_url: str = "http://127.0.0.1:25809"
     loksystem_sso_issuer: str = "loksystem://desktop"
@@ -140,6 +148,12 @@ def validate_startup_settings(settings: Settings) -> None:
         errors.append("TOKEN_ALERT_EVALUATION_INTERVAL_SECONDS must be at least 10")
     if settings.provider_bill_cost_tolerance_micros < 0:
         errors.append("TOKEN_PROVIDER_BILL_COST_TOLERANCE_MICROS must be non-negative")
+    if settings.cache_ttl_seconds < 1 or settings.cache_ttl_seconds > 86400:
+        errors.append("TOKEN_CACHE_TTL_SECONDS must be between 1 and 86400")
+    if settings.max_concurrent_requests < 1 or settings.max_concurrent_per_key < 1:
+        errors.append("Concurrency limits must be positive")
+    if settings.task_worker_interval_seconds < 1 or settings.task_max_attempts < 1:
+        errors.append("Task worker settings must be positive")
     if settings.alert_failure_rate_percent <= 0 or settings.alert_failure_rate_percent > 100:
         errors.append("TOKEN_ALERT_FAILURE_RATE_PERCENT must be between 0 and 100")
     if settings.payment_webhook_tolerance_seconds < 30 or settings.payment_webhook_tolerance_seconds > 3600:

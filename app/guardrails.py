@@ -121,6 +121,54 @@ class ConfiguredRateLimiter:
             return False
 
 
+class ConcurrencyLimiter:
+    """Best-effort tenant concurrency guard with Redis atomic counters."""
+
+    def __init__(self) -> None:
+        self._memory: dict[str, int] = defaultdict(int)
+        self._lock = RLock()
+
+    def acquire(self, scope: str, subject: str, limit: int) -> None:
+        if limit <= 0:
+            return
+        settings = get_settings()
+        key = f"{settings.rate_limit_key_prefix}:concurrency:{scope}:{subject}"
+        if settings.redis_url:
+            try:
+                client = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+                count = int(client.incr(key))
+                client.expire(key, max(30, settings.provider_timeout_seconds * 2))
+                if count > limit:
+                    client.decr(key)
+                    raise HTTPException(status_code=429, detail="concurrency limit exceeded", headers={"Retry-After": "1"})
+                return
+            except HTTPException:
+                raise
+            except (RedisError, OSError, ValueError) as exc:
+                if not settings.rate_limit_fail_open:
+                    raise HTTPException(status_code=503, detail="concurrency service unavailable") from exc
+        with self._lock:
+            if self._memory[ key ] >= limit:
+                raise HTTPException(status_code=429, detail="concurrency limit exceeded", headers={"Retry-After": "1"})
+            self._memory[key] += 1
+
+    def release(self, scope: str, subject: str) -> None:
+        settings = get_settings()
+        key = f"{settings.rate_limit_key_prefix}:concurrency:{scope}:{subject}"
+        if settings.redis_url:
+            try:
+                client = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
+                client.decr(key)
+                return
+            except (RedisError, OSError, ValueError):
+                pass
+        with self._lock:
+            self._memory[key] = max(0, self._memory[key] - 1)
+
+
+concurrency_limiter = ConcurrencyLimiter()
+
+
 def raise_rate_limit(retry_after: int) -> None:
     raise HTTPException(status_code=429, detail="rate limit exceeded", headers={"Retry-After": str(retry_after)})
 

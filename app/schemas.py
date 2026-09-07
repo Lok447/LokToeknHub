@@ -13,6 +13,7 @@ class ApiKeyCreate(BaseModel):
     rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
     rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
     allowed_models: list[str] | None = Field(default=None, max_length=200)
+    concurrency_limit: int | None = Field(default=None, ge=1, le=1000)
 
 
 class PortalApiKeyCreate(BaseModel):
@@ -25,6 +26,28 @@ class PortalApiKeyCreate(BaseModel):
     rate_limit_requests: int | None = Field(default=None, ge=1, le=100000)
     rate_limit_window_seconds: int | None = Field(default=None, ge=1, le=86400)
     allowed_models: list[str] | None = Field(default=None, max_length=200)
+    concurrency_limit: int | None = Field(default=None, ge=1, le=1000)
+
+
+class InvoiceCreate(BaseModel):
+    account_id: int = Field(gt=0)
+    amount_micros: int = Field(gt=0)
+    tax_identity: str | None = Field(default=None, max_length=255)
+
+
+class InvoiceStatusUpdate(BaseModel):
+    status: Literal["requested", "issued", "void"]
+    file_url: str | None = Field(default=None, max_length=500)
+
+
+class BudgetUpdate(BaseModel):
+    budget_micros: int | None = Field(default=None, ge=0)
+    concurrency_limit: int | None = Field(default=None, ge=1, le=100000)
+
+
+class ApiKeyPolicyUpdate(BaseModel):
+    allowed_models: list[str] | None = Field(default=None, max_length=200)
+    concurrency_limit: int | None = Field(default=None, ge=1, le=1000)
 
 
 class PortalModelTestRequest(BaseModel):

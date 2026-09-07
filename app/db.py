@@ -35,6 +35,8 @@ def init_db() -> None:
     model_columns = {column["name"] for column in inspector.get_columns("model_configs")}
     provider_connection_columns = {column["name"] for column in inspector.get_columns("provider_connections")}
     with engine.begin() as connection:
+        if "budget_micros" not in account_columns:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN budget_micros BIGINT"))
         if "login_id" not in account_columns:
             connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN login_id VARCHAR(160)"))
         if "password_hash" not in account_columns:
@@ -94,6 +96,10 @@ def init_db() -> None:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN rate_limit_window_seconds INTEGER"))
         if "project_id" not in api_key_columns:
             connection.execute(text("ALTER TABLE api_keys ADD COLUMN project_id INTEGER"))
+        if "allowed_models_json" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN allowed_models_json TEXT"))
+        if "concurrency_limit" not in api_key_columns:
+            connection.execute(text("ALTER TABLE api_keys ADD COLUMN concurrency_limit INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_expires_at ON api_keys (expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_expires_at ON api_keys (trial_expires_at)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_trial_token_hash ON api_keys (trial_token_hash)"))
@@ -200,6 +206,40 @@ def init_db() -> None:
         for column, definition in usage_additions.items():
             if column not in usage_columns:
                 connection.execute(text(f"ALTER TABLE usage_records ADD COLUMN {column} {definition}"))
+        if "route_decision_json" not in usage_columns:
+            connection.execute(text("ALTER TABLE usage_records ADD COLUMN route_decision_json TEXT"))
+        if "failure_class" not in usage_columns:
+            connection.execute(text("ALTER TABLE usage_records ADD COLUMN failure_class VARCHAR(32)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_failure_class ON usage_records (failure_class)"))
+        generation_columns = {column["name"] for column in inspect(engine).get_columns("generation_tasks")}
+        if "attempt_count" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"))
+        if "next_retry_at" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN next_retry_at DATETIME"))
+        if "failure_class" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN failure_class VARCHAR(32)"))
+        if "dead_lettered_at" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN dead_lettered_at DATETIME"))
+        if "worker_claimed_at" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN worker_claimed_at DATETIME"))
+        if "worker_claim_token" not in generation_columns:
+            connection.execute(text("ALTER TABLE generation_tasks ADD COLUMN worker_claim_token VARCHAR(64)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_generation_tasks_next_retry_at ON generation_tasks (next_retry_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_generation_tasks_failure_class ON generation_tasks (failure_class)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_generation_tasks_dead_lettered_at ON generation_tasks (dead_lettered_at)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_generation_tasks_worker_claimed_at ON generation_tasks (worker_claimed_at)"))
+        if "budget_micros" not in {column["name"] for column in inspect(engine).get_columns("organizations")}:
+            connection.execute(text("ALTER TABLE organizations ADD COLUMN budget_micros BIGINT"))
+        if "concurrency_limit" not in {column["name"] for column in inspect(engine).get_columns("organizations")}:
+            connection.execute(text("ALTER TABLE organizations ADD COLUMN concurrency_limit INTEGER"))
+        if "budget_micros" not in {column["name"] for column in inspect(engine).get_columns("projects")}:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN budget_micros BIGINT"))
+        if "concurrency_limit" not in {column["name"] for column in inspect(engine).get_columns("projects")}:
+            connection.execute(text("ALTER TABLE projects ADD COLUMN concurrency_limit INTEGER"))
+        if "budget_micros" not in {column["name"] for column in inspect(engine).get_columns("billing_accounts")}:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN budget_micros BIGINT"))
+        if "concurrency_limit" not in {column["name"] for column in inspect(engine).get_columns("billing_accounts")}:
+            connection.execute(text("ALTER TABLE billing_accounts ADD COLUMN concurrency_limit INTEGER"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_provider_channel_id ON usage_records (provider_channel_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_usage_records_provider_request_id ON usage_records (provider_request_id)"))
         if not settings.mock_mode:

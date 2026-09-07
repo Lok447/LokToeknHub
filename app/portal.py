@@ -831,6 +831,7 @@ def rotate_api_key(api_key_id: int, context: PortalContext = Depends(portal_cont
         rate_limit_requests=api_key.rate_limit_requests,
         rate_limit_window_seconds=api_key.rate_limit_window_seconds,
         allowed_models_json=api_key.allowed_models_json,
+        concurrency_limit=api_key.concurrency_limit,
         rotated_from_key_id=api_key.id,
     )
     api_key.active = False
@@ -981,6 +982,7 @@ def create_api_key(payload: PortalApiKeyCreate, account: BillingAccount = Depend
         rate_limit_requests=payload.rate_limit_requests,
         rate_limit_window_seconds=payload.rate_limit_window_seconds,
         allowed_models_json=json.dumps(payload.allowed_models, ensure_ascii=False) if payload.allowed_models else None,
+        concurrency_limit=payload.concurrency_limit,
     )
     db.add(record)
     db.flush()
