@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import httpx
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -333,6 +333,16 @@ def readyz() -> dict[str, str]:
     try:
         with engine.connect() as connection:
             connection.execute(select(1))
+            required_columns = {
+                "billing_accounts": {"account_source", "access_mode", "budget_micros", "concurrency_limit"},
+                "model_configs": {"task_price_micros", "catalog_metadata_json"},
+                "model_channels": {"last_latency_ms", "last_status_code", "provider_task_cost_micros"},
+                "generation_tasks": {"attempt_count", "dead_lettered_at", "worker_claimed_at"},
+            }
+            inspector = inspect(connection)
+            missing = [f"{table}.{column}" for table, columns in required_columns.items() for column in columns if column not in {item["name"] for item in inspector.get_columns(table)}]
+            if missing:
+                raise RuntimeError("schema incomplete: " + ", ".join(missing))
     except Exception as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
     if not rate_limiter.ready():
