@@ -28,6 +28,17 @@
 - Trace 路由尝试、失败分类字段和 Prometheus 指标
 - 支付 Webhook 签名、重复投递幂等
 
+### DeepSeek 真实供应商 Golden Test
+
+使用临时 DeepSeek 凭据完成了真实供应商验证，凭据未写入代码、配置或报告：
+
+- `GET /v1/models`：200，成功发现 `deepseek-v4-flash`、`deepseek-v4-pro` 等模型。
+- 真实模型健康检查和发布门禁：通过。
+- Chat HTTP、SSE、Responses、Anthropic、Gemini：全部 200。
+- DeepSeek usage 字段被保留并参与网关计量。
+
+故障演练使用伪造的 DeepSeek `/fail/v1` 路径时返回 404。网关将其分类为不可重试上游错误并终止请求，符合当前失败分类策略，但没有覆盖真实 5xx/超时切换。后续需通过供应商 Sandbox、网络策略或故障注入代理注入 429/5xx/超时，再验证备用路由、熔断和重试。
+
 负向场景中停止模拟供应商后，健康检查将模型标记为 `unhealthy`、发布状态为 `blocked`，请求返回 503；恢复供应商后再次通过，证明发布门禁和恢复路径有效。
 
 ## 4. 本轮修复
