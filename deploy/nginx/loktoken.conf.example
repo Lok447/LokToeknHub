@@ -1,0 +1,70 @@
+# LokToken reverse proxy template for an existing LokSystem host.
+# Replace the certificate paths and server_name before enabling it.
+
+# Shared edge protection for all backend instances. The application still
+# enforces per-key limits; this zone protects the public gateway itself.
+limit_req_zone $binary_remote_addr zone=loktoken_api:10m rate=30r/s;
+
+upstream loktoken_backend {
+    server 127.0.0.1:8000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name token.lokai.net.cn;
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name token.lokai.net.cn;
+
+    ssl_certificate     /etc/letsencrypt/live/token.lokai.net.cn/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/token.lokai.net.cn/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    client_max_body_size 1m;
+
+    location / {
+        proxy_pass http://loktoken_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_read_timeout 180s;
+        proxy_send_timeout 30s;
+    }
+
+    # Keep OpenAI-compatible SSE responses flowing without proxy buffering.
+    location /v1/ {
+        limit_req zone=loktoken_api burst=60 nodelay;
+        limit_req_status 429;
+        proxy_pass http://loktoken_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 180s;
+        proxy_send_timeout 30s;
+    }
+
+    location = /metrics {
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+        proxy_pass http://loktoken_backend;
+        proxy_set_header Host $host;
+    }
+}

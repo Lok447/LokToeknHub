@@ -1,0 +1,213 @@
+{
+  "run_id": "2923b4a2fc5a",
+  "started_at": "2026-09-09T15:13:05.297215+00:00",
+  "checks": [
+    {
+      "name": "sole_holder_request_blocked",
+      "passed": true,
+      "detail": {
+        "task_id": "sigkill-drill-2923b4a2fc5a",
+        "account_id": 18,
+        "status": "processing",
+        "attempt_count": 1,
+        "claimed_at": "2026-09-09T15:13:18.980934+00:00",
+        "claim_token": "1ef4453edd7346ca9e329e55640c1d15",
+        "settled_at": null,
+        "balance": 900000,
+        "spent": 100000,
+        "usage": [],
+        "ledger": [
+          {
+            "type": "credit",
+            "amount": 1000000,
+            "reference": "sigkill-drill-2923b4a2fc5a-credit"
+          },
+          {
+            "type": "reservation",
+            "amount": -100000,
+            "reference": "sigkill-drill-2923b4a2fc5a"
+          }
+        ],
+        "lease_seconds": 30,
+        "interval_seconds": 2
+      }
+    },
+    {
+      "name": "holder_killed_exit_137",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "lease_retained_after_crash",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "standby_ready_before_expiry",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "no_takeover_before_expiry",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "standby_takes_over_after_expiry",
+      "passed": true,
+      "detail": {
+        "seconds_after_expiry": 0.6585111618041992
+      }
+    },
+    {
+      "name": "completed_once",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "balanced_single_charge",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "crashed_attempt_persisted",
+      "passed": true,
+      "detail": 2
+    },
+    {
+      "name": "restart_does_not_double_settle",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "cleanup_errors": [],
+  "seed": {
+    "task_id": "sigkill-drill-2923b4a2fc5a",
+    "account_id": 18,
+    "status": "processing",
+    "attempt_count": 0,
+    "claimed_at": null,
+    "claim_token": null,
+    "settled_at": null,
+    "balance": 900000,
+    "spent": 100000,
+    "usage": [],
+    "ledger": [
+      {
+        "type": "credit",
+        "amount": 1000000,
+        "reference": "sigkill-drill-2923b4a2fc5a-credit"
+      },
+      {
+        "type": "reservation",
+        "amount": -100000,
+        "reference": "sigkill-drill-2923b4a2fc5a"
+      }
+    ],
+    "lease_seconds": 30,
+    "interval_seconds": 2
+  },
+  "claimed": {
+    "task_id": "sigkill-drill-2923b4a2fc5a",
+    "account_id": 18,
+    "status": "processing",
+    "attempt_count": 1,
+    "claimed_at": "2026-09-09T15:13:18.980934+00:00",
+    "claim_token": "1ef4453edd7346ca9e329e55640c1d15",
+    "settled_at": null,
+    "balance": 900000,
+    "spent": 100000,
+    "usage": [],
+    "ledger": [
+      {
+        "type": "credit",
+        "amount": 1000000,
+        "reference": "sigkill-drill-2923b4a2fc5a-credit"
+      },
+      {
+        "type": "reservation",
+        "amount": -100000,
+        "reference": "sigkill-drill-2923b4a2fc5a"
+      }
+    ],
+    "lease_seconds": 30,
+    "interval_seconds": 2
+  },
+  "killed_at": "2026-09-09T15:13:21.714941622Z",
+  "events": [
+    {
+      "time": 1788966799.2461245,
+      "client": "172.20.0.3",
+      "path": "/v1/videos/generations/lease-provider-task"
+    },
+    {
+      "time": 1788966829.639445,
+      "client": "172.20.0.3",
+      "path": "/v1/videos/generations/lease-provider-task"
+    }
+  ],
+  "final": {
+    "task_id": "sigkill-drill-2923b4a2fc5a",
+    "account_id": 18,
+    "status": "completed",
+    "attempt_count": 2,
+    "claimed_at": null,
+    "claim_token": null,
+    "settled_at": "2026-09-09T15:13:49.666200+00:00",
+    "balance": 900000,
+    "spent": 100000,
+    "usage": [
+      {
+        "status": "success",
+        "amount": 100000
+      }
+    ],
+    "ledger": [
+      {
+        "type": "credit",
+        "amount": 1000000,
+        "reference": "sigkill-drill-2923b4a2fc5a-credit"
+      },
+      {
+        "type": "reservation",
+        "amount": -100000,
+        "reference": "sigkill-drill-2923b4a2fc5a"
+      }
+    ],
+    "lease_seconds": 30,
+    "interval_seconds": 2
+  },
+  "fixture_cleanup": {
+    "task_id": "sigkill-drill-2923b4a2fc5a",
+    "account_id": 18,
+    "status": "completed",
+    "attempt_count": 2,
+    "claimed_at": null,
+    "claim_token": null,
+    "settled_at": "2026-09-09T15:13:49.666200+00:00",
+    "balance": 900000,
+    "spent": 100000,
+    "usage": [
+      {
+        "status": "success",
+        "amount": 100000
+      }
+    ],
+    "ledger": [
+      {
+        "type": "credit",
+        "amount": 1000000,
+        "reference": "sigkill-drill-2923b4a2fc5a-credit"
+      },
+      {
+        "type": "reservation",
+        "amount": -100000,
+        "reference": "sigkill-drill-2923b4a2fc5a"
+      }
+    ],
+    "lease_seconds": 30,
+    "interval_seconds": 2
+  },
+  "passed": true,
+  "finished_at": "2026-09-09T15:14:05.346917+00:00"
+}

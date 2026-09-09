@@ -5,5 +5,8 @@ __pycache__/
 *.egg-info/
 .env
 .env.docker
+.env.gate
+.env.preprod
+runtime-logs/
 *.db
 *.sqlite
