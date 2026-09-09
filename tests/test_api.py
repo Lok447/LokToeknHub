@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 _TEST_DB_PATH = Path(tempfile.gettempdir()) / f"loktoken-tests-{os.getpid()}-{uuid.uuid4().hex}.db"
 os.environ["TOKEN_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
