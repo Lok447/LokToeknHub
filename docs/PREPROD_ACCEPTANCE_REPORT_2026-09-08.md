@@ -73,9 +73,9 @@
 - 失败任务仅产生一笔 reservation 和一笔 settlement 退款，余额恢复到预扣前；UsageRecord 仅一条。
 - 管理员 replay 成功生成新的 request/trace，新增一笔 reservation；再次失败后新增且仅新增一笔 settlement，账务无重复结算。
 - 两个实例先后执行 Worker 对同一任务的处理，最终 `attempt_count` 仍为单一任务的受控次数，未产生重复 UsageRecord 或重复 settlement；租约字段处理完成后会被清理。
-- 进程级接管演练：`token` 在已写入租约后被停止，等待租约过期后由 `token2` 接管，任务完成第二次尝试并进入死信；唯一 reservation 对应唯一 settlement，UsageRecord 仅一条。
+- 实例停止演练：`token` 容器停止后，任务在租约过期后再次被处理并进入死信；唯一 reservation 对应唯一 settlement，UsageRecord 仅一条。由于本轮未记录持租约实例身份，也未在上游请求阻塞期间执行进程级 `SIGKILL`，因此该结果只能证明“容器停止后任务最终可恢复处理”，不能证明持租约进程崩溃接管已被确定性验证。
 
-本次容器演练已覆盖失败、死信、replay、账务幂等和持租约实例故障接管。
+本次容器演练已覆盖失败、死信、replay、账务幂等和容器停止后的最终恢复处理。进程级租约接管仍是上线阻断项。
 
 - 使用每个实际供应商的 sandbox/官方 SDK 完成模型、流式、超时、429、5xx、计费和退款 Golden Test。
 - 接入真实企业 IdP，验证 OIDC 登录、SCIM 创建/更新/停用、组和权限映射，完成密钥轮换演练。
@@ -83,6 +83,7 @@
 - 部署 OpenTelemetry Collector、指标长期存储、日志脱敏、告警通知和 SLO 看板，并进行故障演练。
 - 进行 Redis/PostgreSQL 高可用、备份恢复、跨可用区和滚动升级演练。
 - 对异步图像/音频/视频任务制造失败任务，验证重试、租约抢占、死信、人工 replay、退款和审计闭环。
+- 增加确定性 Worker 接管演练：记录租约持有实例身份，在上游请求阻塞时对持有实例执行 `SIGKILL`，确认租约到期前无重复处理、到期后仅一个实例接管，并核对最终结算与 UsageRecord 幂等性。
 - 使用正式域名、TLS、WAF、密钥管理系统和生产级安全扫描结果替换本地 UAT 配置。
 
 ## 6. 发布门槛
