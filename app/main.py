@@ -124,6 +124,9 @@ def run_generation_task_worker() -> int:
                 continue
             try:
                 task.attempt_count += 1
+                # Persist the attempt before making the upstream call so a
+                # process crash cannot make a takeover lose retry accounting.
+                db.commit()
                 detail = asyncio.run(refresh_provider_task(db, task, model))
                 task.status = detail.status
                 task.provider_task_id = detail.provider_task_id or task.provider_task_id

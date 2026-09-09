@@ -41,6 +41,45 @@ def teardown_module() -> None:
         (_TEST_DB_PATH.parent / f"{_TEST_DB_PATH.name}{suffix}").unlink(missing_ok=True)
 
 
+def test_worker_persists_attempt_before_provider_call(monkeypatch) -> None:
+    import app.main as main_module
+    from app.models import BillingAccount, GenerationTask
+
+    class ProcessCrash(BaseException):
+        pass
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="crash-drill", name="Crash Drill")
+        model = ModelConfig(public_name="crash-model", upstream_model="crash-model", provider_base_url="http://fixture.invalid/v1")
+        db.add_all([account, model])
+        db.flush()
+        key = ApiKey(name="crash-key", account_id=account.id, key_prefix="unusable", key_hash="a" * 64)
+        db.add(key)
+        db.flush()
+        task = GenerationTask(task_id="crash-task", request_id="crash-request", trace_id="crash-trace",
+                              account_id=account.id, api_key_id=key.id, model_config_id=model.id,
+                              task_type="video_generations", status="processing")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    async def crash_at_provider(_db, _task, _model):
+        with SessionLocal() as observer:
+            persisted = observer.get(GenerationTask, task_id)
+            assert persisted.attempt_count == 1
+            assert persisted.worker_claim_token
+        raise ProcessCrash()
+
+    monkeypatch.setattr(main_module, "refresh_provider_task", crash_at_provider)
+    with pytest.raises(ProcessCrash):
+        main_module.run_generation_task_worker()
+    with SessionLocal() as db:
+        persisted = db.get(GenerationTask, task_id)
+        assert persisted.attempt_count == 1
+        assert persisted.status == "processing"
+        assert persisted.worker_claim_token
+
+
 @pytest.mark.asyncio
 async def test_key_rotation_preserves_budget_and_revocation_is_permanent() -> None:
     transport = httpx.ASGITransport(app=app)

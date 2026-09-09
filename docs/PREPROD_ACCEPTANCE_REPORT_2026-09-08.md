@@ -75,7 +75,20 @@
 - 两个实例先后执行 Worker 对同一任务的处理，最终 `attempt_count` 仍为单一任务的受控次数，未产生重复 UsageRecord 或重复 settlement；租约字段处理完成后会被清理。
 - 实例停止演练：`token` 容器停止后，任务在租约过期后再次被处理并进入死信；唯一 reservation 对应唯一 settlement，UsageRecord 仅一条。由于本轮未记录持租约实例身份，也未在上游请求阻塞期间执行进程级 `SIGKILL`，因此该结果只能证明“容器停止后任务最终可恢复处理”，不能证明持租约进程崩溃接管已被确定性验证。
 
-本次容器演练已覆盖失败、死信、replay、账务幂等和容器停止后的最终恢复处理。进程级租约接管仍是上线阻断项。
+本次容器演练已覆盖失败、死信、replay、账务幂等和容器停止后的最终恢复处理。
+
+### 确定性 SIGKILL 租约接管演练（2026-09-09）
+
+使用内部 HTTP fixture 让唯一 Worker 的上游轮询保持阻塞，确认其已写入 `worker_claim_token` 后执行 `SIGKILL`（退出码 137），再启动备用实例。运行证据见 `runtime-logs/worker-sigkill-2923b4a2fc5a.json`，全部 10 项检查通过：
+
+- 租约持有实例发起唯一第一请求，租约字段已持久化。
+- 进程被强制终止后，租约有效期 30 秒内没有重复请求。
+- 租约到期后 0.66 秒由备用实例发起第二次请求并完成任务。
+- `attempt_count=2`，崩溃前的尝试次数被保留。
+- 最终仅一条成功 UsageRecord、单笔 reservation，余额和 API Key 计费一致。
+- 原实例恢复后没有重复请求或重复结算。
+
+该演练发现并修复了 Worker 在上游调用前未提交 `attempt_count` 的问题；新增回归测试 `test_worker_persists_attempt_before_provider_call`。
 
 - 使用每个实际供应商的 sandbox/官方 SDK 完成模型、流式、超时、429、5xx、计费和退款 Golden Test。
 - 接入真实企业 IdP，验证 OIDC 登录、SCIM 创建/更新/停用、组和权限映射，完成密钥轮换演练。
