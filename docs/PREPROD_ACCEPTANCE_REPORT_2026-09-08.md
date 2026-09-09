@@ -90,6 +90,14 @@
 
 该演练发现并修复了 Worker 在上游调用前未提交 `attempt_count` 的问题；新增回归测试 `test_worker_persists_attempt_before_provider_call`。
 
+### 结算原子性修复（2026-09-10）
+
+- 异步任务的余额结算、`settled_at` 和 UsageRecord 现在由同一个数据库事务提交。
+- `settle_balance`、`save_usage` 支持延迟提交，任务结算只在全部写入成功后执行一次 `commit`。
+- UsageRecord 写入失败时，余额流水和任务结算标记全部回滚，不会留下半笔账务。
+- 新增 `test_generation_settlement_rolls_back_as_one_transaction`，专项测试与 Worker fencing 测试共 `3 passed`。
+- 同时标准化 SQLite 无时区时间，避免测试环境与 PostgreSQL 时间比较行为不一致。
+
 - 使用每个实际供应商的 sandbox/官方 SDK 完成模型、流式、超时、429、5xx、计费和退款 Golden Test。
 - 接入真实企业 IdP，验证 OIDC 登录、SCIM 创建/更新/停用、组和权限映射，完成密钥轮换演练。
 - 接入真实支付商户和电子发票服务，验证签名、公钥轮换、退款、对账、发票开具和重试。
