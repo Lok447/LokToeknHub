@@ -43,7 +43,7 @@ def teardown_module() -> None:
 
 def test_worker_persists_attempt_before_provider_call(monkeypatch) -> None:
     import app.main as main_module
-    from app.models import BillingAccount, GenerationTask
+    from app.models import BillingAccount, GenerationTask, utcnow
 
     class ProcessCrash(BaseException):
         pass
@@ -78,6 +78,35 @@ def test_worker_persists_attempt_before_provider_call(monkeypatch) -> None:
         assert persisted.attempt_count == 1
         assert persisted.status == "processing"
         assert persisted.worker_claim_token
+
+
+def test_worker_claim_fencing_rejects_stale_token() -> None:
+    import app.main as main_module
+    from datetime import timedelta
+    from app.models import BillingAccount, GenerationTask, utcnow
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="fencing-drill", name="Fencing Drill")
+        model = ModelConfig(public_name="fencing-model", upstream_model="fencing-model", provider_base_url="http://fixture.invalid/v1")
+        db.add_all([account, model])
+        db.flush()
+        key = ApiKey(name="fencing-key", account_id=account.id, key_prefix="unusable", key_hash="b" * 64)
+        db.add(key)
+        db.flush()
+        task = GenerationTask(task_id="fencing-task", request_id="fencing-request", trace_id="fencing-trace",
+                              account_id=account.id, api_key_id=key.id, model_config_id=model.id,
+                              task_type="video_generations", status="processing", worker_claimed_at=utcnow(),
+                              worker_claim_token="new-token")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+        assert not main_module._worker_claim_is_current(db, task_id, "old-token")
+        assert not main_module._release_worker_claim(db, task_id, "old-token")
+        current = db.get(GenerationTask, task_id)
+        assert current.worker_claim_token == "new-token"
+        current.worker_claimed_at = utcnow() - timedelta(seconds=31)
+        db.commit()
+        assert not main_module._worker_claim_is_current(db, task_id, "new-token")
 
 
 @pytest.mark.asyncio

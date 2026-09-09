@@ -98,6 +98,28 @@ async def generation_task_worker_loop() -> None:
         await asyncio.sleep(get_settings().task_worker_interval_seconds)
 
 
+def _worker_claim_is_current(db: Session, task_id: int, claim_token: str) -> bool:
+    """Fence a worker after an upstream call before it mutates task state."""
+    task = db.scalar(select(GenerationTask).where(
+        GenerationTask.id == task_id,
+        GenerationTask.worker_claim_token == claim_token,
+        GenerationTask.status == "processing",
+    ).with_for_update())
+    if not task or not task.worker_claimed_at:
+        return False
+    lease_seconds = max(30, get_settings().task_worker_interval_seconds * 3)
+    return task.worker_claimed_at >= utcnow() - timedelta(seconds=lease_seconds)
+
+
+def _release_worker_claim(db: Session, task_id: int, claim_token: str) -> bool:
+    released = db.query(GenerationTask).filter(
+        GenerationTask.id == task_id,
+        GenerationTask.worker_claim_token == claim_token,
+    ).update({"worker_claimed_at": None, "worker_claim_token": None}, synchronize_session=False)
+    db.commit()
+    return released == 1
+
+
 def run_generation_task_worker() -> int:
     with SessionLocal() as db:
         now = utcnow()
@@ -118,9 +140,7 @@ def run_generation_task_worker() -> int:
             account = db.get(BillingAccount, task.account_id)
             key = db.get(ApiKey, task.api_key_id)
             if not model or not account or not key:
-                task.worker_claimed_at = None
-                task.worker_claim_token = None
-                db.commit()
+                _release_worker_claim(db, task.id, claim_token)
                 continue
             try:
                 task.attempt_count += 1
@@ -128,6 +148,10 @@ def run_generation_task_worker() -> int:
                 # process crash cannot make a takeover lose retry accounting.
                 db.commit()
                 detail = asyncio.run(refresh_provider_task(db, task, model))
+                if not _worker_claim_is_current(db, task.id, claim_token):
+                    db.rollback()
+                    continue
+                db.refresh(task)
                 task.status = detail.status
                 task.provider_task_id = detail.provider_task_id or task.provider_task_id
                 task.result_json = json.dumps(detail.result, ensure_ascii=False)
@@ -135,26 +159,26 @@ def run_generation_task_worker() -> int:
                 if task.status in {"completed", "failed"}:
                     task.error_message = None if task.status == "completed" else "provider task failed"
                     task.failure_class = None if task.status == "completed" else "provider_task_failed"
-                    _settle_generation_task(db, task, account, key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros)
+                    _settle_generation_task(db, task, account, key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros, claim_token=claim_token)
                 db.commit()
                 processed += 1
             except Exception as exc:
+                if not _worker_claim_is_current(db, task.id, claim_token):
+                    db.rollback()
+                    continue
+                db.refresh(task)
                 status_code = exc.status_code if isinstance(exc, HTTPException) else None
                 task.failure_class = classify_provider_failure(status_code, exc.detail if isinstance(exc, HTTPException) else exc)
                 task.error_message = str(exc)[:1000]
                 if task.attempt_count >= get_settings().task_max_attempts:
                     task.status = "failed"
                     task.dead_lettered_at = utcnow()
-                    _settle_generation_task(db, task, account, key, model, success=False)
+                    _settle_generation_task(db, task, account, key, model, success=False, claim_token=claim_token)
                 else:
                     task.next_retry_at = utcnow() + timedelta(seconds=2 ** task.attempt_count)
-                task.worker_claimed_at = None
-                task.worker_claim_token = None
-                db.commit()
+                _release_worker_claim(db, task.id, claim_token)
             else:
-                task.worker_claimed_at = None
-                task.worker_claim_token = None
-                db.commit()
+                _release_worker_claim(db, task.id, claim_token)
         return processed
 
 
@@ -3070,10 +3094,19 @@ def _generation_response(task: GenerationTask, model: ModelConfig) -> dict[str, 
     }
 
 
-def _settle_generation_task(db: Session, task: GenerationTask, account: BillingAccount, api_key: ApiKey, model: ModelConfig, *, success: bool, provider_cost_micros: int = 0) -> None:
-    locked_task = db.scalar(select(GenerationTask).where(GenerationTask.id == task.id).with_for_update())
+def _settle_generation_task(db: Session, task: GenerationTask, account: BillingAccount, api_key: ApiKey, model: ModelConfig, *, success: bool, provider_cost_micros: int = 0, claim_token: str | None = None) -> None:
+    query = select(GenerationTask).where(GenerationTask.id == task.id)
+    if claim_token:
+        query = query.where(GenerationTask.worker_claim_token == claim_token)
+    locked_task = db.scalar(query.with_for_update())
     if not locked_task or locked_task.settled_at:
         return
+    if claim_token and not locked_task.worker_claimed_at:
+        return
+    if claim_token:
+        lease_seconds = max(30, get_settings().task_worker_interval_seconds * 3)
+        if locked_task.worker_claimed_at < utcnow() - timedelta(seconds=lease_seconds):
+            return
     actual_amount = locked_task.reserved_micros if success else 0
     settle_balance(db, account, api_key, locked_task.reserved_micros, actual_amount, locked_task.request_id)
     locked_task.settled_at = utcnow()
