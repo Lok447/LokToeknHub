@@ -3108,7 +3108,7 @@ def _settle_generation_task(db: Session, task: GenerationTask, account: BillingA
         if locked_task.worker_claimed_at < utcnow() - timedelta(seconds=lease_seconds):
             return
     actual_amount = locked_task.reserved_micros if success else 0
-    settle_balance(db, account, api_key, locked_task.reserved_micros, actual_amount, locked_task.request_id)
+    settle_balance(db, account, api_key, locked_task.reserved_micros, actual_amount, locked_task.request_id, commit=False)
     locked_task.settled_at = utcnow()
     save_usage(
         db, api_key, model, locked_task.request_id, locked_task.trace_id, 0, 0,
@@ -3119,6 +3119,7 @@ def _settle_generation_task(db: Session, task: GenerationTask, account: BillingA
         raw_usage={"task_id": locked_task.task_id, "task_type": locked_task.task_type, "quantity": locked_task.quantity, "result": parse_model_json(locked_task.result_json)},
         amount_micros=actual_amount,
         failure_class=None if success else (locked_task.failure_class or "task_failed"),
+        commit=False,
     )
     db.commit()
 

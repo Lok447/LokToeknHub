@@ -109,6 +109,43 @@ def test_worker_claim_fencing_rejects_stale_token() -> None:
         assert not main_module._worker_claim_is_current(db, task_id, "new-token")
 
 
+def test_generation_settlement_rolls_back_as_one_transaction(monkeypatch) -> None:
+    import app.main as main_module
+    from app.models import AccountBalanceTransaction, GenerationTask, UsageRecord, utcnow
+    from app.services import reserve_balance
+
+    with SessionLocal() as db:
+        account = BillingAccount(external_user_id="settlement-atomic", name="Settlement Atomic", balance_micros=1000)
+        model = ModelConfig(public_name="settlement-model", upstream_model="settlement-model", provider_base_url="http://fixture.invalid/v1", task_price_micros=1000)
+        db.add_all([account, model])
+        db.flush()
+        key = ApiKey(name="settlement-key", account_id=account.id, key_prefix="unusable", key_hash="c" * 64)
+        db.add(key)
+        db.flush()
+        task = GenerationTask(task_id="settlement-task", request_id="settlement-request", trace_id="settlement-trace",
+                              account_id=account.id, api_key_id=key.id, model_config_id=model.id,
+                              task_type="video_generations", status="processing", reserved_micros=1000,
+                              worker_claim_token="settlement-token", worker_claimed_at=utcnow())
+        db.add(task)
+        db.commit()
+        reserve_balance(db, account, key, 1000, task.request_id)
+        db.refresh(task)
+
+        def fail_usage(*_args, **_kwargs):
+            raise RuntimeError("usage insert failed")
+
+        monkeypatch.setattr(main_module, "save_usage", fail_usage)
+        with pytest.raises(RuntimeError, match="usage insert failed"):
+            main_module._settle_generation_task(db, task, account, key, model, success=False, claim_token="settlement-token")
+        db.rollback()
+        db.refresh(account)
+        db.refresh(task)
+        assert account.balance_micros == 0
+        assert task.settled_at is None
+        assert db.scalar(select(UsageRecord).where(UsageRecord.request_id == task.request_id)) is None
+        assert db.scalar(select(AccountBalanceTransaction).where(AccountBalanceTransaction.reference_id == task.request_id + ":settlement")) is None
+
+
 @pytest.mark.asyncio
 async def test_key_rotation_preserves_budget_and_revocation_is_permanent() -> None:
     transport = httpx.ASGITransport(app=app)

@@ -194,6 +194,8 @@ def settle_balance(
     reserved_micros: int,
     actual_micros: int,
     reference_id: str,
+    *,
+    commit: bool = True,
 ) -> None:
     delta = reserved_micros - actual_micros
     if delta == 0:
@@ -219,7 +221,8 @@ def settle_balance(
         reference_id=settlement_reference,
         description="model request settlement",
     ))
-    db.commit()
+    if commit:
+        db.commit()
     if account.id == locked_account.id:
         account.balance_micros = locked_account.balance_micros
 
@@ -873,6 +876,7 @@ def save_usage(
     price_version: str | None = None,
     amount_micros: int | None = None,
     failure_class: str | None = None,
+    commit: bool = True,
 ) -> UsageRecord:
     existing = db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id))
     if existing:
@@ -909,6 +913,7 @@ def save_usage(
         error_message=error_message,
     )
     db.add(record)
-    db.commit()
-    db.refresh(record)
+    if commit:
+        db.commit()
+        db.refresh(record)
     return record
