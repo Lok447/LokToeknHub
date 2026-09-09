@@ -3082,6 +3082,7 @@ def _settle_generation_task(db: Session, task: GenerationTask, account: BillingA
         provider_request_id=locked_task.provider_task_id,
         raw_usage={"task_id": locked_task.task_id, "task_type": locked_task.task_type, "quantity": locked_task.quantity, "result": parse_model_json(locked_task.result_json)},
         amount_micros=actual_amount,
+        failure_class=None if success else (locked_task.failure_class or "task_failed"),
     )
     db.commit()
 
@@ -3292,8 +3293,6 @@ def replay_generation_task(task_id: str, db: Session = Depends(get_db)) -> dict[
         task.reserved_micros = reservation
         task.settled_at = None
         task.attempt_count = 0
-        task.provider_channel_id = None
-        task.provider_task_id = None
         task.result_json = None
     task.status = "processing"
     task.dead_lettered_at = None

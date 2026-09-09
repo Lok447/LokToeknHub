@@ -66,6 +66,16 @@
 
 代码回归测试结果：`76 passed`。Docker Desktop 未运行，本轮尚未重新执行双实例容器级 Worker 抢占/接管演练，恢复容器后必须补做该项。
 
+### 双实例 Worker 演练结果（2026-09-09）
+
+- 预生产双实例、PostgreSQL 和 Redis 均已启动，迁移头为 `0033_schema_completeness`，两实例 `/readyz` 返回 200。
+- 真实预扣后制造不可达异步任务，Worker 两次尝试后进入 `failed`/死信，`failure_class=upstream_5xx`。
+- 失败任务仅产生一笔 reservation 和一笔 settlement 退款，余额恢复到预扣前；UsageRecord 仅一条。
+- 管理员 replay 成功生成新的 request/trace，新增一笔 reservation；再次失败后新增且仅新增一笔 settlement，账务无重复结算。
+- 两个实例先后执行 Worker 对同一任务的处理，最终 `attempt_count` 仍为单一任务的受控次数，未产生重复 UsageRecord 或重复 settlement；租约字段处理完成后会被清理。
+
+本次容器演练已覆盖失败、死信、replay 和账务幂等。实例在持租约期间被强制停止后的“等待租约过期再接管”仍建议在发布前用编排平台做一次真实进程级演练。
+
 - 使用每个实际供应商的 sandbox/官方 SDK 完成模型、流式、超时、429、5xx、计费和退款 Golden Test。
 - 接入真实企业 IdP，验证 OIDC 登录、SCIM 创建/更新/停用、组和权限映射，完成密钥轮换演练。
 - 接入真实支付商户和电子发票服务，验证签名、公钥轮换、退款、对账、发票开具和重试。
