@@ -64,7 +64,7 @@
 - 任务轮询遇到临时供应商错误时进入指数退避；达到最大尝试次数后才进入死信并退款。
 - 死信 replay 会重新预扣、生成新请求号和 Trace，并重置尝试状态；正常已结算任务仍禁止 replay。
 
-代码回归测试结果：`76 passed`。Docker Desktop 未运行，本轮尚未重新执行双实例容器级 Worker 抢占/接管演练，恢复容器后必须补做该项。
+代码回归测试结果：`76 passed`。
 
 ### 双实例 Worker 演练结果（2026-09-09）
 
@@ -73,8 +73,9 @@
 - 失败任务仅产生一笔 reservation 和一笔 settlement 退款，余额恢复到预扣前；UsageRecord 仅一条。
 - 管理员 replay 成功生成新的 request/trace，新增一笔 reservation；再次失败后新增且仅新增一笔 settlement，账务无重复结算。
 - 两个实例先后执行 Worker 对同一任务的处理，最终 `attempt_count` 仍为单一任务的受控次数，未产生重复 UsageRecord 或重复 settlement；租约字段处理完成后会被清理。
+- 进程级接管演练：`token` 在已写入租约后被停止，等待租约过期后由 `token2` 接管，任务完成第二次尝试并进入死信；唯一 reservation 对应唯一 settlement，UsageRecord 仅一条。
 
-本次容器演练已覆盖失败、死信、replay 和账务幂等。实例在持租约期间被强制停止后的“等待租约过期再接管”仍建议在发布前用编排平台做一次真实进程级演练。
+本次容器演练已覆盖失败、死信、replay、账务幂等和持租约实例故障接管。
 
 - 使用每个实际供应商的 sandbox/官方 SDK 完成模型、流式、超时、429、5xx、计费和退款 Golden Test。
 - 接入真实企业 IdP，验证 OIDC 登录、SCIM 创建/更新/停用、组和权限映射，完成密钥轮换演练。
