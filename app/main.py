@@ -131,11 +131,13 @@ def run_generation_task_worker() -> int:
                 task.updated_at = utcnow()
                 if task.status in {"completed", "failed"}:
                     task.error_message = None if task.status == "completed" else "provider task failed"
+                    task.failure_class = None if task.status == "completed" else "provider_task_failed"
                     _settle_generation_task(db, task, account, key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros)
                 db.commit()
                 processed += 1
             except Exception as exc:
-                task.failure_class = "worker"
+                status_code = exc.status_code if isinstance(exc, HTTPException) else None
+                task.failure_class = classify_provider_failure(status_code, exc.detail if isinstance(exc, HTTPException) else exc)
                 task.error_message = str(exc)[:1000]
                 if task.attempt_count >= get_settings().task_max_attempts:
                     task.status = "failed"
@@ -3066,20 +3068,21 @@ def _generation_response(task: GenerationTask, model: ModelConfig) -> dict[str, 
 
 
 def _settle_generation_task(db: Session, task: GenerationTask, account: BillingAccount, api_key: ApiKey, model: ModelConfig, *, success: bool, provider_cost_micros: int = 0) -> None:
-    if task.settled_at:
+    locked_task = db.scalar(select(GenerationTask).where(GenerationTask.id == task.id).with_for_update())
+    if not locked_task or locked_task.settled_at:
         return
-    actual_amount = task.reserved_micros if success else 0
-    settle_balance(db, account, api_key, task.reserved_micros, actual_amount, task.request_id)
+    actual_amount = locked_task.reserved_micros if success else 0
+    settle_balance(db, account, api_key, locked_task.reserved_micros, actual_amount, locked_task.request_id)
+    locked_task.settled_at = utcnow()
     save_usage(
-        db, api_key, model, task.request_id, task.trace_id, 0, 0,
-        "success" if success else "error", 0, task.error_message,
+        db, api_key, model, locked_task.request_id, locked_task.trace_id, 0, 0,
+        "success" if success else "error", 0, locked_task.error_message,
         provider_cost_micros=provider_cost_micros,
-        provider_channel_id=task.provider_channel_id,
-        provider_request_id=task.provider_task_id,
-        raw_usage={"task_id": task.task_id, "task_type": task.task_type, "quantity": task.quantity, "result": parse_model_json(task.result_json)},
+        provider_channel_id=locked_task.provider_channel_id,
+        provider_request_id=locked_task.provider_task_id,
+        raw_usage={"task_id": locked_task.task_id, "task_type": locked_task.task_type, "quantity": locked_task.quantity, "result": parse_model_json(locked_task.result_json)},
         amount_micros=actual_amount,
     )
-    task.settled_at = utcnow()
     db.commit()
 
 
@@ -3200,7 +3203,7 @@ async def audio_transcriptions(
 @app.get("/v1/generation-tasks/{task_id}")
 async def generation_task(task_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> dict[str, object]:
     api_key = require_api_key(authorization, db)
-    task = db.scalar(select(GenerationTask).where(GenerationTask.task_id == task_id, GenerationTask.api_key_id == api_key.id))
+    task = db.scalar(select(GenerationTask).where(GenerationTask.task_id == task_id, GenerationTask.api_key_id == api_key.id).with_for_update())
     if not task:
         raise HTTPException(status_code=404, detail="generation task not found")
     model = db.get(ModelConfig, task.model_config_id)
@@ -3217,13 +3220,22 @@ async def generation_task(task_id: str, authorization: str | None = Header(defau
             db.commit()
             if task.status in {"completed", "failed"}:
                 task.error_message = None if task.status == "completed" else "provider task failed"
+                task.failure_class = None if task.status == "completed" else "provider_task_failed"
                 _settle_generation_task(db, task, account, api_key, model, success=task.status == "completed", provider_cost_micros=detail.provider_cost_micros)
         except HTTPException as exc:
-            task.status = "failed"
+            task.attempt_count += 1
             task.error_message = str(exc.detail)
+            task.failure_class = classify_provider_failure(exc.status_code, exc.detail)
+            if task.attempt_count >= get_settings().task_max_attempts:
+                task.status = "failed"
+                task.dead_lettered_at = utcnow()
+            else:
+                task.status = "processing"
+                task.next_retry_at = utcnow() + timedelta(seconds=2 ** task.attempt_count)
             task.updated_at = utcnow()
             db.commit()
-            _settle_generation_task(db, task, account, api_key, model, success=False)
+            if task.status == "failed":
+                _settle_generation_task(db, task, account, api_key, model, success=False)
     return _generation_response(task, model)
 
 
@@ -3260,8 +3272,29 @@ def replay_generation_task(task_id: str, db: Session = Depends(get_db)) -> dict[
     task = db.scalar(select(GenerationTask).where(GenerationTask.task_id == task_id).with_for_update())
     if not task:
         raise HTTPException(status_code=404, detail="generation task not found")
-    if task.settled_at:
+    if task.settled_at and not task.dead_lettered_at:
         raise HTTPException(status_code=409, detail="settled task cannot be replayed; create a new task")
+    if task.settled_at:
+        account = db.get(BillingAccount, task.account_id)
+        api_key = db.get(ApiKey, task.api_key_id)
+        model = db.get(ModelConfig, task.model_config_id)
+        if not account or not api_key or not model:
+            raise HTTPException(status_code=404, detail="generation task billing context not found")
+        replay_request_id = "replay-" + uuid.uuid4().hex
+        replay_trace_id = "trace-" + uuid.uuid4().hex
+        reservation = model.task_price_micros * max(1, task.quantity)
+        try:
+            reserve_balance(db, account, api_key, reservation, replay_request_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
+        task.request_id = replay_request_id
+        task.trace_id = replay_trace_id
+        task.reserved_micros = reservation
+        task.settled_at = None
+        task.attempt_count = 0
+        task.provider_channel_id = None
+        task.provider_task_id = None
+        task.result_json = None
     task.status = "processing"
     task.dead_lettered_at = None
     task.next_retry_at = utcnow()

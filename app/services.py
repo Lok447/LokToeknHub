@@ -874,6 +874,9 @@ def save_usage(
     amount_micros: int | None = None,
     failure_class: str | None = None,
 ) -> UsageRecord:
+    existing = db.scalar(select(UsageRecord).where(UsageRecord.request_id == request_id))
+    if existing:
+        return existing
     tracked_key = db.get(ApiKey, api_key.id)
     if tracked_key:
         tracked_key.last_used_at = utcnow()
