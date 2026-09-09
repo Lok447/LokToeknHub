@@ -107,8 +107,11 @@ def _worker_claim_is_current(db: Session, task_id: int, claim_token: str) -> boo
     ).with_for_update())
     if not task or not task.worker_claimed_at:
         return False
+    claimed_at = task.worker_claimed_at
+    if claimed_at.tzinfo is None:
+        claimed_at = claimed_at.replace(tzinfo=utcnow().tzinfo)
     lease_seconds = max(30, get_settings().task_worker_interval_seconds * 3)
-    return task.worker_claimed_at >= utcnow() - timedelta(seconds=lease_seconds)
+    return claimed_at >= utcnow() - timedelta(seconds=lease_seconds)
 
 
 def _release_worker_claim(db: Session, task_id: int, claim_token: str) -> bool:
@@ -3105,7 +3108,10 @@ def _settle_generation_task(db: Session, task: GenerationTask, account: BillingA
         return
     if claim_token:
         lease_seconds = max(30, get_settings().task_worker_interval_seconds * 3)
-        if locked_task.worker_claimed_at < utcnow() - timedelta(seconds=lease_seconds):
+        claimed_at = locked_task.worker_claimed_at
+        if claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=utcnow().tzinfo)
+        if claimed_at < utcnow() - timedelta(seconds=lease_seconds):
             return
     actual_amount = locked_task.reserved_micros if success else 0
     settle_balance(db, account, api_key, locked_task.reserved_micros, actual_amount, locked_task.request_id, commit=False)
