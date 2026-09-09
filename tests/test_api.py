@@ -111,7 +111,7 @@ def test_worker_claim_fencing_rejects_stale_token() -> None:
 
 def test_generation_settlement_rolls_back_as_one_transaction(monkeypatch) -> None:
     import app.main as main_module
-    from app.models import AccountBalanceTransaction, GenerationTask, UsageRecord, utcnow
+    from app.models import AccountBalanceTransaction, BillingAccount, GenerationTask, UsageRecord, utcnow
     from app.services import reserve_balance
 
     with SessionLocal() as db:
